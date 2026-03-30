@@ -257,7 +257,13 @@ describe('Feishu QR routes', () => {
       FEISHU_APP_ID: process.env.FEISHU_APP_ID,
       FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET,
       FEISHU_CONNECTION_MODE: process.env.FEISHU_CONNECTION_MODE,
+      FEISHU_VERIFICATION_TOKEN: process.env.FEISHU_VERIFICATION_TOKEN,
     };
+
+    delete process.env.FEISHU_CONNECTION_MODE;
+    delete process.env.FEISHU_VERIFICATION_TOKEN;
+    delete process.env.FEISHU_APP_ID;
+    delete process.env.FEISHU_APP_SECRET;
 
     const app = Fastify();
     await app.register(connectorHubRoutes, {
@@ -302,6 +308,8 @@ describe('Feishu QR routes', () => {
       else process.env.FEISHU_APP_SECRET = originalEnv.FEISHU_APP_SECRET;
       if (originalEnv.FEISHU_CONNECTION_MODE == null) delete process.env.FEISHU_CONNECTION_MODE;
       else process.env.FEISHU_CONNECTION_MODE = originalEnv.FEISHU_CONNECTION_MODE;
+      if (originalEnv.FEISHU_VERIFICATION_TOKEN == null) delete process.env.FEISHU_VERIFICATION_TOKEN;
+      else process.env.FEISHU_VERIFICATION_TOKEN = originalEnv.FEISHU_VERIFICATION_TOKEN;
       await app.close();
       rmSync(tempRoot, { recursive: true, force: true });
     }
