@@ -102,13 +102,63 @@ describe('HubConnectorConfigTab', () => {
     await flushEffects();
 
     const result = container.querySelector('[data-testid="save-result"]');
-    expect(result?.textContent).toContain('当前无可保存的非敏感变更');
+    expect(result?.textContent).toContain('当前无可保存的配置变更');
     expect(result?.textContent).toContain('无需再次保存');
     expect(result?.className).toContain('bg-green-50');
 
-    const patchCalls = mockApiFetch.mock.calls.filter(
-      ([path, init]) => path === '/api/config/env' && init?.method === 'PATCH',
+    const secretCalls = mockApiFetch.mock.calls.filter(
+      ([path, init]) => path === '/api/config/secrets' && init?.method === 'POST',
     );
-    expect(patchCalls).toHaveLength(0);
+    expect(secretCalls).toHaveLength(0);
+  });
+
+  it('keeps error hint when connector is not configured and no field was edited', async () => {
+    mockApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        platforms: [
+          {
+            id: 'feishu',
+            name: '飞书',
+            nameEn: 'Feishu',
+            configured: false,
+            docsUrl: 'https://open.feishu.cn',
+            steps: [{ text: '配置文档' }, { text: '完成验证' }],
+            fields: [
+              // Simulate partially configured credentials from manual edits/legacy state.
+              { envName: 'FEISHU_APP_ID', label: 'App ID', sensitive: true, currentValue: 'cli_partial' },
+              { envName: 'FEISHU_APP_SECRET', label: 'App Secret', sensitive: true, currentValue: 'sec_partial' },
+              {
+                envName: 'FEISHU_CONNECTION_MODE',
+                label: '连接模式',
+                sensitive: false,
+                currentValue: 'websocket',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    await act(async () => {
+      root.render(React.createElement(HubConnectorConfigTab));
+    });
+    await flushEffects();
+
+    const card = container.querySelector('[data-testid="platform-card-feishu"]');
+    const expandBtn = card?.querySelector('button');
+    await act(async () => {
+      expandBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushEffects();
+
+    const saveBtn = container.querySelector('[data-testid="save-feishu"]') as HTMLButtonElement | null;
+    await act(async () => {
+      saveBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushEffects();
+
+    const result = container.querySelector('[data-testid="save-result"]');
+    expect(result?.textContent).toContain('请填写至少一个配置项');
+    expect(result?.className).toContain('bg-red-50');
   });
 });

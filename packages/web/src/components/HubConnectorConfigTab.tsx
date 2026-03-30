@@ -84,10 +84,7 @@ export function HubConnectorConfigTab() {
       .map((f) => ({ name: f.envName, value: fieldValues[f.envName] || null }));
 
     if (updates.length === 0) {
-      const hasConfiguredValue = platform.fields.some((field) =>
-        Boolean(field.currentValue && field.currentValue.trim()),
-      );
-      if (platform.configured || hasConfiguredValue) {
+      if (platform.configured) {
         setSaveResult({
           type: 'success',
           message: '当前无可保存的配置变更。若已通过扫码完成绑定，凭证已写入配置，无需再次保存。',

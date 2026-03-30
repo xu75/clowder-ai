@@ -20,8 +20,13 @@ export function FeishuQrPanel({ configured, onConfirmed }: FeishuQrPanelProps) {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const expireRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const terminalRef = useRef(false);
+  const requestSeqRef = useRef(0);
 
-  const stopPolling = useCallback(() => {
+  const stopPolling = useCallback((markTerminal = false) => {
+    if (markTerminal) {
+      terminalRef.current = true;
+    }
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
@@ -32,33 +37,37 @@ export function FeishuQrPanel({ configured, onConfirmed }: FeishuQrPanelProps) {
     }
   }, []);
 
-  useEffect(() => () => stopPolling(), [stopPolling]);
+  useEffect(() => () => stopPolling(true), [stopPolling]);
 
   const startPolling = useCallback(
     (payload: string, intervalMs: number, expireMs: number) => {
       stopPolling();
+      terminalRef.current = false;
+      requestSeqRef.current = 0;
 
       const poll = async () => {
+        const requestSeq = ++requestSeqRef.current;
         try {
           const res = await apiFetch(`/api/connector/feishu/qrcode-status?qrPayload=${encodeURIComponent(payload)}`);
           if (!res.ok) return;
           const data = await res.json();
+          if (terminalRef.current || requestSeq !== requestSeqRef.current) return;
 
           if (data.status === 'confirmed') {
-            stopPolling();
+            stopPolling(true);
             setQrState('confirmed');
             setQrUrl(null);
             onConfirmed?.();
           } else if (data.status === 'expired') {
-            stopPolling();
+            stopPolling(true);
             setQrState('expired');
             setQrUrl(null);
           } else if (data.status === 'denied') {
-            stopPolling();
+            stopPolling(true);
             setQrState('denied');
             setQrUrl(null);
           } else if (data.status === 'error') {
-            stopPolling();
+            stopPolling(true);
             setQrState('error');
             setQrUrl(null);
             setErrorMsg(data.error ?? 'Failed to complete QR binding');
@@ -74,7 +83,7 @@ export function FeishuQrPanel({ configured, onConfirmed }: FeishuQrPanelProps) {
       poll();
 
       expireRef.current = setTimeout(() => {
-        stopPolling();
+        stopPolling(true);
         setQrState('expired');
         setQrUrl(null);
       }, expireMs);

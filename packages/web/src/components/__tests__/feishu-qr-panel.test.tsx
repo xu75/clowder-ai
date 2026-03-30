@@ -141,4 +141,55 @@ describe('FeishuQrPanel', () => {
     expect(container.textContent).toContain('Authorization denied');
     expect(container.textContent).toContain('Regenerate QR Code');
   });
+
+  it('ignores stale poll responses after confirmed status', async () => {
+    let resolveFirstPoll: ((value: Response) => void) | null = null;
+    let pollCount = 0;
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/connector/feishu/qrcode') {
+        return jsonResponse({
+          qrUrl: 'https://example.com/feishu-qr.png',
+          qrPayload: 'devcode',
+          interval: 1,
+          expiresIn: 60,
+        });
+      }
+      if (path.startsWith('/api/connector/feishu/qrcode-status')) {
+        pollCount += 1;
+        if (pollCount === 1) {
+          return await new Promise<Response>((resolve) => {
+            resolveFirstPoll = resolve;
+          });
+        }
+        if (pollCount === 2) {
+          return jsonResponse({ status: 'confirmed' });
+        }
+      }
+      return jsonResponse({ status: 'waiting' });
+    });
+
+    await act(async () => {
+      root.render(React.createElement(FeishuQrPanel, { configured: false }));
+    });
+    await flushEffects();
+
+    await act(async () => {
+      queryButton(container, 'Generate QR Code').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushEffects();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1200);
+    });
+    await flushEffects();
+
+    expect(queryTestId(container, 'feishu-connected')).not.toBeNull();
+
+    await act(async () => {
+      resolveFirstPoll?.(jsonResponse({ status: 'waiting' }));
+    });
+    await flushEffects();
+
+    expect(queryTestId(container, 'feishu-connected')).not.toBeNull();
+  });
 });
