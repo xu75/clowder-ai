@@ -84,7 +84,9 @@ export function HubConnectorConfigTab() {
       .map((f) => ({ name: f.envName, value: fieldValues[f.envName] || null }));
 
     if (updates.length === 0) {
-      const hasConfiguredValue = platform.fields.some((field) => Boolean(field.currentValue && field.currentValue.trim()));
+      const hasConfiguredValue = platform.fields.some((field) =>
+        Boolean(field.currentValue && field.currentValue.trim()),
+      );
       if (platform.configured || hasConfiguredValue) {
         setSaveResult({
           type: 'success',
