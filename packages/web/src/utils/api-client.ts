@@ -14,14 +14,22 @@ function getBrowserLocation(): Location | null {
   return candidate ?? null;
 }
 
-function resolveApiUrl(): string {
+/** @internal Exported for testing — prefer using `API_URL` constant. */
+export function resolveApiUrl(): string {
   const location = getBrowserLocation();
 
   // Cloudflare Tunnel: API 走 api.clowder-ai.com，Access cookie 在 .clowder-ai.com 上共享
   if (location?.hostname === 'cafe.clowder-ai.com') {
     return 'https://api.clowder-ai.com';
   }
-  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+  const envUrl = process.env.NEXT_PUBLIC_API_URL;
+  if (envUrl) {
+    // Build-time default (localhost) is wrong when accessed remotely — skip and auto-detect.
+    const isLocalhostDefault = /^https?:\/\/(localhost|127\.0\.0\.1)[:/]/.test(envUrl);
+    const isRemoteAccess =
+      location != null && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
+    if (!isLocalhostDefault || !isRemoteAccess) return envUrl;
+  }
   if (typeof window === 'undefined') return 'http://localhost:3004';
   const protocol = location?.protocol ?? 'http:';
   const hostname = location?.hostname ?? 'localhost';
