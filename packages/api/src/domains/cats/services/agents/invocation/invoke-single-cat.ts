@@ -743,34 +743,48 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
       : ocProviderName && trimmedDefaultModel
         ? `${ocProviderName}/${trimmedDefaultModel}`
         : undefined;
+    // Generate runtime config for opencode when we have a model with provider prefix.
+    // Covers two cases:
+    // 1. api_key provider profile bound → credentials from resolvedAccount
+    // 2. No profile but ANTHROPIC_API_KEY in env → credentials from env vars
+    // This ensures opencode always has the model registered in its config,
+    // bypassing outdated builtin model lists (anomalyco/opencode#21019).
+    const hasApiKeyProfile = resolvedAccount?.authType === 'api_key';
+    const envApiKey = !hasApiKeyProfile ? process.env.ANTHROPIC_API_KEY : undefined;
     if (
       provider === 'opencode' &&
-      resolvedAccount?.authType === 'api_key' &&
       effectiveModel &&
-      effectiveProviderName
+      effectiveProviderName &&
+      (hasApiKeyProfile || envApiKey)
     ) {
       callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE = effectiveModel;
-      // Infer apiType from resolvedAccount.protocol first, then from provider name
-      // parsed from the model string (e.g. "anthropic/claude-opus-4-6" → "anthropic").
-      // This ensures builtin providers like anthropic/google get the correct SDK adapter
-      // even when resolvedAccount.protocol is not explicitly set.
       const apiType: 'openai' | 'anthropic' | 'google' =
-        resolvedAccount.protocol === 'anthropic' || effectiveProviderName === 'anthropic'
+        (hasApiKeyProfile && resolvedAccount!.protocol === 'anthropic') || effectiveProviderName === 'anthropic'
           ? 'anthropic'
-          : resolvedAccount.protocol === 'google' || effectiveProviderName === 'google'
+          : (hasApiKeyProfile && resolvedAccount!.protocol === 'google') || effectiveProviderName === 'google'
             ? 'google'
             : 'openai';
-      const rawModels = resolvedAccount.models?.length ? resolvedAccount.models : [effectiveModel];
+      const rawModels =
+        hasApiKeyProfile && resolvedAccount!.models?.length ? resolvedAccount!.models : [effectiveModel];
+      const hasBaseUrl = hasApiKeyProfile
+        ? Boolean(resolvedAccount!.baseUrl)
+        : Boolean(process.env.ANTHROPIC_BASE_URL);
       openCodeRuntimeConfigPath = writeOpenCodeRuntimeConfig(projectRoot, catId as string, invocationId, {
         providerName: effectiveProviderName,
         models: rawModels,
         defaultModel: effectiveModel,
         apiType,
-        hasBaseUrl: Boolean(resolvedAccount.baseUrl),
+        hasBaseUrl,
       });
       callbackEnv.OPENCODE_CONFIG = openCodeRuntimeConfigPath;
-      if (resolvedAccount.apiKey) callbackEnv[OC_API_KEY_ENV] = resolvedAccount.apiKey;
-      if (resolvedAccount.baseUrl) callbackEnv[OC_BASE_URL_ENV] = resolvedAccount.baseUrl;
+      if (hasApiKeyProfile) {
+        if (resolvedAccount!.apiKey) callbackEnv[OC_API_KEY_ENV] = resolvedAccount!.apiKey;
+        if (resolvedAccount!.baseUrl) callbackEnv[OC_BASE_URL_ENV] = resolvedAccount!.baseUrl;
+      } else {
+        // No provider profile — forward credentials from parent env
+        if (envApiKey) callbackEnv[OC_API_KEY_ENV] = envApiKey;
+        if (process.env.ANTHROPIC_BASE_URL) callbackEnv[OC_BASE_URL_ENV] = process.env.ANTHROPIC_BASE_URL;
+      }
     }
 
     // F-BLOAT: Only inject staticIdentity (systemPrompt) on new sessions for cats

@@ -3384,6 +3384,77 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
   });
 
+  it('F189: no provider profile but ANTHROPIC_API_KEY in env still generates runtime config', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'f189-oc-no-profile-'));
+    const apiDir = join(root, 'packages', 'api');
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+    // No provider profile created — simulates the common case where
+    // opencode cat has no bound profile and relies on env vars.
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opencode')?.config;
+    assert.ok(originalConfig, 'opencode config should exist in registry');
+    const boundCatId = 'opencode-no-profile-test';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      provider: 'opencode',
+      defaultModel: 'anthropic/claude-opus-4-6',
+    });
+
+    const optionsSeen = [];
+    let seenConfigPath;
+    let seenRuntimeConfig;
+    const service = {
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
+        assert.ok(seenConfigPath, 'no-profile env-key path should receive OPENCODE_CONFIG');
+        seenRuntimeConfig = JSON.parse(await readFile(seenConfigPath, 'utf-8'));
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    const previousCwd = process.cwd();
+    const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    try {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-test-key';
+      process.chdir(apiDir);
+      const messages = await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test no-profile env key runtime config',
+          userId: 'user-f189-no-profile',
+          threadId: 'thread-f189-no-profile',
+          isLastCat: true,
+        }),
+      );
+      assert.ok(messages.some((m) => m.type === 'done'));
+    } finally {
+      if (originalAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+      process.chdir(previousCwd);
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+
+    const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
+    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'anthropic/claude-opus-4-6');
+    assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-ant-env-test-key');
+    assert.equal(seenRuntimeConfig?.model, 'anthropic/claude-opus-4-6');
+    assert.equal(seenRuntimeConfig?.provider?.anthropic?.npm, '@ai-sdk/anthropic');
+    assert.ok(seenRuntimeConfig?.provider?.anthropic?.models?.['claude-opus-4-6']);
+    await assert.rejects(readFile(seenConfigPath, 'utf-8'));
+  });
+
   it('F062-fix: skips auto-seal for api_key mode when context health is approx', async () => {
     const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
     const root = await mkdtemp(join(tmpdir(), 'f062-approx-no-seal-'));
