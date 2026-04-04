@@ -43,7 +43,7 @@ import {
 } from '../providers/opencode-config-template.js';
 
 const log = createModuleLogger('invoke');
-const BUILTIN_OPENCODE_PROVIDERS = new Set(['anthropic', 'openai', 'openrouter', 'google']);
+
 
 import type { SessionManager } from '../../session/SessionManager.js';
 import type { ISessionSealer } from '../../session/SessionSealer.js';
@@ -747,14 +747,17 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
       provider === 'opencode' &&
       resolvedAccount?.authType === 'api_key' &&
       effectiveModel &&
-      effectiveProviderName &&
-      !BUILTIN_OPENCODE_PROVIDERS.has(effectiveProviderName)
+      effectiveProviderName
     ) {
       callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE = effectiveModel;
+      // Infer apiType from resolvedAccount.protocol first, then from provider name
+      // parsed from the model string (e.g. "anthropic/claude-opus-4-6" → "anthropic").
+      // This ensures builtin providers like anthropic/google get the correct SDK adapter
+      // even when resolvedAccount.protocol is not explicitly set.
       const apiType: 'openai' | 'anthropic' | 'google' =
-        resolvedAccount.protocol === 'anthropic'
+        resolvedAccount.protocol === 'anthropic' || effectiveProviderName === 'anthropic'
           ? 'anthropic'
-          : resolvedAccount.protocol === 'google'
+          : resolvedAccount.protocol === 'google' || effectiveProviderName === 'google'
             ? 'google'
             : 'openai';
       const rawModels = resolvedAccount.models?.length ? resolvedAccount.models : [effectiveModel];
