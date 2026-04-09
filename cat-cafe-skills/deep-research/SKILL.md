@@ -161,6 +161,17 @@ docs/prompts/YYYY-MM-DD-{topic}-research-prompt.md
 | 忽略三方分歧 | 分歧 = 最有价值的信号，必须分析 |
 | Coder 猫盲信 web 报告 | 必须对照实际 codebase 验证 |
 
+## Step 5 — 持久化产出（2026-04-09 教训）
+
+**调研产出必须 commit，Write ≠ 持久化。**
+
+产出文档写完后，立刻 `git add` + `git commit`。
+- 在 worktree 里：commit 到分支
+- 在 main 上：commit + push（确保其他猫能看到）
+- 多次 Edit 更新：每次重大更新后追加 commit
+
+**验证**：`git log --oneline -1` 显示刚才的 commit。没有 commit SHA = 没有完成。
+
 ## Next Step
 
 → `collaborative-thinking`（讨论调研结论，形成决策）
