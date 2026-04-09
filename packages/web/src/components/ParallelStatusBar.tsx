@@ -6,6 +6,7 @@ import { hexToRgba } from '@/lib/color-utils';
 import type { TokenUsage } from '@/stores/chat-types';
 import type { CatInvocationInfo } from '@/stores/chatStore';
 import { useChatStore } from '@/stores/chatStore';
+import { deriveActiveCats } from './parallel-status-helpers';
 import { formatCost, formatDuration, formatTokenCount } from './status-helpers';
 
 function StatusDot({ status }: { status: string }) {
@@ -61,7 +62,7 @@ function CatStatusCard({
       <span className="text-xs font-medium" style={{ color: cat?.color.primary ?? '#4b5563' }}>
         {cat ? formatCatName(cat) : catId}
       </span>
-      {timeDisplay && <span className="text-xs text-gray-500 ml-0.5">{timeDisplay}</span>}
+      {timeDisplay && <span className="text-xs text-cafe-secondary ml-0.5">{timeDisplay}</span>}
     </div>
   );
 }
@@ -97,17 +98,19 @@ export function aggregateUsage(
 }
 
 export function ParallelStatusBar({ onStop }: { onStop?: () => void }) {
-  const { targetCats, catStatuses, catInvocations } = useChatStore();
+  const { targetCats, activeInvocations, catStatuses, catInvocations } = useChatStore();
 
-  if (targetCats.length === 0) return null;
+  const displayCats = deriveActiveCats(targetCats, activeInvocations);
 
-  const agg = aggregateUsage(catInvocations, targetCats);
+  if (displayCats.length === 0) return null;
+
+  const agg = aggregateUsage(catInvocations, displayCats);
 
   return (
-    <div className="px-5 py-2.5 bg-gradient-to-r from-opus-bg via-codex-bg to-gemini-bg border-b border-gray-200">
+    <div className="px-5 py-2.5 bg-gradient-to-r from-opus-bg via-codex-bg to-gemini-bg border-b border-cafe">
       <div className="flex items-center gap-4">
-        <span className="text-sm font-medium text-gray-600">独立观点采样中</span>
-        {targetCats.map((catId) => (
+        <span className="text-sm font-medium text-cafe-secondary">独立观点采样中</span>
+        {displayCats.map((catId) => (
           <CatStatusCard
             key={catId}
             catId={catId}
@@ -131,15 +134,18 @@ export function ParallelStatusBar({ onStop }: { onStop?: () => void }) {
         )}
       </div>
       {agg && (
-        <div className="flex items-center gap-3 mt-1.5 text-[11px] text-gray-500" data-testid="parallel-usage-summary">
+        <div
+          className="flex items-center gap-3 mt-1.5 text-[11px] text-cafe-secondary"
+          data-testid="parallel-usage-summary"
+        >
           {agg.inputTokens != null && (
             <span>
-              In: <span className="font-medium text-gray-600">{formatTokenCount(agg.inputTokens)}</span>
+              In: <span className="font-medium text-cafe-secondary">{formatTokenCount(agg.inputTokens)}</span>
             </span>
           )}
           {agg.outputTokens != null && (
             <span>
-              Out: <span className="font-medium text-gray-600">{formatTokenCount(agg.outputTokens)}</span>
+              Out: <span className="font-medium text-cafe-secondary">{formatTokenCount(agg.outputTokens)}</span>
             </span>
           )}
           {agg.costUsd != null && (

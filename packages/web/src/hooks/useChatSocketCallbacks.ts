@@ -1,7 +1,7 @@
 import type { GameView } from '@cat-cafe/shared';
 import { useMemo } from 'react';
 import type { SocketCallbacks } from '@/hooks/useSocket';
-import { type ChatMessage as ChatMessageData, useChatStore } from '@/stores/chatStore';
+import { useChatStore } from '@/stores/chatStore';
 import { useGameStore } from '@/stores/gameStore';
 import { type TaskItem, useTaskStore } from '@/stores/taskStore';
 
@@ -32,12 +32,13 @@ export function useChatSocketCallbacks({
 }: ExternalDeps): SocketCallbacks {
   const {
     updateThreadTitle,
+    updateThreadParticipants,
     setLoading,
     setHasActiveInvocation,
     setIntentMode,
     setTargetCats,
-    addMessage,
-    removeMessage,
+    removeThreadMessage,
+    requestStreamCatchUp,
   } = useChatStore();
   const { addTask, updateTask } = useTaskStore();
 
@@ -48,7 +49,10 @@ export function useChatSocketCallbacks({
         handleAgentMessage(msg);
         return true;
       },
-      onThreadUpdated: (data) => updateThreadTitle(data.threadId, data.title),
+      onThreadUpdated: (data) => {
+        if (data.title !== undefined) updateThreadTitle(data.threadId, data.title);
+        if (data.participants !== undefined) updateThreadParticipants(data.threadId, data.participants);
+      },
       onIntentMode: (data) => {
         // Socket layer (useSocket) already applies dual-pointer guard + background routing.
         // This callback only fires for the truly active thread.
@@ -57,38 +61,24 @@ export function useChatSocketCallbacks({
         setIntentMode(data.mode as 'ideate' | 'execute');
         setTargetCats((data as { targetCats?: string[] }).targetCats ?? []);
       },
-      onTaskCreated: (task) => addTask(task as unknown as TaskItem),
-      onTaskUpdated: (task) => updateTask(task as unknown as TaskItem),
-      onThreadSummary: (summary) => {
-        const s = summary as {
-          id: string;
-          threadId: string;
-          topic: string;
-          conclusions: string[];
-          openQuestions: string[];
-          createdBy: string;
-          createdAt: number;
-        };
-        addMessage({
-          id: `summary-${s.id}`,
-          type: 'summary',
-          content: s.topic,
-          timestamp: s.createdAt,
-          summary: {
-            id: s.id,
-            topic: s.topic,
-            conclusions: s.conclusions,
-            openQuestions: s.openQuestions,
-            createdBy: s.createdBy,
-          },
-        } as ChatMessageData);
+      onTaskCreated: (task) => {
+        const t = task as Record<string, unknown>;
+        if (t.threadId !== threadId || t.kind === 'pr_tracking') return;
+        addTask(task as unknown as TaskItem);
       },
+      onTaskUpdated: (task) => {
+        const t = task as Record<string, unknown>;
+        if (t.threadId !== threadId || t.kind === 'pr_tracking') return;
+        updateTask(task as unknown as TaskItem);
+      },
+      // onThreadSummary removed (clowder-ai#343): summaries no longer injected into chat flow.
       onHeartbeat: (data) => {
         if (data.threadId === threadId) resetTimeout();
       },
-      onMessageDeleted: (data: { messageId: string }) => removeMessage(data.messageId),
-      onMessageRestored: () => {
-        /* re-fetching history if needed */
+      onMessageDeleted: (data: { messageId: string; threadId: string }) =>
+        removeThreadMessage(data.threadId, data.messageId),
+      onMessageRestored: (data: { messageId: string; threadId: string }) => {
+        requestStreamCatchUp(data.threadId);
       },
       onThreadBranched: () => {
         /* branch navigation handled by the action initiator */
@@ -111,14 +101,15 @@ export function useChatSocketCallbacks({
     [
       handleAgentMessage,
       updateThreadTitle,
+      updateThreadParticipants,
       setLoading,
       setHasActiveInvocation,
       setIntentMode,
       setTargetCats,
       addTask,
       updateTask,
-      addMessage,
-      removeMessage,
+      removeThreadMessage,
+      requestStreamCatchUp,
       resetTimeout,
       clearDoneTimeout,
       handleAuthRequest,

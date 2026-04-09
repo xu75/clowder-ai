@@ -65,18 +65,58 @@ export function generateOpenCodeConfig(options: OpenCodeConfigOptions): OpenCode
 export const OC_API_KEY_ENV = 'CAT_CAFE_OC_API_KEY';
 export const OC_BASE_URL_ENV = 'CAT_CAFE_OC_BASE_URL';
 
+/**
+ * OpenCode API type determines which AI SDK npm adapter to use.
+ * - 'openai'           → @ai-sdk/openai-compatible  (chat/completions, default for custom providers)
+ * - 'openai-responses'  → @ai-sdk/openai             (responses API, for official OpenAI endpoints)
+ * - 'anthropic'         → @ai-sdk/anthropic
+ * - 'google'            → @ai-sdk/google
+ */
+export type OpenCodeApiType = 'openai' | 'openai-responses' | 'anthropic' | 'google';
+
 const NPM_ADAPTER_FOR_API_TYPE: Record<string, string> = {
   openai: '@ai-sdk/openai-compatible',
+  'openai-responses': '@ai-sdk/openai',
   anthropic: '@ai-sdk/anthropic',
   google: '@ai-sdk/google',
 };
+
+/**
+ * Derive the OpenCode API type from the member's ocProviderName binding.
+ *
+ * Account-level protocol is no longer used — it was removed from the UI and
+ * should not drive runtime routing. The sole authority is ocProviderName,
+ * which the user explicitly sets in the member editor "Provider 名称" field.
+ */
+export function deriveOpenCodeApiType(ocProviderName: string | undefined): OpenCodeApiType {
+  const normalized = ocProviderName?.toLowerCase();
+  if (normalized === 'openai-responses') return 'openai-responses';
+  if (normalized === 'anthropic') return 'anthropic';
+  if (normalized === 'google') return 'google';
+  return 'openai';
+}
 
 export interface OpenCodeRuntimeConfigOptions {
   providerName: string;
   models: readonly string[];
   defaultModel?: string;
-  apiType?: 'openai' | 'anthropic' | 'google';
+  apiType?: OpenCodeApiType;
   hasBaseUrl?: boolean;
+}
+
+export interface OpenCodeRuntimeConfigDebugSummary {
+  model?: string;
+  providerKeys: string[];
+  providerSummary: Record<
+    string,
+    {
+      npm?: string;
+      modelKeys: string[];
+      hasBaseUrl: boolean;
+      apiKeySource: string;
+      baseUrlSource?: string;
+    }
+  >;
 }
 
 export function parseOpenCodeModel(model: string): { providerName: string; modelName: string } | null {
@@ -94,8 +134,25 @@ function stripOwnProviderPrefix(modelName: string, providerName: string): string
   return modelName.startsWith(prefix) ? modelName.slice(prefix.length) : modelName;
 }
 
+/**
+ * OpenCode treats certain provider names as built-in and forces its own SDK
+ * handling (e.g. 'openai' → Responses API via sdk.responses()), ignoring the
+ * npm adapter field.  Remap these names so the config's npm adapter is used.
+ *
+ * Only 'openai' needs remapping: its builtin forces Responses-style routing
+ * that conflicts with Chat Completions proxies. 'anthropic' and 'google'
+ * builtins already match the intended SDK adapter, so no remap needed.
+ */
+const OPENCODE_BUILTIN_NAMES = new Set(['openai']);
+
+export function safeProviderName(name: string): string {
+  return OPENCODE_BUILTIN_NAMES.has(name) ? `${name}-compat` : name;
+}
+
 export function generateOpenCodeRuntimeConfig(options: OpenCodeRuntimeConfigOptions): OpenCodeConfig {
   const { providerName, models, defaultModel, apiType = 'openai', hasBaseUrl = false } = options;
+
+  const configName = safeProviderName(providerName);
 
   const modelsMap: Record<string, { name: string }> = {};
   for (const rawModel of models) {
@@ -103,11 +160,17 @@ export function generateOpenCodeRuntimeConfig(options: OpenCodeRuntimeConfigOpti
     modelsMap[modelName] = { name: modelName };
   }
 
+  // Remap model prefix when provider name was rewritten
+  let configDefaultModel = defaultModel;
+  if (configName !== providerName && defaultModel?.startsWith(`${providerName}/`)) {
+    configDefaultModel = `${configName}/${defaultModel.slice(providerName.length + 1)}`;
+  }
+
   return {
     $schema: 'https://opencode.ai/config.json',
-    ...(defaultModel ? { model: defaultModel } : {}),
+    ...(configDefaultModel ? { model: configDefaultModel } : {}),
     provider: {
-      [providerName]: {
+      [configName]: {
         npm: NPM_ADAPTER_FOR_API_TYPE[apiType] ?? NPM_ADAPTER_FOR_API_TYPE.openai,
         models: modelsMap,
         options: {
@@ -119,21 +182,59 @@ export function generateOpenCodeRuntimeConfig(options: OpenCodeRuntimeConfigOpti
   };
 }
 
+function summarizeEnvPlaceholder(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const match = value.match(/^\{env:([^}]+)\}$/);
+  return match ? `env:${match[1]}` : value;
+}
+
+export function summarizeOpenCodeRuntimeConfigForDebug(
+  options: OpenCodeRuntimeConfigOptions,
+): OpenCodeRuntimeConfigDebugSummary {
+  const config = generateOpenCodeRuntimeConfig(options);
+  const providerEntries = Object.entries(config.provider).sort(([a], [b]) => a.localeCompare(b));
+
+  return {
+    model: config.model,
+    providerKeys: providerEntries.map(([providerName]) => providerName),
+    providerSummary: Object.fromEntries(
+      providerEntries.map(([providerName, providerConfig]) => [
+        providerName,
+        {
+          npm: providerConfig.npm,
+          modelKeys: Object.keys(providerConfig.models ?? {}).sort(),
+          hasBaseUrl: Boolean(providerConfig.options.baseURL),
+          apiKeySource: summarizeEnvPlaceholder(providerConfig.options.apiKey) ?? '(unset)',
+          ...(providerConfig.options.baseURL
+            ? { baseUrlSource: summarizeEnvPlaceholder(providerConfig.options.baseURL) }
+            : {}),
+        },
+      ]),
+    ),
+  };
+}
+
 function sanitizePathSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, '-');
 }
 
+/**
+ * Writes a per-invocation opencode config file.
+ * OpenCode's `OPENCODE_CONFIG` points to a config file path; `OPENCODE_CONFIG_DIR`
+ * is reserved for the `.opencode/`-style config directory structure.
+ * Returns the `opencode.json` file path (set it as `OPENCODE_CONFIG`).
+ */
 export function writeOpenCodeRuntimeConfig(
   projectRoot: string,
   catId: string,
   invocationId: string,
   options: OpenCodeRuntimeConfigOptions,
 ): string {
-  const configDir = join(projectRoot, '.cat-cafe');
-  mkdirSync(configDir, { recursive: true });
   const safeCatId = sanitizePathSegment(catId);
   const safeInvocationId = sanitizePathSegment(invocationId);
-  const configPath = join(configDir, `opencode-runtime-${safeCatId}-${safeInvocationId}.json`);
+  const configDir = join(projectRoot, '.cat-cafe', `oc-config-${safeCatId}-${safeInvocationId}`);
+  mkdirSync(configDir, { recursive: true });
+  const configPath = join(configDir, 'opencode.json');
   const tempPath = `${configPath}.tmp-${process.pid}`;
   const config = generateOpenCodeRuntimeConfig(options);
   writeFileSync(tempPath, JSON.stringify(config, null, 2), 'utf-8');

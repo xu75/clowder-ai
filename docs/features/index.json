@@ -57,7 +57,7 @@
     {
       "id": "F010",
       "name": "手机端猫猫",
-      "status": "in-progress | **Owner**: 三猫",
+      "status": "done | **Owner**: 三猫",
       "file": "F010-mobile-cat.md"
     },
     {
@@ -81,7 +81,7 @@
     {
       "id": "F014",
       "name": "SVG 猫猫状态动画",
-      "status": "in-progress | **Owner**: 三猫",
+      "status": "done (abandoned) | **Owner**: 三猫",
       "file": "F014-svg-cat-animation.md"
     },
     {
@@ -213,7 +213,7 @@
     {
       "id": "F036",
       "name": "Logo 一笔画动画（Stroke Drawing Animation）",
-      "status": "in-progress | **Owner**: 三猫",
+      "status": "done (partial) | **Owner**: 三猫",
       "file": "F036-logo-stroke-animation.md"
     },
     {
@@ -627,7 +627,7 @@
     {
       "id": "F102",
       "name": "记忆组件 Adapter 化重构 — IEvidenceStore + 本地索引",
-      "status": "in-progress | **Owner**: Ragdoll | **Priority**: P1",
+      "status": "done | **Owner**: Ragdoll | **Priority**: P1 | **Completed**: 2026-04-04",
       "file": "F102-memory-adapter-refactor.md"
     },
     {
@@ -663,13 +663,13 @@
     {
       "id": "F108",
       "name": "Side-Dispatch — 同一 Thread 多猫并发执行",
-      "status": "in-progress | **Owner**: Ragdoll | **Priority**: P1",
+      "status": "done | **Owner**: Ragdoll | **Priority**: P1 | **Completed**: 2026-03-28",
       "file": "F108-side-dispatch-concurrent-invocation.md"
     },
     {
       "id": "F109",
       "name": "Message Actions 修复与增强 — 软删除/Branch/编辑/通知",
-      "status": "spec | **Owner**: Ragdoll | **Priority**: P1",
+      "status": "in-progress | **Owner**: Ragdoll | **Priority**: P1",
       "file": "F109-message-actions-overhaul.md"
     },
     {
@@ -819,7 +819,7 @@
     {
       "id": "F134",
       "name": "Feishu Group Chat — 飞书群聊多用户支持",
-      "status": "done | **Completed**: 2026-03-26 | **Owner**: Ragdoll | **Priority**: P1 | **PR**: #697, #699, #700, #705, #745",
+      "status": "done | **Completed**: 2026-03-26 | **Follow-up**: done | **Owner**: Ragdoll | **Priority**: P1 | **PR**: #697, #699, #700, #705, #745, #871",
       "file": "F134-feishu-group-chat.md"
     },
     {
@@ -831,39 +831,105 @@
     {
       "id": "F136",
       "name": "Unified Config Hot Reload — 配置热更新统一管线",
-      "status": "spec | **Owner**: 待定 | **Priority**: P1",
+      "status": "done | **Owner**: @opus | **Priority**: P1 | **Completed**: 2026-03-28",
       "file": "F136-unified-config-hot-reload.md"
     },
     {
       "id": "F137",
       "name": "WeChat Personal Gateway — 微信个人号 iLink Bot 接入",
-      "status": "done | **Completed**: 2026-03-25 | **Owner**: 金渐层 | **Priority**: P1",
+      "status": "done | **Completed**: 2026-03-28 | **Owner**: 金渐层 | **Priority**: P1",
       "file": "F137-weixin-personal-gateway.md"
     },
     {
       "id": "F138",
       "name": "Cat Café Video Studio — AI 视频制作管线",
-      "status": "spec | **Owner**: 金渐层 | **Priority**: P1",
+      "status": "in-progress (Phase 1 基建中：spec 驱动 composition + FA 集成 + showcase 素材录制) | **Owner**: Ragdoll + 金渐层 | **Priority**: P1",
       "file": "F138-video-studio.md"
     },
     {
       "id": "F139",
       "name": "Unified Schedule Abstraction — 统一调度抽象",
-      "status": "in-progress | **Owner**: Ragdoll | **Priority**: P1",
+      "status": "done | **Owner**: Ragdoll | **Priority**: P1 | **Completed**: 2026-03-28",
       "file": "F139-unified-schedule-abstraction.md"
     },
     {
       "id": "F140",
       "name": "GitHub PR Signals — 冲突检测 + Review Feedback 全来源感知",
-      "status": "in-progress | **Owner**: Ragdoll | **Priority**: P1",
+      "status": "done | **Owner**: Ragdoll | **Priority**: P1 | **Completed**: 2026-03-27",
       "file": "F140-github-pr-automation.md"
     },
     {
       "id": "F141",
       "name": "GitHub Repo Inbox — 仓库事件自动发现",
-      "status": "in-progress | **Owner**: Ragdoll | **Priority**: P1",
+      "status": "done | **Owner**: Ragdoll | **Priority**: P1 | **Completed**: 2026-03-27",
       "file": "F141-github-repo-inbox.md"
+    },
+    {
+      "id": "F142",
+      "name": "Connector Slash Commands — 跨平台 /slash 扩展框架",
+      "status": "done | **Owner**: Ragdoll | **Priority**: P2",
+      "file": "F142-connector-slash-commands.md"
+    },
+    {
+      "id": "F143",
+      "name": "Hostable Agent Runtime — 统一宿主抽象",
+      "status": "spec | **Owner**: Ragdoll Opus 4.6 | **Priority**: P1",
+      "file": "F143-hostable-agent-runtime.md"
+    },
+    {
+      "id": "F144",
+      "name": "PPT Forge — AI 演示文稿生成引擎",
+      "status": "in-progress | **Owner**: 三猫 | **Priority**: P2",
+      "file": "F144-ppt-forge.md"
+    },
+    {
+      "id": "F145",
+      "name": "MCP Portable Provisioning — 声明式 MCP 期望态 + 本机解析",
+      "status": "done | **Owner**: Ragdoll + Maine Coon | **Priority**: P1",
+      "file": "F145-mcp-portable-provisioning.md"
+    },
+    {
+      "id": "F146",
+      "name": "MCP Marketplace Control Plane — 一键接入 + 多生态聚合",
+      "status": "spec | **Owner**: Maine Coon + Ragdoll | **Priority**: P1",
+      "file": "F146-mcp-marketplace-control-plane.md"
+    },
+    {
+      "id": "F147",
+      "name": "i18n — Hub 界面中英文切换",
+      "status": "idea | **Owner**: 待定 | **Priority**: 待定",
+      "file": "F147-i18n-hub-locale-switch.md"
+    },
+    {
+      "id": "F148",
+      "name": "Hierarchical Context Transport — 分层上下文传输",
+      "status": "done | **Owner**: Ragdoll + Maine Coon | **Priority**: P1 | **Completed**: 2026-04-02",
+      "file": "F148-hierarchical-context-transport.md"
+    },
+    {
+      "id": "F149",
+      "name": "ACP Runtime Operations — 项目级进程池 + Session Lease",
+      "status": "in-progress | **Owner**: Maine Coon/gpt52 | **Priority**: P1",
+      "file": "F149-acp-runtime-operations.md"
+    },
+    {
+      "id": "F150",
+      "name": "Tool/Skill/MCP Usage Statistics — 工具使用可观测看板",
+      "status": "done | **Owner**: Community (bouillipx) + Ragdoll | **Priority**: P2",
+      "file": "F150-tool-usage-stats.md"
+    },
+    {
+      "id": "F151",
+      "name": "XiaoYi Channel Gateway — 小艺渠道接入",
+      "status": "done | **Owner**: Ragdoll | **Priority**: P1",
+      "file": "F151-xiaoyi-channel-gateway.md"
+    },
+    {
+      "id": "F152",
+      "name": "Expedition Memory — 外部项目记忆冷启动 + 经验回流",
+      "status": "spec | **Owner**: Ragdoll | **Priority**: P1",
+      "file": "F152-expedition-memory.md"
     }
   ],
-  "generated_at": "2026-03-27T01:21:33.952Z"
+  "generated_at": "2026-04-09T04:33:26.998Z"
 }

@@ -51,7 +51,7 @@ export interface ThreadRoutingPolicyV1 {
   scopes?: Partial<Record<ThreadRoutingScope, ThreadRoutingRule>>;
 }
 
-/** F065 Phase B: Rolling thread-level memory across sealed sessions. */
+/** F065 Phase B + F148 VG-3: Rolling thread-level memory across sealed sessions. */
 export interface ThreadMemoryV1 {
   v: 1;
   /** Rolling summary text */
@@ -60,6 +60,12 @@ export interface ThreadMemoryV1 {
   sessionsIncorporated: number;
   /** Unix timestamp of last update */
   updatedAt: number;
+  /** VG-3: Key decisions extracted from sessions (max 8) */
+  decisions?: string[];
+  /** VG-3: Open questions extracted from sessions (max 5) */
+  openQuestions?: string[];
+  /** VG-3: Referenced artifacts — ADRs, Feature IDs (max 8) */
+  artifacts?: string[];
 }
 
 export type MentionRoutingSuppressionReason = 'no_action' | 'cross_paragraph';
@@ -114,6 +120,10 @@ export interface Thread {
   threadMemory?: ThreadMemoryV1;
   /** F079: Active voting state */
   votingState?: VotingStateV1;
+  /** UI bubble display override: thinking block expand/collapse. 'global' = follow config hub default. */
+  bubbleThinking?: 'global' | 'expanded' | 'collapsed';
+  /** UI bubble display override: CLI output block expand/collapse. 'global' = follow config hub default. */
+  bubbleCli?: 'global' | 'expanded' | 'collapsed';
   /** F092: Voice companion mode — when true, cats should prioritize audio rich blocks. */
   voiceMode?: boolean;
   /** F095 Phase D: Soft-delete timestamp. null/undefined = not deleted. */
@@ -195,6 +205,8 @@ export interface IThreadStore {
   /** F032 P1-2 fix: Update participant activity on every message (not just join) */
   updateParticipantActivity(threadId: string, catId: CatId, healthy?: boolean): void | Promise<void>;
   updateTitle(threadId: string, title: string): void | Promise<void>;
+  /** ISSUE-16: backfill projectPath for threads created before the fix */
+  updateProjectPath(threadId: string, projectPath: string): void | Promise<void>;
   updatePin(threadId: string, pinned: boolean): void | Promise<void>;
   updateFavorite(threadId: string, favorited: boolean): void | Promise<void>;
   updateThinkingMode(threadId: string, mode: 'debug' | 'play'): void | Promise<void>;
@@ -224,6 +236,12 @@ export interface IThreadStore {
   /** F079: Get/update voting state */
   getVotingState(threadId: string): VotingStateV1 | null | Promise<VotingStateV1 | null>;
   updateVotingState(threadId: string, state: VotingStateV1 | null): void | Promise<void>;
+  /** Update bubble display overrides (thinking/CLI expand/collapse). */
+  updateBubbleDisplay(
+    threadId: string,
+    field: 'bubbleThinking' | 'bubbleCli',
+    value: 'global' | 'expanded' | 'collapsed',
+  ): void | Promise<void>;
   /** F092: Update voice companion mode. */
   updateVoiceMode(threadId: string, voiceMode: boolean): void | Promise<void>;
   /** F087: Get/update bootcamp state. */
@@ -381,6 +399,11 @@ export class ThreadStore implements IThreadStore {
     if (thread) thread.title = title;
   }
 
+  updateProjectPath(threadId: string, projectPath: string): void {
+    const thread = this.get(threadId);
+    if (thread) thread.projectPath = projectPath;
+  }
+
   updatePin(threadId: string, pinned: boolean): void {
     const thread = this.get(threadId);
     if (thread) {
@@ -495,6 +518,20 @@ export class ThreadStore implements IThreadStore {
       delete thread.votingState;
     } else {
       thread.votingState = state;
+    }
+  }
+
+  updateBubbleDisplay(
+    threadId: string,
+    field: 'bubbleThinking' | 'bubbleCli',
+    value: 'global' | 'expanded' | 'collapsed',
+  ): void {
+    const thread = this.get(threadId);
+    if (!thread) return;
+    if (value === 'global') {
+      delete thread[field];
+    } else {
+      thread[field] = value;
     }
   }
 

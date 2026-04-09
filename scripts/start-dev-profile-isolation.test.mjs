@@ -79,6 +79,28 @@ describe('start-dev strict profile isolation', () => {
     }
   });
 
+  it('production profile has TTL=0 and shares redis-opensource instance', () => {
+    const sandboxDir = createSandbox();
+    try {
+      const result = runSourceOnly({
+        sandboxDir,
+        env: {
+          CAT_CAFE_STRICT_PROFILE_DEFAULTS: '1',
+        },
+        extraArgs: ['--', '--profile=production'],
+      });
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(result.stdout, /PROFILE=production/);
+      assert.match(result.stdout, /ASR=0/);
+      assert.match(result.stdout, /PROXY=0/);
+      assert.match(result.stdout, /TTL=0/);
+      assert.match(result.stdout, /REDIS_PROFILE=opensource/);
+    } finally {
+      rmSync(sandboxDir, { recursive: true, force: true });
+    }
+  });
+
   it('still allows .env overrides after strict sanitize', () => {
     const sandboxDir = createSandbox('ASR_ENABLED=1\nMESSAGE_TTL_SECONDS=123\nREDIS_PROFILE=custom\n');
     try {
@@ -131,10 +153,9 @@ describe('sync-to-opensource public launch transforms', { skip: !existsSync(SYNC
       const pkg = JSON.parse(readFileSync(resolve(exportDir, 'package.json'), 'utf8'));
       const runtimeScript = readFileSync(resolve(exportDir, 'scripts/runtime-worktree.sh'), 'utf8');
 
-      assert.match(pkg.scripts['dev:direct'], /CAT_CAFE_STRICT_PROFILE_DEFAULTS=1/);
-      assert.match(pkg.scripts['start:direct'], /CAT_CAFE_STRICT_PROFILE_DEFAULTS=1/);
-      assert.match(pkg.scripts['dev:direct'], /--profile=opensource/);
-      assert.match(pkg.scripts['start:direct'], /--profile=opensource/);
+      assert.match(pkg.scripts['dev:direct'], /start-entry\.mjs dev:direct --profile=opensource/);
+      assert.match(pkg.scripts['start:direct'], /start-entry\.mjs start:direct --profile=opensource/);
+      assert.equal(existsSync(resolve(exportDir, 'scripts/start-entry.mjs')), true);
       assert.equal(
         pkg.scripts['check:start-profile-isolation'],
         'node --test scripts/start-dev-profile-isolation.test.mjs',

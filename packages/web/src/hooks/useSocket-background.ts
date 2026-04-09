@@ -291,7 +291,22 @@ function markThreadInvocationComplete(msg: BackgroundAgentMessage, options: Hand
   // Cancel fallback: find and remove only this cat's latest active slot to avoid
   // clearing other cats' slots during multi-cat concurrent dispatch.
   if (msg.invocationId) {
-    options.store.removeThreadActiveInvocation(msg.threadId, msg.invocationId);
+    // F869: Multi-cat slot-aware cleanup. Only remove the slot that belongs to
+    // THIS cat (primary key or synthetic key), not another cat's slot.
+    const threadState = options.store.getThreadState(msg.threadId);
+    const primarySlot = threadState.activeInvocations[msg.invocationId];
+    if (primarySlot?.catId === msg.catId) {
+      options.store.removeThreadActiveInvocation(msg.threadId, msg.invocationId);
+    }
+    options.store.removeThreadActiveInvocation(msg.threadId, `${msg.invocationId}-${msg.catId}`);
+    // Clean up hydrated-* placeholder slots from F5/reconnect.
+    // Matches useAgentMessages.ts active-thread behavior: hydrated- slots are
+    // always synthetic placeholders that should yield to real done events.
+    const stateAfter = options.store.getThreadState(msg.threadId);
+    const orphan = findLatestActiveInvocationIdForCat(stateAfter.activeInvocations, msg.catId);
+    if (orphan?.startsWith('hydrated-')) {
+      options.store.removeThreadActiveInvocation(msg.threadId, orphan);
+    }
   } else {
     const threadState = options.store.getThreadState(msg.threadId);
     const catSlot = findLatestActiveInvocationIdForCat(threadState.activeInvocations, msg.catId);

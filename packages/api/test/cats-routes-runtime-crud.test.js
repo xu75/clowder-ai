@@ -264,6 +264,90 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     assert.ok(mentions.includes('runtime-spark'), 'new alias should route immediately');
   });
 
+  it('POST /api/cats persists structured cli.effort for Codex members', async () => {
+    const projectRoot = createProjectRoot();
+    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: {
+        'content-type': 'application/json',
+        'x-cat-cafe-user': 'codex',
+      },
+      body: JSON.stringify({
+        catId: 'runtime-codex-effort',
+        name: '运行时缅因猫',
+        displayName: '运行时缅因猫',
+        avatar: '/avatars/codex.png',
+        color: { primary: '#16a34a', secondary: '#bbf7d0' },
+        mentionPatterns: ['@runtime-codex-effort'],
+        roleDescription: '审查',
+        client: 'openai',
+        accountRef: 'codex',
+        defaultModel: 'gpt-5.4',
+        cli: { command: 'codex', outputFormat: 'json', effort: 'xhigh' },
+      }),
+    });
+    assert.equal(createRes.statusCode, 201);
+    const createdBody = JSON.parse(createRes.body);
+    assert.equal(createdBody.cat.cli?.effort, 'xhigh');
+
+    const listRes = await app.inject({ method: 'GET', url: '/api/cats' });
+    assert.equal(listRes.statusCode, 200);
+    const listBody = JSON.parse(listRes.body);
+    const runtimeCat = listBody.cats.find((cat) => cat.id === 'runtime-codex-effort');
+    assert.ok(runtimeCat, 'runtime-codex-effort should appear in /api/cats');
+    assert.equal(runtimeCat.cli?.effort, 'xhigh');
+
+    const catalogPath = join(projectRoot, '.cat-cafe', 'cat-catalog.json');
+    const persisted = JSON.parse(readFileSync(catalogPath, 'utf-8'));
+    const variant = persisted.breeds.find((breed) => breed.catId === 'runtime-codex-effort')?.variants?.[0];
+    assert.equal(variant?.cli?.effort, 'xhigh');
+  });
+
+  it('POST /api/cats rejects illegal provider/effort combinations', async () => {
+    const projectRoot = createProjectRoot();
+    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: {
+        'content-type': 'application/json',
+        'x-cat-cafe-user': 'codex',
+      },
+      body: JSON.stringify({
+        catId: 'runtime-invalid-effort',
+        name: '非法缅因猫',
+        displayName: '非法缅因猫',
+        avatar: '/avatars/codex.png',
+        color: { primary: '#16a34a', secondary: '#bbf7d0' },
+        mentionPatterns: ['@runtime-invalid-effort'],
+        roleDescription: '审查',
+        client: 'openai',
+        accountRef: 'codex',
+        defaultModel: 'gpt-5.4',
+        cli: { command: 'codex', outputFormat: 'json', effort: 'max' },
+      }),
+    });
+
+    assert.equal(createRes.statusCode, 400);
+    assert.match(JSON.parse(createRes.body).error, /effort/i);
+  });
+
   it('POST /api/cats falls back to the readable active project root when CAT_TEMPLATE_PATH is stale', async () => {
     const projectRoot = createMonorepoProjectRoot();
     const staleRoot = mkdtempSync(join(tmpdir(), 'cats-route-crud-stale-'));
@@ -495,7 +579,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     const projectRoot = createProjectRoot();
     process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
 
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const crossProtocolProfile = await createProviderProfile(projectRoot, {
       displayName: 'OpenAI Key Profile',
       authType: 'api_key',
@@ -536,12 +620,148 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     assert.equal(createRes.statusCode, 201, 'cross-protocol api_key binding should be allowed');
   });
 
-  it('POST /api/cats opencode+api_key always requires ocProviderName', async () => {
+  it('POST /api/cats allows cross-protocol binding after protocol retirement (#329)', async () => {
+    const projectRoot = createProjectRoot();
+    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const openaiAccount = await createProviderProfile(projectRoot, {
+      displayName: 'MiniMax OpenAI',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'sk-test-minimax',
+      models: ['MiniMax-M2.7'],
+    });
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    // Protocol validation removed (#329): protocol is provider-determined,
+    // not an account attribute. Cross-protocol binding is now allowed.
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: {
+        'content-type': 'application/json',
+        'x-cat-cafe-user': 'codex',
+      },
+      body: JSON.stringify({
+        catId: 'runtime-minimax-cross-protocol',
+        name: '跨协议绑定猫',
+        displayName: '跨协议绑定猫',
+        avatar: '/avatars/test.png',
+        color: { primary: '#ff0000', secondary: '#ffcccc' },
+        mentionPatterns: ['@cross-protocol-test'],
+        roleDescription: '测试用',
+        client: 'anthropic',
+        providerProfileId: openaiAccount.id,
+        defaultModel: 'MiniMax-M2.7',
+      }),
+    });
+
+    assert.equal(createRes.statusCode, 201, 'cross-protocol binding should be allowed after protocol retirement');
+  });
+
+  it('POST /api/cats strips trailing slash from model name', async () => {
+    const projectRoot = createProjectRoot();
+    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    await createProviderProfile(projectRoot, {
+      displayName: 'Anthropic Key',
+      authType: 'api_key',
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'sk-test-anthropic',
+      models: ['claude-opus-4-6'],
+    });
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: {
+        'content-type': 'application/json',
+        'x-cat-cafe-user': 'codex',
+      },
+      body: JSON.stringify({
+        catId: 'runtime-trailing-slash',
+        name: '尾斜杠测试猫',
+        displayName: '尾斜杠测试猫',
+        avatar: '/avatars/test.png',
+        color: { primary: '#00ff00', secondary: '#ccffcc' },
+        mentionPatterns: ['@slash-test'],
+        roleDescription: '测试用',
+        client: 'anthropic',
+        providerProfileId: 'anthropic-key',
+        defaultModel: 'claude-opus-4-6/',
+      }),
+    });
+
+    assert.equal(createRes.statusCode, 201, 'should accept model with trailing slash (stripped)');
+    const body = JSON.parse(createRes.body);
+    assert.equal(body.cat.defaultModel, 'claude-opus-4-6', 'trailing slash should be stripped');
+  });
+
+  it('POST /api/cats rejects pure-slash model name', async () => {
+    const projectRoot = createProjectRoot();
+    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    await createProviderProfile(projectRoot, {
+      displayName: 'Anthropic Key',
+      authType: 'api_key',
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'sk-test-anthropic',
+      models: ['claude-opus-4-6'],
+    });
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: {
+        'content-type': 'application/json',
+        'x-cat-cafe-user': 'codex',
+      },
+      body: JSON.stringify({
+        catId: 'runtime-pure-slash',
+        name: '纯斜杠测试猫',
+        displayName: '纯斜杠测试猫',
+        avatar: '/avatars/test.png',
+        color: { primary: '#ff0000', secondary: '#ffcccc' },
+        mentionPatterns: ['@pure-slash'],
+        roleDescription: '测试用',
+        client: 'anthropic',
+        providerProfileId: 'anthropic-key',
+        defaultModel: '/',
+      }),
+    });
+
+    assert.equal(createRes.statusCode, 400, 'pure slash model should be rejected');
+  });
+
+  it('POST /api/cats opencode+api_key: provider/model is primary, ocProviderName is legacy fallback', async () => {
     const projectRoot = createProjectRoot();
     process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
 
     process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = projectRoot;
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const openaiProfile = await createProviderProfile(projectRoot, {
       displayName: 'OpenAI Key Profile',
       authType: 'api_key',
@@ -557,7 +777,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     const app = Fastify();
     await app.register(catsRoutes);
 
-    // Case 1: bare model WITHOUT ocProviderName → 400
+    // Case 1: bare model WITHOUT ocProviderName → 400 (no way to infer provider)
     const bareReject = await app.inject({
       method: 'POST',
       url: '/api/cats',
@@ -578,8 +798,8 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     assert.equal(bareReject.statusCode, 400, 'bare model without ocProviderName → 400');
     assert.match(JSON.parse(bareReject.body).error, /provider/i);
 
-    // Case 2: provider/model format WITHOUT ocProviderName → 400 (Path B eliminated)
-    const slashReject = await app.inject({
+    // Case 2: provider/model format WITHOUT ocProviderName → 201 (provider inferred from model)
+    const slashAccept = await app.inject({
       method: 'POST',
       url: '/api/cats',
       headers: { 'content-type': 'application/json', 'x-cat-cafe-user': 'codex' },
@@ -596,10 +816,9 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
         defaultModel: 'openai/gpt-5.4',
       }),
     });
-    assert.equal(slashReject.statusCode, 400, 'provider/model without ocProviderName → 400');
-    assert.match(JSON.parse(slashReject.body).error, /provider/i);
+    assert.equal(slashAccept.statusCode, 201, 'provider/model without ocProviderName → 201');
 
-    // Case 3: bare model WITH ocProviderName → 201
+    // Case 3: bare model WITH ocProviderName → 201 (legacy fallback path)
     const bareAccept = await app.inject({
       method: 'POST',
       url: '/api/cats',
@@ -619,13 +838,167 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
       }),
     });
     assert.equal(bareAccept.statusCode, 201, 'bare model + ocProviderName → 201');
+
+    // Case 4: trailing-slash model WITHOUT ocProviderName → 400 (not valid provider/model)
+    const trailingSlashReject = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: { 'content-type': 'application/json', 'x-cat-cafe-user': 'codex' },
+      body: JSON.stringify({
+        catId: 'oc-trailing-slash',
+        name: '金渐层D',
+        displayName: '金渐层D',
+        avatar: '/avatars/opencode.png',
+        color: { primary: '#0f172a', secondary: '#e2e8f0' },
+        mentionPatterns: ['@oc-trailing-slash'],
+        roleDescription: '审查',
+        client: 'opencode',
+        providerProfileId: openaiProfile.id,
+        defaultModel: 'minimax/',
+      }),
+    });
+    assert.equal(trailingSlashReject.statusCode, 400, 'trailing-slash model without ocProviderName → 400');
+
+    // Case 5: namespaced model from account's model list WITHOUT ocProviderName → 400
+    // "z-ai/glm-4.7" exists in account models → it's a model namespace, not provider/model
+    const { createProviderProfile: createProfile2 } = await import('./helpers/create-test-account.js');
+    const orProfile = await createProfile2(projectRoot, {
+      displayName: 'OpenRouter Key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://openrouter.ai/api',
+      apiKey: 'sk-or',
+      models: ['z-ai/glm-4.7', 'z-ai/glm-4.6'],
+    });
+    const namespacedReject = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: { 'content-type': 'application/json', 'x-cat-cafe-user': 'codex' },
+      body: JSON.stringify({
+        catId: 'oc-namespaced-no-provider',
+        name: '金渐层E',
+        displayName: '金渐层E',
+        avatar: '/avatars/opencode.png',
+        color: { primary: '#0f172a', secondary: '#e2e8f0' },
+        mentionPatterns: ['@oc-namespaced-no-provider'],
+        roleDescription: '审查',
+        client: 'opencode',
+        providerProfileId: orProfile.id,
+        defaultModel: 'z-ai/glm-4.7',
+      }),
+    });
+    assert.equal(
+      namespacedReject.statusCode,
+      400,
+      'namespaced model from account model list without ocProviderName → 400',
+    );
+
+    // Case 6: canonical provider/model that ALSO appears in account models → 201
+    // minimax account stores both bare "MiniMax-M2.7" and canonical "minimax/MiniMax-M2.7"
+    const { createProviderProfile: createProfile3 } = await import('./helpers/create-test-account.js');
+    const mmProfile = await createProfile3(projectRoot, {
+      displayName: 'MiniMax Key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://api.minimax.io/v1',
+      apiKey: 'sk-mm',
+      models: ['MiniMax-M2.7', 'minimax/MiniMax-M2.7'],
+    });
+    const canonicalAccept = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: { 'content-type': 'application/json', 'x-cat-cafe-user': 'codex' },
+      body: JSON.stringify({
+        catId: 'oc-canonical-in-list',
+        name: '金渐层F',
+        displayName: '金渐层F',
+        avatar: '/avatars/opencode.png',
+        color: { primary: '#0f172a', secondary: '#e2e8f0' },
+        mentionPatterns: ['@oc-canonical-in-list'],
+        roleDescription: '审查',
+        client: 'opencode',
+        providerProfileId: mmProfile.id,
+        defaultModel: 'minimax/MiniMax-M2.7',
+      }),
+    });
+    assert.equal(
+      canonicalAccept.statusCode,
+      201,
+      'canonical provider/model in account list (bare form also present) → 201',
+    );
+
+    // Case 7: canonical-only model list (no bare alias) WITHOUT ocProviderName → 201
+    // Account stores only "openai/gpt-5.4" (no bare "gpt-5.4") — still canonical, not namespaced.
+    // Distinguished from Case 5 by absence of sibling models sharing the same prefix.
+    const { createProviderProfile: createProfile4 } = await import('./helpers/create-test-account.js');
+    const canonicalOnlyProfile = await createProfile4(projectRoot, {
+      displayName: 'Canonical-Only Key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://api.canonical.example',
+      apiKey: 'sk-co',
+      models: ['openai/gpt-5.4'],
+    });
+    const canonicalOnlyAccept = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: { 'content-type': 'application/json', 'x-cat-cafe-user': 'codex' },
+      body: JSON.stringify({
+        catId: 'oc-canonical-only',
+        name: '金渐层G',
+        displayName: '金渐层G',
+        avatar: '/avatars/opencode.png',
+        color: { primary: '#0f172a', secondary: '#e2e8f0' },
+        mentionPatterns: ['@oc-canonical-only'],
+        roleDescription: '审查',
+        client: 'opencode',
+        providerProfileId: canonicalOnlyProfile.id,
+        defaultModel: 'openai/gpt-5.4',
+      }),
+    });
+    assert.equal(canonicalOnlyAccept.statusCode, 201, 'canonical-only model list (no bare alias, singleton) → 201');
+
+    // Case 8: multi-model canonical provider list WITHOUT ocProviderName → 201
+    // Account stores multiple models under the same known provider prefix.
+    // Must NOT be confused with openrouter-style namespace siblings.
+    const { createProviderProfile: createProfile5 } = await import('./helpers/create-test-account.js');
+    const multiCanonicalProfile = await createProfile5(projectRoot, {
+      displayName: 'Multi-Canonical Key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://api.openai.example',
+      apiKey: 'sk-mc',
+      models: ['openai/gpt-5.4', 'openai/gpt-4.1'],
+    });
+    const multiCanonicalAccept = await app.inject({
+      method: 'POST',
+      url: '/api/cats',
+      headers: { 'content-type': 'application/json', 'x-cat-cafe-user': 'codex' },
+      body: JSON.stringify({
+        catId: 'oc-multi-canonical',
+        name: '金渐层H',
+        displayName: '金渐层H',
+        avatar: '/avatars/opencode.png',
+        color: { primary: '#0f172a', secondary: '#e2e8f0' },
+        mentionPatterns: ['@oc-multi-canonical'],
+        roleDescription: '审查',
+        client: 'opencode',
+        providerProfileId: multiCanonicalProfile.id,
+        defaultModel: 'openai/gpt-5.4',
+      }),
+    });
+    assert.equal(
+      multiCanonicalAccept.statusCode,
+      201,
+      'multi-model canonical provider list (known prefix, siblings) → 201',
+    );
   });
 
   it('F189 P1 regression: openrouter + foreign-prefix model preserves full model namespace', async () => {
     // Regression test for: ocProviderName=openrouter + defaultModel=z-ai/glm-4.7
     // The model's first segment "z-ai" is NOT the provider prefix — it is the
     // model's namespace within OpenRouter. stripOwnProviderPrefix must keep it.
-    const { generateOpenCodeRuntimeConfig } = await import(
+    const { deriveOpenCodeApiType, generateOpenCodeRuntimeConfig } = await import(
       '../dist/domains/cats/services/agents/providers/opencode-config-template.js'
     );
 
@@ -689,43 +1062,26 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     );
   });
 
-  it('F189 P1 regression: custom provider without explicit protocol defaults to openai adapter', () => {
-    // Regression: effectiveProtocol defaults to 'anthropic' for all opencode providers,
-    // but apiType in the F189 block should only honor an EXPLICIT account protocol.
-    // Custom providers like maas/deepseek without protocol must get 'openai' adapter.
-    // When explicit protocol IS set, it takes full precedence over ocProviderName heuristic.
+  it('F189 P1 regression: apiType derived solely from ocProviderName (protocol retired)', async () => {
+    // deriveOpenCodeApiType now only uses ocProviderName; account-level protocol
+    // is no longer consulted. This test verifies the new single-source behavior.
+    const { deriveOpenCodeApiType } = await import(
+      '../dist/domains/cats/services/agents/providers/opencode-config-template.js'
+    );
 
-    // Simulate the fixed logic: explicit protocol first, then ocProviderName fallback
     const scenarios = [
-      // No explicit protocol → fall back to ocProviderName
-      { protocol: undefined, ocProviderName: 'maas', expected: 'openai' },
-      { protocol: undefined, ocProviderName: 'deepseek', expected: 'openai' },
-      { protocol: undefined, ocProviderName: 'anthropic', expected: 'anthropic' },
-      { protocol: undefined, ocProviderName: 'google', expected: 'google' },
-      // Explicit protocol → always wins over ocProviderName
-      { protocol: 'anthropic', ocProviderName: 'anthropic', expected: 'anthropic' },
-      { protocol: 'google', ocProviderName: 'custom-gemini', expected: 'google' },
-      { protocol: 'openai', ocProviderName: 'openrouter', expected: 'openai' },
-      // Conflict: explicit protocol MUST override ocProviderName
-      { protocol: 'openai', ocProviderName: 'anthropic', expected: 'openai' },
-      { protocol: 'openai', ocProviderName: 'google', expected: 'openai' },
-      { protocol: 'google', ocProviderName: 'anthropic', expected: 'google' },
+      { ocProviderName: 'maas', expected: 'openai' },
+      { ocProviderName: 'deepseek', expected: 'openai' },
+      { ocProviderName: 'anthropic', expected: 'anthropic' },
+      { ocProviderName: 'google', expected: 'google' },
+      { ocProviderName: 'openrouter', expected: 'openai' },
+      { ocProviderName: 'openai-responses', expected: 'openai-responses' },
+      { ocProviderName: undefined, expected: 'openai' },
     ];
 
-    for (const { protocol, ocProviderName, expected } of scenarios) {
-      const explicitProtocol = protocol;
-      const apiType = explicitProtocol
-        ? explicitProtocol === 'anthropic'
-          ? 'anthropic'
-          : explicitProtocol === 'google'
-            ? 'google'
-            : 'openai'
-        : ocProviderName === 'anthropic'
-          ? 'anthropic'
-          : ocProviderName === 'google'
-            ? 'google'
-            : 'openai';
-      assert.equal(apiType, expected, `protocol=${protocol}, ocProviderName=${ocProviderName} → ${expected}`);
+    for (const { ocProviderName, expected } of scenarios) {
+      const apiType = deriveOpenCodeApiType(ocProviderName);
+      assert.equal(apiType, expected, `ocProviderName=${ocProviderName} → ${expected}`);
     }
   });
 
@@ -737,7 +1093,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
     process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = projectRoot;
 
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const legacyProfile = await createProviderProfile(projectRoot, {
       displayName: 'Legacy MaaS Key',
       authType: 'api_key',
@@ -797,7 +1153,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
 
     // But switching accountRef on a legacy member WITHOUT ocProviderName must be rejected —
     // a new binding requires ocProviderName.
-    const { createProviderProfile: createProfile2 } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile: createProfile2 } = await import('./helpers/create-test-account.js');
     const newProfile = await createProfile2(projectRoot, {
       displayName: 'New DeepSeek Key',
       authType: 'api_key',
@@ -925,7 +1281,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     const projectRoot = createProjectRoot();
     process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
 
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const apiKeyProfile = await createProviderProfile(projectRoot, {
       displayName: 'Gemini Proxy',
       authType: 'api_key',
@@ -972,7 +1328,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
 
     const { bootstrapCatCatalog } = await import('../dist/config/cat-catalog-store.js');
-    const { activateProviderProfile, createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { activateProviderProfile, createProviderProfile } = await import('./helpers/create-test-account.js');
     bootstrapCatCatalog(projectRoot, process.env.CAT_TEMPLATE_PATH);
     const sponsorProfile = await createProviderProfile(projectRoot, {
       displayName: 'Codex Sponsor',

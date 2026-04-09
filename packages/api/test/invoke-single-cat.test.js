@@ -691,6 +691,64 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(active.cliSessionId, 'new-cli', 'should have updated cliSessionId');
   });
 
+  it('ACP session: ephemeralSession=true skips seal on sessionId change', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+    const sealCalls = [];
+    const sessionSealer = {
+      requestSeal: async (args) => {
+        sealCalls.push(args);
+        return { accepted: true, status: 'sealing' };
+      },
+      finalize: async () => {},
+      reconcileStuck: async () => 0,
+      reconcileAllStuck: async () => 0,
+    };
+
+    // Pre-create active session (simulates first invocation)
+    sessionChainStore.create({
+      cliSessionId: 'acp-sess-1',
+      threadId: 'thread-acp-seal',
+      catId: 'gemini',
+      userId: 'user1',
+    });
+    const originalId = sessionChainStore.getActive('gemini', 'thread-acp-seal').id;
+
+    // Second invocation: ACP yields a DIFFERENT sessionId with ephemeralSession=true
+    const service = {
+      async *invoke() {
+        yield {
+          type: 'session_init',
+          catId: 'gemini',
+          sessionId: 'acp-sess-2',
+          ephemeralSession: true,
+          timestamp: Date.now(),
+        };
+        yield { type: 'text', catId: 'gemini', content: 'hello', timestamp: Date.now() };
+        yield { type: 'done', catId: 'gemini', timestamp: Date.now() };
+      },
+    };
+
+    const deps = { ...makeDeps(), sessionChainStore, sessionSealer };
+    await collect(
+      invokeSingleCat(deps, {
+        catId: 'gemini',
+        service,
+        prompt: 'test',
+        userId: 'user1',
+        threadId: 'thread-acp-seal',
+        isLastCat: true,
+      }),
+    );
+
+    // Session should NOT be sealed — just cliSessionId updated
+    assert.equal(sealCalls.length, 0, 'should not have called requestSeal');
+    const active = sessionChainStore.getActive('gemini', 'thread-acp-seal');
+    assert.ok(active, 'original session should still be active');
+    assert.equal(active.id, originalId, 'should be the SAME session record (not a new one)');
+    assert.equal(active.cliSessionId, 'acp-sess-2', 'cliSessionId should be updated to new ACP session');
+  });
+
   it('F24: yields context_health system_info when done has usage with contextWindowSize', async () => {
     const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
     const sessionChainStore = new SessionChainStore();
@@ -1102,6 +1160,22 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const { classifyResumeFailure } = await import('../dist/domains/cats/services/agents/invocation/invoke-helpers.js');
 
     assert.equal(classifyResumeFailure('No conversation found with session ID: stale-123'), 'missing_session');
+    assert.equal(
+      classifyResumeFailure('no rollout found for session 019d3eca-9b77-7860-9e3f-1d4bb1815c5e'),
+      'missing_session',
+    );
+    // End-to-end: formatted error from CodexAgentService with [missing_rollout] tag must classify as missing_session
+    // This is the ACTUAL message invoke-single-cat receives after formatCliExitError propagates reasonCode
+    const taggedMsg = 'Codex CLI: CLI 异常退出 (code: 1, signal: none) [missing_rollout]';
+    assert.equal(classifyResumeFailure(taggedMsg), 'missing_session');
+    // Priority: isMissingClaudeSessionError must win over isTransientCliExitCode1 for tagged messages
+    const { isMissingClaudeSessionError, isTransientCliExitCode1 } = await import(
+      '../dist/domains/cats/services/agents/invocation/invoke-helpers.js'
+    );
+    assert.equal(isMissingClaudeSessionError(taggedMsg), true, 'tagged message must be recognized as missing session');
+    assert.equal(isTransientCliExitCode1(taggedMsg), true, 'tagged message also matches transient pattern');
+    // In invoke-single-cat, isMissingClaudeSessionError is checked FIRST (line 1376) before
+    // isTransientCliExitCode1 (line 1393), so missing_session takes priority → shouldRetryWithoutSession
     assert.equal(classifyResumeFailure('Gemini CLI: CLI 异常退出 (code: 1, signal: none)'), 'cli_exit');
     assert.equal(classifyResumeFailure('Gemini CLI: CLI 异常退出 (code: null, signal: SIGTERM)'), 'cli_exit');
     assert.equal(classifyResumeFailure('authentication failed: login required'), 'auth');
@@ -2587,7 +2661,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   });
 
   it('F127 P1: falls back to CAT_TEMPLATE_PATH project when thread projectPath is absent', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const templateRoot = await mkdtemp(join(tmpdir(), 'f127-active-template-'));
     await writeFile(join(templateRoot, 'cat-template.json'), '{}', 'utf-8');
     const boundProfile = await createProviderProfile(templateRoot, {
@@ -2653,7 +2727,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   });
 
   it('F127 P2: ignores unreadable CAT_TEMPLATE_PATH before switching account roots', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const staleTemplateRoot = await mkdtemp(join(tmpdir(), 'f127-stale-template-'));
     const isolatedRepoRoot = await mkdtemp(join(tmpdir(), 'f127-isolated-repo-'));
     const isolatedApiDir = join(isolatedRepoRoot, 'packages', 'api');
@@ -2717,7 +2791,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('F127 P2: bootstrapped seed cats follow the current bootstrap binding after activation', async () => {
     const { bootstrapCatCatalog, resolveCatCatalogPath } = await import('../dist/config/cat-catalog-store.js');
     const { loadCatConfig, toAllCatConfigs } = await import('../dist/config/cat-config-loader.js');
-    const { activateProviderProfile, createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { activateProviderProfile, createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f127-seed-bootstrap-binding-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
@@ -2793,7 +2867,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   });
 
   it('F127 P1: prefers member-bound openai profile over protocol active profile', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f127-openai-profile-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
@@ -3007,7 +3081,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   });
 
   it('F127: ignores legacy api_key protocol metadata when the member explicitly selected the client', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f127-bound-mismatch-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
@@ -3075,8 +3149,76 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     }
   });
 
+  it('F329: rejects api_key account with no API key before spawning child process', async () => {
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'f329-missing-apikey-'));
+    const apiDir = join(root, 'packages', 'api');
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+    // Create an api_key account WITHOUT providing an actual API key
+    // (env fallback retired in #329 — no isolation needed)
+    const noKeyProfile = await createProviderProfile(root, {
+      provider: 'openai',
+      name: 'no-key-account',
+      mode: 'api_key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://api.example.com',
+      models: ['gpt-4o'],
+    });
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opencode')?.config;
+    assert.ok(originalConfig, 'opencode config should exist in registry');
+    const boundCatId = 'opencode-no-key-test';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      provider: 'opencode',
+      providerProfileId: noKeyProfile.id,
+      defaultModel: 'gpt-4o',
+    });
+
+    let invokeCount = 0;
+    const service = {
+      async *invoke() {
+        invokeCount++;
+        yield { type: 'done', catId: boundCatId, timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(apiDir);
+      const messages = await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test',
+          userId: 'user-f329-no-key',
+          threadId: 'thread-f329-no-key',
+          isLastCat: true,
+        }),
+      );
+      assert.equal(invokeCount, 0, 'service.invoke must NOT be called when API key is missing');
+      const errorMsg = messages.find((m) => m.type === 'error');
+      assert.ok(errorMsg, 'must emit an error message');
+      assert.match(String(errorMsg.error), /no API key set/i, 'error must mention missing API key');
+    } finally {
+      process.chdir(previousCwd);
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('F127: injects OPENROUTER_API_KEY for opencode members bound to openai api_key profiles', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f127-openrouter-key-injection-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
@@ -3139,14 +3281,16 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     }
 
     const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
-    assert.equal(callbackEnv.CAT_CAFE_EFFECTIVE_PROTOCOL, 'openai');
+    assert.equal(callbackEnv.CAT_CAFE_EFFECTIVE_PROTOCOL, undefined);
     assert.equal(callbackEnv.OPENAI_BASE_URL, 'https://openrouter.ai/api/v1');
     assert.equal(callbackEnv.OPENAI_API_KEY, 'sk-openrouter-key');
     assert.equal(callbackEnv.OPENROUTER_API_KEY, 'sk-openrouter-key');
   });
 
-  it('F189: writes invocation-scoped OPENCODE_CONFIG for custom opencode providers and cleans it up', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+  it('F189: unknown canonical provider/model without ocProviderName writes invocation-scoped OPENCODE_CONFIG and cleans it up', async () => {
+    const mod = await import('../dist/domains/cats/services/agents/invocation/invoke-single-cat.js');
+    mod._resetOpenCodeKnownModels(new Set(['anthropic/claude-opus-4-6']));
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f189-opencode-custom-provider-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
@@ -3207,6 +3351,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       assert.ok(messages.some((m) => m.type === 'done'));
     } finally {
       process.chdir(previousCwd);
+      mod._resetOpenCodeKnownModels(null);
       catRegistry.reset();
       for (const [id, config] of Object.entries(registrySnapshot)) {
         catRegistry.register(id, config);
@@ -3215,8 +3360,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     }
 
     const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
-    assert.equal(callbackEnv.CAT_CAFE_EFFECTIVE_PROTOCOL, 'openai');
-    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'maas/glm-5');
+    assert.equal(callbackEnv.CAT_CAFE_EFFECTIVE_PROTOCOL, undefined);
     assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-maas-key');
     assert.equal(callbackEnv.CAT_CAFE_OC_BASE_URL, 'https://maas.example/v1');
     assert.equal(seenRuntimeConfig?.model, 'maas/glm-5');
@@ -3226,7 +3370,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   });
 
   it('F189: bare model + ocProviderName assembles composite model for custom provider routing', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f189-oc-bare-model-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
@@ -3305,9 +3449,92 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
   });
 
-  it('F189: builtin provider (anthropic) also gets runtime config so unknown models are registered', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
-    const root = await mkdtemp(join(tmpdir(), 'f189-oc-builtin-provider-'));
+  it('F189-fix: builtin ocProviderName with custom baseUrl still generates OPENCODE_CONFIG', async () => {
+    // Regression: ocProviderName="anthropic" + baseUrl="https://api.minimax.io/v1"
+    // was skipped by BUILTIN_OPENCODE_PROVIDERS guard, leaving opencode without custom config.
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'f189-builtin-ocprovider-'));
+    const apiDir = join(root, 'packages', 'api');
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+    const customProfile = await createProviderProfile(root, {
+      provider: 'anthropic',
+      name: 'minimax-anthropic-compat',
+      mode: 'api_key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://api.minimax.io/v1',
+      apiKey: 'sk-minimax-key',
+      models: ['MiniMax-M2.7'],
+      setActive: false,
+    });
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opencode')?.config;
+    assert.ok(originalConfig, 'opencode config should exist in registry');
+    const boundCatId = 'opencode-minimax-builtin-oc';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      provider: 'opencode',
+      providerProfileId: customProfile.id,
+      defaultModel: 'MiniMax-M2.7',
+      ocProviderName: 'anthropic',
+    });
+
+    let seenConfigPath;
+    let seenRuntimeConfig;
+    const optionsSeen = [];
+    const service = {
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
+        assert.ok(seenConfigPath, 'builtin ocProviderName + custom baseUrl must still receive OPENCODE_CONFIG');
+        seenRuntimeConfig = JSON.parse(await readFile(seenConfigPath, 'utf-8'));
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(apiDir);
+      const messages = await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test builtin provider with custom baseUrl',
+          userId: 'user-f189-builtin-fix',
+          threadId: 'thread-f189-builtin-fix',
+          isLastCat: true,
+        }),
+      );
+      assert.ok(messages.some((m) => m.type === 'done'));
+    } finally {
+      process.chdir(previousCwd);
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+
+    const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
+    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'anthropic/MiniMax-M2.7');
+    assert.ok(callbackEnv.OPENCODE_CONFIG, 'OPENCODE_CONFIG must be set for custom endpoint');
+    assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-minimax-key');
+    assert.equal(callbackEnv.CAT_CAFE_OC_BASE_URL, 'https://api.minimax.io/v1');
+    assert.equal(seenRuntimeConfig?.model, 'anthropic/MiniMax-M2.7');
+    assert.ok(seenRuntimeConfig?.provider?.anthropic);
+    assert.ok(seenRuntimeConfig?.provider?.anthropic?.models?.['MiniMax-M2.7']);
+    await assert.rejects(readFile(seenConfigPath, 'utf-8'));
+  });
+
+  it('fix(#280): builtin ocProviderName without baseUrl still generates OPENCODE_CONFIG', async () => {
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'fix280-builtin-oc-provider-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
     await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
@@ -3326,24 +3553,25 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const registrySnapshot = catRegistry.getAllConfigs();
     const originalConfig = catRegistry.tryGet('opencode')?.config;
     assert.ok(originalConfig, 'opencode config should exist in registry');
-    const boundCatId = 'opencode-builtin-anthropic-test';
+    const boundCatId = 'opencode-anthropic-builtin-test';
     catRegistry.register(boundCatId, {
       ...originalConfig,
       id: boundCatId,
       mentionPatterns: [`@${boundCatId}`],
       provider: 'opencode',
       providerProfileId: anthropicProfile.id,
-      defaultModel: 'anthropic/claude-opus-4-6',
+      defaultModel: 'claude-opus-4-6',
+      ocProviderName: 'anthropic',
     });
 
-    const optionsSeen = [];
     let seenConfigPath;
     let seenRuntimeConfig;
+    const optionsSeen = [];
     const service = {
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
-        assert.ok(seenConfigPath, 'builtin anthropic provider should also receive OPENCODE_CONFIG');
+        assert.ok(seenConfigPath, 'builtin ocProviderName should still receive OPENCODE_CONFIG');
         seenRuntimeConfig = JSON.parse(await readFile(seenConfigPath, 'utf-8'));
         yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
       },
@@ -3357,9 +3585,9 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         invokeSingleCat(deps, {
           catId: boundCatId,
           service,
-          prompt: 'test builtin provider runtime config',
-          userId: 'user-f189-builtin-provider',
-          threadId: 'thread-f189-builtin-provider',
+          prompt: 'test builtin provider routing',
+          userId: 'user-fix280',
+          threadId: 'thread-fix280',
           isLastCat: true,
         }),
       );
@@ -3377,67 +3605,147 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'anthropic/claude-opus-4-6');
     assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-ant-test-key');
     assert.equal(seenRuntimeConfig?.model, 'anthropic/claude-opus-4-6');
-    // Builtin anthropic provider should use @ai-sdk/anthropic adapter (not openai-compatible)
     assert.equal(seenRuntimeConfig?.provider?.anthropic?.npm, '@ai-sdk/anthropic');
     assert.ok(seenRuntimeConfig?.provider?.anthropic?.models?.['claude-opus-4-6']);
-    // Config file should be cleaned up after invocation
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
   });
 
-  it('F189: no provider profile but ANTHROPIC_API_KEY in env still generates runtime config', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'f189-oc-no-profile-'));
+  it('fix(#280): known legacy model without ocProviderName skips runtime config', async () => {
+    const mod = await import('../dist/domains/cats/services/agents/invocation/invoke-single-cat.js');
+    mod._resetOpenCodeKnownModels(new Set(['anthropic/claude-opus-4-6']));
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'fix280-known-legacy-model-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
     await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
 
-    // No provider profile created — simulates the common case where
-    // opencode cat has no bound profile and relies on env vars.
+    const anthropicProfile = await createProviderProfile(root, {
+      provider: 'anthropic',
+      name: 'claude-api-known',
+      mode: 'api_key',
+      authType: 'api_key',
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'sk-ant-known-key',
+      models: ['claude-opus-4-6'],
+      setActive: false,
+    });
 
     const registrySnapshot = catRegistry.getAllConfigs();
     const originalConfig = catRegistry.tryGet('opencode')?.config;
     assert.ok(originalConfig, 'opencode config should exist in registry');
-    const boundCatId = 'opencode-no-profile-test';
+    const boundCatId = 'opencode-known-legacy-model-test';
     catRegistry.register(boundCatId, {
       ...originalConfig,
       id: boundCatId,
       mentionPatterns: [`@${boundCatId}`],
       provider: 'opencode',
+      providerProfileId: anthropicProfile.id,
       defaultModel: 'anthropic/claude-opus-4-6',
     });
 
     const optionsSeen = [];
-    let seenConfigPath;
-    let seenRuntimeConfig;
     const service = {
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
-        seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
-        assert.ok(seenConfigPath, 'no-profile env-key path should receive OPENCODE_CONFIG');
-        seenRuntimeConfig = JSON.parse(await readFile(seenConfigPath, 'utf-8'));
+        assert.equal(options?.callbackEnv?.OPENCODE_CONFIG, undefined);
         yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
       },
     };
 
     const deps = makeDeps();
     const previousCwd = process.cwd();
-    const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
     try {
-      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-test-key';
       process.chdir(apiDir);
-      const messages = await collect(
+      await collect(
         invokeSingleCat(deps, {
           catId: boundCatId,
           service,
-          prompt: 'test no-profile env key runtime config',
-          userId: 'user-f189-no-profile',
-          threadId: 'thread-f189-no-profile',
+          prompt: 'test known legacy model skip',
+          userId: 'user-fix280-known-legacy',
+          threadId: 'thread-fix280-known-legacy',
           isLastCat: true,
         }),
       );
-      assert.ok(messages.some((m) => m.type === 'done'));
     } finally {
-      if (originalAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-      else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+      process.chdir(previousCwd);
+      mod._resetOpenCodeKnownModels(null);
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+
+    const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
+    assert.equal(callbackEnv.OPENCODE_CONFIG, undefined);
+    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, undefined);
+  });
+
+  it('F189-P1: ocProviderName takes priority over parseOpenCodeModel for namespaced models', async () => {
+    // Regression (砚砚 review): defaultModel="z-ai/glm-4.7" + ocProviderName="openrouter"
+    // parseOpenCodeModel parses "z-ai" as providerName, but the real provider is "openrouter".
+    // ocProviderName must take priority when set — the "/" in the model is a namespace separator.
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'f189-namespace-priority-'));
+    const apiDir = join(root, 'packages', 'api');
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+    const orProfile = await createProviderProfile(root, {
+      provider: 'anthropic',
+      name: 'openrouter-profile',
+      mode: 'api_key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://openrouter.ai/api',
+      apiKey: 'sk-or-key',
+      models: ['z-ai/glm-4.7'],
+      setActive: false,
+    });
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opencode')?.config;
+    assert.ok(originalConfig, 'opencode config should exist in registry');
+    const boundCatId = 'opencode-or-namespace';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      provider: 'opencode',
+      providerProfileId: orProfile.id,
+      defaultModel: 'z-ai/glm-4.7',
+      ocProviderName: 'openrouter',
+    });
+
+    let seenRuntimeConfig;
+    const optionsSeen = [];
+    const service = {
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        const configPath = options?.callbackEnv?.OPENCODE_CONFIG;
+        if (configPath) {
+          seenRuntimeConfig = JSON.parse(await readFile(configPath, 'utf-8'));
+        }
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(apiDir);
+      await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test namespace model priority',
+          userId: 'user-f189-ns',
+          threadId: 'thread-f189-ns',
+          isLastCat: true,
+        }),
+      );
+    } finally {
       process.chdir(previousCwd);
       catRegistry.reset();
       for (const [id, config] of Object.entries(registrySnapshot)) {
@@ -3447,16 +3755,95 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     }
 
     const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
-    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'anthropic/claude-opus-4-6');
-    assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-ant-env-test-key');
-    assert.equal(seenRuntimeConfig?.model, 'anthropic/claude-opus-4-6');
-    assert.equal(seenRuntimeConfig?.provider?.anthropic?.npm, '@ai-sdk/anthropic');
-    assert.ok(seenRuntimeConfig?.provider?.anthropic?.models?.['claude-opus-4-6']);
-    await assert.rejects(readFile(seenConfigPath, 'utf-8'));
+    // Key assertions: ocProviderName "openrouter" must win over parsed "z-ai"
+    assert.equal(
+      callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE,
+      'openrouter/z-ai/glm-4.7',
+      'effective model must use ocProviderName as provider prefix, not parsed z-ai',
+    );
+    assert.ok(callbackEnv.OPENCODE_CONFIG, 'OPENCODE_CONFIG must be set');
+    assert.equal(seenRuntimeConfig?.model, 'openrouter/z-ai/glm-4.7');
+    assert.ok(seenRuntimeConfig?.provider?.openrouter, 'runtime config provider must be openrouter, not z-ai');
+  });
+
+  it('F189-P1-2: same-provider prefix in defaultModel + ocProviderName must NOT double-prefix', async () => {
+    // Regression (砚砚 review R2): defaultModel="openai/gpt-5.4" + ocProviderName="openai"
+    // Must produce effectiveModel="openai/gpt-5.4", NOT "openai/openai/gpt-5.4".
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'f189-double-prefix-'));
+    const apiDir = join(root, 'packages', 'api');
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+    const oaiProfile = await createProviderProfile(root, {
+      provider: 'anthropic',
+      name: 'openai-compat',
+      mode: 'api_key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'sk-openai-key',
+      models: ['gpt-5.4'],
+      setActive: false,
+    });
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opencode')?.config;
+    assert.ok(originalConfig);
+    const boundCatId = 'opencode-double-prefix-test';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      provider: 'opencode',
+      providerProfileId: oaiProfile.id,
+      defaultModel: 'openai/gpt-5.4',
+      ocProviderName: 'openai',
+    });
+
+    const optionsSeen = [];
+    const service = {
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(apiDir);
+      await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test double prefix',
+          userId: 'user-f189-dp',
+          threadId: 'thread-f189-dp',
+          isLastCat: true,
+        }),
+      );
+    } finally {
+      process.chdir(previousCwd);
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+
+    const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
+    // With safeProviderName remapping, 'openai' → 'openai-compat', so the
+    // model override becomes 'openai-compat/gpt-5.4' (no double-prefix).
+    assert.equal(
+      callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE,
+      'openai-compat/gpt-5.4',
+      'must remap openai → openai-compat and NOT double-prefix',
+    );
   });
 
   it('F062-fix: skips auto-seal for api_key mode when context health is approx', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f062-approx-no-seal-'));
     const apiDir = join(root, 'packages', 'api');
     await mkdir(apiDir, { recursive: true });
@@ -3573,7 +3960,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   });
 
   it('F062-fix: skips auto-seal for api_key + compress strategy even when context health is exact', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const { _setTestStrategyOverride, _clearTestStrategyOverrides } = await import(
       '../dist/config/session-strategy.js'
     );
@@ -3700,7 +4087,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   });
 
   it('F062-fix: keeps auto-seal for api_key + handoff strategy on exact budget overflow', async () => {
-    const { createProviderProfile } = await import('../dist/config/provider-profiles.js');
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const { _setTestStrategyOverride, _clearTestStrategyOverrides } = await import(
       '../dist/config/session-strategy.js'
     );
@@ -3849,5 +4236,105 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       'should reach done (service was invoked)',
     );
     assert.equal(optionsSeen[0]?.workingDirectory, undefined, 'workingDirectory must be undefined for game threads');
+  });
+
+  it('bug-fix: account resolution uses runtime root (process.cwd()), not thread.projectPath', async () => {
+    // Regression: thread.projectPath points to dev worktree which lacks runtime-only accounts.
+    // Account resolution must always use process.cwd() (the runtime root).
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+
+    // runtimeRoot = where the API process runs (has the custom account)
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'account-runtime-root-'));
+    const runtimeApiDir = join(runtimeRoot, 'packages', 'api');
+    await mkdir(runtimeApiDir, { recursive: true });
+    await writeFile(join(runtimeRoot, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+    // devRoot = where thread.projectPath points (missing the custom account)
+    const devRoot = await mkdtemp(join(tmpdir(), 'account-dev-root-'));
+    const devApiDir = join(devRoot, 'packages', 'api');
+    await mkdir(devApiDir, { recursive: true });
+    await writeFile(join(devRoot, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+    // Write a minimal catalog in devRoot WITHOUT the custom account
+    const devCatCafe = join(devRoot, '.cat-cafe');
+    await mkdir(devCatCafe, { recursive: true });
+    await writeFile(join(devCatCafe, 'cat-catalog.json'), JSON.stringify({ accounts: {} }), 'utf-8');
+
+    // Create the custom account only in runtimeRoot
+    const customProfile = await createProviderProfile(runtimeRoot, {
+      provider: 'openai',
+      name: 'custom-runtime-only',
+      mode: 'api_key',
+      authType: 'api_key',
+      protocol: 'openai',
+      baseUrl: 'https://custom.example.com/v1',
+      apiKey: 'sk-custom-key',
+      models: ['custom-model'],
+      setActive: false,
+    });
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opencode')?.config;
+    assert.ok(originalConfig);
+    const boundCatId = 'opencode-divergent-path-test';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      provider: 'opencode',
+      providerProfileId: customProfile.id,
+      defaultModel: 'custom-model',
+      ocProviderName: 'custom',
+    });
+
+    const optionsSeen = [];
+    const service = {
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    // threadStore returns devRoot as projectPath — simulates Hub-created thread
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: devRoot, createdBy: 'user1' }),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    const previousCwd = process.cwd();
+    try {
+      // process.cwd() = runtimeRoot (where the custom account exists)
+      process.chdir(runtimeApiDir);
+      const msgs = await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test divergent projectPath account resolution',
+          userId: 'user-divergent',
+          threadId: 'thread-divergent',
+          isLastCat: true,
+        }),
+      );
+      // Must reach done — account resolution should succeed via process.cwd().
+      // If it used thread.projectPath (devRoot), it would throw "bound account not found".
+      assert.ok(
+        msgs.some((m) => m.type === 'done'),
+        'invocation must succeed despite divergent thread.projectPath',
+      );
+      assert.ok(
+        !msgs.some((m) => m.type === 'error' && m.error?.includes('bound account')),
+        'must NOT fail with "bound account not found"',
+      );
+    } finally {
+      process.chdir(previousCwd);
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rm(runtimeRoot, { recursive: true, force: true });
+      await rm(devRoot, { recursive: true, force: true });
+    }
   });
 });

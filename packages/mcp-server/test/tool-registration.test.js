@@ -68,6 +68,11 @@ const EXPECTED_TOOLS = [
   'limb_pair_approve',
   // F101 Phase I: Game action tool
   'cat_cafe_submit_game_action',
+  // F139 Phase 3A: Schedule tools
+  'cat_cafe_list_schedule_templates',
+  'cat_cafe_preview_scheduled_task',
+  'cat_cafe_register_scheduled_task',
+  'cat_cafe_remove_scheduled_task',
 ];
 
 const EXPECTED_COLLAB_TOOLS = [
@@ -92,6 +97,11 @@ const EXPECTED_COLLAB_TOOLS = [
   'cat_cafe_update_bootcamp_state',
   'cat_cafe_bootcamp_env_check',
   'cat_cafe_submit_game_action',
+  // F139 Phase 3A: Schedule tools
+  'cat_cafe_list_schedule_templates',
+  'cat_cafe_preview_scheduled_task',
+  'cat_cafe_register_scheduled_task',
+  'cat_cafe_remove_scheduled_task',
 ];
 
 const EXPECTED_MEMORY_TOOLS = [
@@ -155,6 +165,33 @@ describe('MCP Server Tool Registration', () => {
 
     const checkTool = server._registeredTools.cat_cafe_check_permission_status;
     assert.ok(checkTool, 'check_permission_status tool should exist');
+  });
+
+  test('post_message schema must NOT expose threadId (#316 regression guard)', async () => {
+    const { createServer } = await import('../dist/index.js');
+    const server = createServer();
+
+    const postTool = server._registeredTools.cat_cafe_post_message;
+    assert.ok(postTool, 'post_message tool should exist');
+    const shapeKeys = Object.keys(postTool.inputSchema.shape);
+    assert.ok(
+      !shapeKeys.includes('threadId'),
+      'post_message must NOT expose threadId — use cross_post_message for cross-thread posting (#316)',
+    );
+  });
+
+  test('cross_post_message schema must REQUIRE threadId', async () => {
+    const { createServer } = await import('../dist/index.js');
+    const server = createServer();
+
+    const crossTool = server._registeredTools.cat_cafe_cross_post_message;
+    assert.ok(crossTool, 'cross_post_message tool should exist');
+    const shapeKeys = Object.keys(crossTool.inputSchema.shape);
+    assert.ok(shapeKeys.includes('threadId'), 'cross_post_message must have threadId in schema');
+    assert.ok(
+      crossTool.inputSchema._def.shape().threadId.isOptional() === false,
+      'cross_post_message threadId must be required (not optional)',
+    );
   });
 
   test('deprecated file tools are not registered', async () => {

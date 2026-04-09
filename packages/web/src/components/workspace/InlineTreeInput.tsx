@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useIMEGuard } from '@/hooks/useIMEGuard';
 import { DirIcon, FileIcon } from './FileIcons';
 
 interface InlineTreeInputProps {
@@ -12,6 +13,7 @@ interface InlineTreeInputProps {
 export function InlineTreeInput({ depth, kind, defaultValue = '', onConfirm, onCancel }: InlineTreeInputProps) {
   const [value, setValue] = useState(defaultValue);
   const inputRef = useRef<HTMLInputElement>(null);
+  const ime = useIMEGuard();
 
   useEffect(() => {
     // Auto-focus and select filename (not extension) on mount
@@ -26,7 +28,7 @@ export function InlineTreeInput({ depth, kind, defaultValue = '', onConfirm, onC
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.nativeEvent.isComposing) return;
+      if (ime.isComposing()) return;
       if (e.key === 'Enter' && value.trim()) {
         e.preventDefault();
         onConfirm(value.trim());
@@ -35,6 +37,7 @@ export function InlineTreeInput({ depth, kind, defaultValue = '', onConfirm, onC
         onCancel();
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ime.isComposing() reads a live ref; adding ime would cause unnecessary re-renders
     [value, onConfirm, onCancel],
   );
 
@@ -48,6 +51,8 @@ export function InlineTreeInput({ depth, kind, defaultValue = '', onConfirm, onC
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={handleKeyDown}
+        onCompositionStart={ime.onCompositionStart}
+        onCompositionEnd={ime.onCompositionEnd}
         onBlur={() => {
           if (value.trim()) onConfirm(value.trim());
           else onCancel();

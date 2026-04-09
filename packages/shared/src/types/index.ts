@@ -103,6 +103,9 @@ export {
 } from './cat.js';
 // Cat breed/variant types (Breed+Variant two-layer schema)
 export type {
+  // F136 Phase 4: Account config types
+  AccountConfig,
+  AccountProtocol,
   CatBreed,
   CatCafeConfig,
   CatCafeConfigV1,
@@ -113,12 +116,20 @@ export type {
   // F067: Co-Creator config for @ mention routing
   CoCreatorConfig,
   ContextBudget,
+  CredentialEntry,
   MissionHubSelfClaimScope,
   // F032: Roster types for collaboration rules
   ReviewPolicy,
   Roster,
   RosterEntry,
 } from './cat-breed.js';
+// Command types (F142 Phase B — slash command framework)
+export type {
+  CommandSource,
+  CommandSurface,
+  ParsedCommand,
+  SlashCommandDefinition,
+} from './command.js';
 // Connector types (F97 外部信息源抽象)
 export type {
   ConnectorDefinition,
@@ -377,8 +388,13 @@ export type {
 } from './summary.js';
 // Task types (毛线球)
 export type {
+  AutomationState,
+  CiAutomationState,
+  ConflictAutomationState,
   CreateTaskInput,
+  ReviewAutomationState,
   TaskItem,
+  TaskKind,
   TaskStatus,
   UpdateTaskInput,
 } from './task.js';

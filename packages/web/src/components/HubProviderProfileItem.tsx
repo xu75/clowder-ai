@@ -21,6 +21,21 @@ interface HubProviderProfileItemProps {
   onDelete: (profileId: string) => void;
 }
 
+type ApiProtocol = 'anthropic' | 'openai' | 'openai-responses' | 'google';
+
+const PROTOCOL_OPTIONS: { value: ApiProtocol; label: string }[] = [
+  { value: 'openai', label: 'OpenAI 兼容 (Chat)' },
+  { value: 'openai-responses', label: 'OpenAI Responses' },
+  { value: 'anthropic', label: 'Anthropic 兼容' },
+  { value: 'google', label: 'Google 兼容' },
+];
+
+const PROTOCOL_LABELS: Record<string, string> = Object.fromEntries(PROTOCOL_OPTIONS.map((o) => [o.value, o.label]));
+
+function protocolLabel(protocol: string | undefined): string {
+  return (protocol && PROTOCOL_LABELS[protocol]) ?? protocol ?? '自动';
+}
+
 function summaryText(profile: ProfileItem): string | null {
   if (profile.builtin) return null;
   const host = profile.baseUrl?.replace(/^https?:\/\//, '') ?? '(未设置)';
@@ -31,27 +46,44 @@ export function HubProviderProfileItem({ profile, busy, onSave, onDelete }: HubP
   const confirm = useConfirm();
   const [editing, setEditing] = useState(false);
   const [editDisplayName, setEditDisplayName] = useState(profile.displayName);
+  const [editProtocol, setEditProtocol] = useState<string>(profile.protocol ?? 'openai');
   const [editBaseUrl, setEditBaseUrl] = useState(profile.baseUrl ?? '');
   const [editApiKey, setEditApiKey] = useState('');
+  const [apiKeyTouched, setApiKeyTouched] = useState(false);
   const [editModels, setEditModels] = useState<string[]>(profile.models ?? []);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const startEdit = useCallback(() => {
     setEditDisplayName(profile.displayName);
+    setEditProtocol(profile.protocol ?? 'openai');
     setEditBaseUrl(profile.baseUrl ?? '');
     setEditApiKey('');
+    setApiKeyTouched(false);
     setEditModels(profile.models ?? []);
+    setShowAdvanced(false);
     setEditing(true);
-  }, [profile.baseUrl, profile.displayName, profile.models]);
+  }, [profile.baseUrl, profile.displayName, profile.models, profile.protocol]);
 
   const saveEdit = useCallback(async () => {
     await onSave(profile.id, {
       displayName: editDisplayName.trim(),
+      protocol: editProtocol,
       ...(profile.authType === 'api_key' ? { baseUrl: editBaseUrl.trim() } : {}),
-      ...(editApiKey.trim() ? { apiKey: editApiKey.trim() } : {}),
+      ...(apiKeyTouched ? { apiKey: editApiKey.trim() } : {}),
       models: editModels,
     });
     setEditing(false);
-  }, [editApiKey, editBaseUrl, editDisplayName, editModels, onSave, profile.authType, profile.id]);
+  }, [
+    apiKeyTouched,
+    editApiKey,
+    editBaseUrl,
+    editDisplayName,
+    editModels,
+    editProtocol,
+    onSave,
+    profile.authType,
+    profile.id,
+  ]);
 
   if (editing) {
     return (
@@ -61,7 +93,7 @@ export function HubProviderProfileItem({ profile, busy, onSave, onDelete }: HubP
             value={editDisplayName}
             onChange={(e) => setEditDisplayName(e.target.value)}
             placeholder="账号显示名"
-            className="w-full rounded border border-[#E8DCCF] bg-white px-3 py-2 text-sm placeholder:text-[#C4B5A8]"
+            className="w-full rounded border border-[#E8DCCF] bg-cafe-surface px-3 py-2 text-sm placeholder:text-[#C4B5A8]"
           />
           {profile.authType === 'api_key' ? (
             <>
@@ -69,16 +101,21 @@ export function HubProviderProfileItem({ profile, busy, onSave, onDelete }: HubP
                 value={editBaseUrl}
                 onChange={(e) => setEditBaseUrl(e.target.value)}
                 placeholder="API 服务地址，如 https://api.example.com/v1"
-                className="w-full rounded border border-[#E8DCCF] bg-white px-3 py-2 text-sm placeholder:text-[#C4B5A8]"
+                className="w-full rounded border border-[#E8DCCF] bg-cafe-surface px-3 py-2 text-sm placeholder:text-[#C4B5A8]"
               />
               <div className="relative">
                 <input
                   type="password"
                   autoComplete="off"
                   value={editApiKey}
-                  onChange={(e) => setEditApiKey(e.target.value)}
-                  placeholder={profile.hasApiKey ? '已配置 sk-••••••••（留空保持不变）' : 'sk-xxxxxxxxxxxxxxxx'}
-                  className="w-full rounded border border-[#E8DCCF] bg-white px-3 py-2 text-sm placeholder:text-[#C4B5A8]"
+                  onChange={(e) => {
+                    setEditApiKey(e.target.value);
+                    setApiKeyTouched(true);
+                  }}
+                  placeholder={
+                    profile.hasApiKey ? '已配置 sk-••••••••（不改留空，输入后删除可清除）' : 'sk-xxxxxxxxxxxxxxxx'
+                  }
+                  className="w-full rounded border border-[#E8DCCF] bg-cafe-surface px-3 py-2 text-sm placeholder:text-[#C4B5A8]"
                 />
               </div>
               <div className="space-y-2">
@@ -96,6 +133,45 @@ export function HubProviderProfileItem({ profile, busy, onSave, onDelete }: HubP
             </>
           ) : null}
         </div>
+        {!profile.builtin && (
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="flex items-center gap-1 text-xs text-[#8A776B] hover:text-[#6B5D52]"
+            >
+              <svg
+                className={`h-3 w-3 transition-transform ${showAdvanced ? 'rotate-90' : ''}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+              高级设置
+            </button>
+            {showAdvanced && (
+              <div className="space-y-2 border-l-2 border-[#E8DCCF] pl-4">
+                <p className="text-xs font-semibold text-[#8A776B]">API 协议</p>
+                <select
+                  value={editProtocol}
+                  onChange={(e) => setEditProtocol(e.target.value)}
+                  className="w-full rounded border border-[#E8DCCF] bg-cafe-surface px-3 py-2 text-sm"
+                >
+                  {PROTOCOL_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-[#B59A88]">
+                  通常自动推断即可。若模型调用出现协议不匹配，可在此手动修正。
+                </p>
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex gap-2">
           <button
             type="button"
@@ -109,7 +185,7 @@ export function HubProviderProfileItem({ profile, busy, onSave, onDelete }: HubP
             type="button"
             onClick={() => setEditing(false)}
             disabled={busy}
-            className="rounded border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+            className="rounded border border-cafe px-3 py-1.5 text-xs text-cafe-secondary hover:bg-cafe-surface-elevated"
           >
             取消
           </button>
@@ -139,6 +215,11 @@ export function HubProviderProfileItem({ profile, busy, onSave, onDelete }: HubP
             {!profile.builtin ? (
               <span className="rounded-full bg-[#F3E8FF] px-2.5 py-1 text-[11px] font-semibold text-[#9D7BC7]">
                 api_key
+              </span>
+            ) : null}
+            {!profile.builtin && profile.protocol ? (
+              <span className="rounded-full bg-[#E8F4FD] px-2.5 py-1 text-[11px] font-semibold text-[#5B8FA8]">
+                {protocolLabel(profile.protocol)}
               </span>
             ) : null}
           </div>

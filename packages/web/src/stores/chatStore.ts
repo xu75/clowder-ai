@@ -70,12 +70,16 @@ function snapshotActive(s: ChatState): ThreadState {
     queuePauseReason: s.queuePauseReason,
     queueFull: s.queueFull,
     queueFullSource: s.queueFullSource,
+    workspaceWorktreeId: s.workspaceWorktreeId,
+    workspaceOpenTabs: s.workspaceOpenTabs,
+    workspaceOpenFilePath: s.workspaceOpenFilePath,
+    workspaceOpenFileLine: s.workspaceOpenFileLine,
   };
 }
 
 /** Flatten a ThreadState into partial ChatState fields */
 function flattenThread(ts: ThreadState): Partial<ChatState> {
-  return {
+  const result: Partial<ChatState> = {
     messages: ts.messages,
     isLoading: ts.isLoading,
     isLoadingHistory: ts.isLoadingHistory,
@@ -92,7 +96,16 @@ function flattenThread(ts: ThreadState): Partial<ChatState> {
     queuePauseReason: ts.queuePauseReason,
     queueFull: ts.queueFull,
     queueFullSource: ts.queueFullSource,
+    workspaceOpenTabs: ts.workspaceOpenTabs,
+    workspaceOpenFilePath: ts.workspaceOpenFilePath,
+    workspaceOpenFileLine: ts.workspaceOpenFileLine,
   };
+  // Only restore worktreeId if the thread had one set — avoids wiping
+  // the global selection for threads that never opened workspace.
+  if (ts.workspaceWorktreeId != null) {
+    result.workspaceWorktreeId = ts.workspaceWorktreeId;
+  }
+  return result;
 }
 
 const MAX_BLOB_MESSAGES = 200;
@@ -115,6 +128,28 @@ function persistUiThinkingExpandedByDefault(next: boolean) {
   } catch {
     // ignore storage failures (privacy mode, quota, etc.)
   }
+}
+
+export type BubbleExpandState = 'expanded' | 'collapsed';
+export type BubbleOverride = 'global' | 'expanded' | 'collapsed';
+
+export interface GlobalBubbleDefaults {
+  thinking: BubbleExpandState;
+  cliOutput: BubbleExpandState;
+}
+
+/**
+ * Resolve whether a bubble type should be expanded.
+ * Priority: thread override > global config > fallback (collapsed).
+ */
+export function resolveBubbleExpanded(
+  threadOverride: BubbleOverride | undefined,
+  globalDefault: BubbleExpandState,
+): boolean {
+  if (threadOverride && threadOverride !== 'global') {
+    return threadOverride === 'expanded';
+  }
+  return globalDefault === 'expanded';
 }
 
 function revokeBlobUrls(messages: ChatMessage[]) {
@@ -265,10 +300,13 @@ function findAssistantDuplicate(messages: ChatMessage[], incoming: ChatMessage):
     }
   }
 
-  // Phase 2: Bridge/soft rules — check only the MOST RECENT same-cat assistant.
-  // Bridge: callback(has invocationId) → stream(no invocationId) late-bind upgrade
-  // Soft: callback(no invocationId) → stream(no invocationId) upgrade
+  // Phase 2: Soft rule — check only the MOST RECENT same-cat assistant.
+  // Only for callbacks WITHOUT an invocationId → stream(no invocationId) upgrade.
+  // Callbacks WITH invocationId are fully handled by Phase 1 (hard match);
+  // if Phase 1 didn't match, the invocationId is stale/unrelated and soft bridge
+  // must not merge into an invocationless stream from a different invocation.
   if (incoming.origin !== 'callback') return -1;
+  if (incomingInvId) return -1;
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const existing = messages[i]!;
@@ -397,6 +435,8 @@ interface ChatState {
   isLoadingThreads: boolean;
   /** UI: Whether Thinking blocks should be expanded by default (global preference). */
   uiThinkingExpandedByDefault: boolean;
+  /** Global bubble display defaults from Config Hub (server-side). */
+  globalBubbleDefaults: GlobalBubbleDefaults;
 
   // ── Active-thread actions (operate on flat state) ──
   addMessage: (msg: ChatMessage) => void;
@@ -416,7 +456,7 @@ interface ChatState {
   setLoading: (loading: boolean) => void;
   setHasActiveInvocation: (v: boolean) => void;
   /** F108: Register a new active invocation slot */
-  addActiveInvocation: (invocationId: string, catId: string, mode: string) => void;
+  addActiveInvocation: (invocationId: string, catId: string, mode: string, startedAt?: number) => void;
   /** F108: Remove an active invocation slot; derives hasActiveInvocation */
   removeActiveInvocation: (invocationId: string) => void;
   /** F108: Clear all active invocations (timeout/error/stop recovery) */
@@ -448,11 +488,15 @@ interface ChatState {
   setCurrentProject: (projectPath: string) => void;
   setLoadingThreads: (loading: boolean) => void;
   updateThreadTitle: (threadId: string, title: string) => void;
+  updateThreadParticipants: (threadId: string, participants: string[]) => void;
   updateThreadPin: (threadId: string, pinned: boolean) => void;
   updateThreadFavorite: (threadId: string, favorited: boolean) => void;
   updateThreadThinkingMode: (threadId: string, mode: 'debug' | 'play') => void;
 
   updateThreadPreferredCats: (threadId: string, preferredCats: string[]) => void;
+  updateThreadBubbleDisplay: (threadId: string, field: 'bubbleThinking' | 'bubbleCli', value: BubbleOverride) => void;
+  setGlobalBubbleDefaults: (defaults: GlobalBubbleDefaults) => void;
+  fetchGlobalBubbleDefaults: () => Promise<void>;
   setUiThinkingExpandedByDefault: (next: boolean) => void;
 
   // ── Multi-thread actions (new) ──
@@ -473,7 +517,13 @@ interface ChatState {
   setThreadLoading: (threadId: string, loading: boolean) => void;
   setThreadHasActiveInvocation: (threadId: string, active: boolean) => void;
   /** F108: Add an active invocation to a thread (background or active) */
-  addThreadActiveInvocation: (threadId: string, invocationId: string, catId: string, mode: string) => void;
+  addThreadActiveInvocation: (
+    threadId: string,
+    invocationId: string,
+    catId: string,
+    mode: string,
+    startedAt?: number,
+  ) => void;
   /** F108: Remove an active invocation from a thread; derives hasActiveInvocation */
   removeThreadActiveInvocation: (threadId: string, invocationId: string) => void;
   /** F108: Clear all active invocations for a thread (cancel fallback when invocationId unknown) */
@@ -558,8 +608,8 @@ interface ChatState {
   setWorkspaceRevealPath: (path: string | null, originThreadId?: string | null) => void;
 
   // Phase H + F139: Workspace mode (dev tools / knowledge feed / schedule panel)
-  workspaceMode: 'dev' | 'knowledge' | 'schedule';
-  setWorkspaceMode: (mode: 'dev' | 'knowledge' | 'schedule') => void;
+  workspaceMode: 'dev' | 'recall' | 'schedule';
+  setWorkspaceMode: (mode: 'dev' | 'recall' | 'schedule') => void;
 
   // ── F120: Preview auto-open (always-mounted listener) ──
   pendingPreviewAutoOpen: { port: number; path: string } | null;
@@ -608,6 +658,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
   threads: [],
   isLoadingThreads: false,
   uiThinkingExpandedByDefault: loadUiThinkingExpandedByDefault(),
+  globalBubbleDefaults: {
+    // Use old localStorage value as initial fallback for thinking; CLI defaults to collapsed
+    thinking: loadUiThinkingExpandedByDefault() ? 'expanded' : 'collapsed',
+    cliOutput: 'collapsed',
+  },
+
+  setGlobalBubbleDefaults: (defaults) => set({ globalBubbleDefaults: defaults }),
+
+  fetchGlobalBubbleDefaults: async () => {
+    try {
+      const { apiFetch } = await import('@/utils/api-client');
+      const res = await apiFetch('/api/config');
+      if (!res.ok) return;
+      const data = await res.json();
+      const ui = data.config?.ui;
+      if (ui?.bubbleDefaults) {
+        set({
+          globalBubbleDefaults: {
+            thinking: ui.bubbleDefaults.thinking ?? 'collapsed',
+            cliOutput: ui.bubbleDefaults.cliOutput ?? 'collapsed',
+          },
+        });
+      }
+    } catch {
+      // Fallback to existing defaults on network error
+    }
+  },
+
+  updateThreadBubbleDisplay: (threadId, field, value) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId ? { ...t, [field]: value === 'global' ? undefined : value } : t,
+      ),
+    })),
 
   setUiThinkingExpandedByDefault: (next) => {
     persistUiThinkingExpandedByDefault(next);
@@ -968,9 +1052,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setLoading: (loading) => set({ isLoading: loading }),
   setHasActiveInvocation: (v) => set({ hasActiveInvocation: v }),
   /** F108: Register a new active invocation slot */
-  addActiveInvocation: (invocationId, catId, mode) =>
+  addActiveInvocation: (invocationId, catId, mode, startedAt?) =>
     set((state) => {
-      const activeInvocations = { ...state.activeInvocations, [invocationId]: { catId, mode, startedAt: Date.now() } };
+      const activeInvocations = {
+        ...state.activeInvocations,
+        [invocationId]: { catId, mode, startedAt: startedAt ?? Date.now() },
+      };
       return { activeInvocations, hasActiveInvocation: true };
     }),
   /** F108: Remove an active invocation slot; derives hasActiveInvocation */
@@ -1095,6 +1182,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   updateThreadTitle: (threadId, title) =>
     set((state) => ({
       threads: state.threads.map((t) => (t.id === threadId ? { ...t, title } : t)),
+    })),
+
+  updateThreadParticipants: (threadId, participants) =>
+    set((state) => ({
+      threads: state.threads.map((t) => (t.id === threadId ? { ...t, participants } : t)),
     })),
 
   updateThreadPin: (threadId, pinned) =>
@@ -1443,19 +1535,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
 
   /** F108: Add an active invocation to a thread (background or active) */
-  addThreadActiveInvocation: (threadId, invocationId, catId, mode) =>
+  addThreadActiveInvocation: (threadId, invocationId, catId, mode, startedAt?) =>
     set((state) => {
+      const ts = startedAt ?? Date.now();
       if (threadId === state.currentThreadId) {
         const activeInvocations = {
           ...state.activeInvocations,
-          [invocationId]: { catId, mode, startedAt: Date.now() },
+          [invocationId]: { catId, mode, startedAt: ts },
         };
         return { activeInvocations, hasActiveInvocation: true };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
       const activeInvocations = {
         ...existing.activeInvocations,
-        [invocationId]: { catId, mode, startedAt: Date.now() },
+        [invocationId]: { catId, mode, startedAt: ts },
       };
       return {
         threadStates: {

@@ -3,7 +3,8 @@
  * Replaces macOS-only osascript folder picker with a web-based solution.
  * Calls GET /api/projects/browse to list directories.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useIMEGuard } from '@/hooks/useIMEGuard';
 import { apiFetch } from '@/utils/api-client';
 
 interface BrowseEntry {
@@ -82,6 +83,11 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [pathInput, setPathInput] = useState('');
+  const ime = useIMEGuard();
+  const [creatingDir, setCreatingDir] = useState(false);
+  const [newDirName, setNewDirName] = useState('');
+  const [mkdirError, setMkdirError] = useState<string | null>(null);
+  const newDirInputRef = useRef<HTMLInputElement>(null);
 
   const fetchDirectory = useCallback(async (path?: string, fallbackOnForbidden = false) => {
     setIsLoading(true);
@@ -124,11 +130,41 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
     if (trimmed) fetchDirectory(trimmed);
   }, [pathInput, fetchDirectory]);
 
+  const handleStartCreateDir = useCallback(() => {
+    setCreatingDir(true);
+    setNewDirName('');
+    setMkdirError(null);
+    setTimeout(() => newDirInputRef.current?.focus(), 0);
+  }, []);
+
+  const handleCreateDir = useCallback(async () => {
+    if (!newDirName.trim() || !browseResult) return;
+    setMkdirError(null);
+    try {
+      const res = await apiFetch('/api/projects/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPath: browseResult.current, name: newDirName.trim() }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setMkdirError(data.error || '创建失败');
+        return;
+      }
+      const data = await res.json();
+      setCreatingDir(false);
+      setNewDirName('');
+      fetchDirectory(data.createdPath);
+    } catch {
+      setMkdirError('无法连接到服务器');
+    }
+  }, [newDirName, browseResult, fetchDirectory]);
+
   const segments = browseResult ? pathToSegments(browseResult.current, browseResult.homePath) : [];
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
-      {/* ── Breadcrumb ── */}
+      {/* ── Breadcrumb + New Folder ── */}
       <div className="flex items-center gap-1 px-5 h-10 bg-cafe-white border-b border-[#f0e6de] flex-shrink-0 overflow-x-auto">
         {segments.map((seg, i) => (
           <span key={seg.path || `_${i}`} className="flex items-center gap-1 flex-shrink-0">
@@ -161,13 +197,68 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
             )}
           </span>
         ))}
+        {/* [+] New folder button */}
+        <button
+          type="button"
+          onClick={handleStartCreateDir}
+          className="ml-auto flex-shrink-0 px-2 py-1 flex items-center gap-1 rounded-md border border-cocreator-primary/30 bg-cocreator-bg/50 text-cocreator-primary hover:bg-cocreator-bg hover:border-cocreator-primary/50 transition-colors text-[11px] font-medium"
+          title="新建文件夹"
+        >
+          <svg aria-hidden="true" className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" />
+          </svg>
+          新建
+        </button>
       </div>
 
       {/* ── Directory listing ── */}
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-0.5 min-h-0">
+        {/* Inline new folder input */}
+        {creatingDir && (
+          <div className="px-3 py-2 rounded-lg ring-2 ring-cocreator-primary bg-cocreator-bg/50 mb-1">
+            <div className="flex items-center gap-2">
+              <FolderIcon className="text-cocreator-primary" />
+              <input
+                ref={newDirInputRef}
+                type="text"
+                value={newDirName}
+                onChange={(e) => setNewDirName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleCreateDir();
+                  if (e.key === 'Escape') {
+                    setCreatingDir(false);
+                    setMkdirError(null);
+                  }
+                }}
+                placeholder="文件夹名称..."
+                className="flex-1 text-sm px-2 py-1 rounded border border-cocreator-primary/30 bg-white focus:outline-none focus:ring-1 focus:ring-cocreator-primary"
+              />
+              <button
+                type="button"
+                onClick={handleCreateDir}
+                disabled={!newDirName.trim()}
+                className="text-xs px-2.5 py-1 rounded bg-cocreator-primary text-white hover:bg-cocreator-dark disabled:opacity-40 transition-colors"
+              >
+                创建
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreatingDir(false);
+                  setMkdirError(null);
+                }}
+                className="text-xs text-gray-400 hover:text-gray-600"
+              >
+                取消
+              </button>
+            </div>
+            {mkdirError && <p className="text-[10px] text-red-500 mt-1 ml-6">{mkdirError}</p>}
+          </div>
+        )}
+
         {isLoading && (
           <div className="flex items-center justify-center py-8">
-            <span className="text-xs text-gray-400 animate-pulse">Loading...</span>
+            <span className="text-xs text-cafe-muted animate-pulse">Loading...</span>
           </div>
         )}
 
@@ -185,7 +276,7 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
 
         {!isLoading && browseResult && browseResult.entries.length === 0 && (
           <div className="flex items-center justify-center py-8">
-            <span className="text-xs text-gray-400">No subdirectories</span>
+            <span className="text-xs text-cafe-muted">No subdirectories</span>
           </div>
         )}
 
@@ -230,8 +321,10 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
             type="text"
             value={pathInput}
             onChange={(e) => setPathInput(e.target.value)}
+            onCompositionStart={ime.onCompositionStart}
+            onCompositionEnd={ime.onCompositionEnd}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.nativeEvent.isComposing) handlePathSubmit();
+              if (e.key === 'Enter' && !ime.isComposing()) handlePathSubmit();
             }}
             placeholder="Enter path..."
             className="flex-1 text-xs px-3 py-2 rounded-lg border border-[#e8d9cf] bg-cafe-white focus:outline-none focus:ring-1 focus:ring-cocreator-primary"
@@ -240,7 +333,7 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
             <button
               type="button"
               onClick={handlePathSubmit}
-              className="px-2.5 py-2 rounded-lg border border-[#e8d9cf] bg-cafe-white text-gray-600 hover:bg-cocreator-bg transition-colors"
+              className="px-2.5 py-2 rounded-lg border border-[#e8d9cf] bg-cafe-white text-cafe-secondary hover:bg-cocreator-bg transition-colors"
               aria-label="Go to path"
             >
               <svg aria-hidden="true" className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -257,14 +350,14 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
         {/* ── Action bar ── */}
         <div className="flex items-center gap-2 pt-1">
           {browseResult && (
-            <span className="text-[11px] text-gray-500 truncate flex-1" title={browseResult.current}>
+            <span className="text-[11px] text-cafe-secondary truncate flex-1" title={browseResult.current}>
               {browseResult.current}
             </span>
           )}
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg border border-[#e8d9cf] text-gray-600 text-xs font-medium transition-colors hover:bg-gray-50"
+            className="px-4 py-2 rounded-lg border border-[#e8d9cf] text-cafe-secondary text-xs font-medium transition-colors hover:bg-cafe-surface-elevated"
           >
             取消
           </button>
@@ -305,7 +398,7 @@ function FolderIcon({ className }: { className?: string }) {
 
 function TerminalIcon() {
   return (
-    <svg aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 mt-2.5" viewBox="0 0 20 20" fill="currentColor">
+    <svg aria-hidden="true" className="w-3.5 h-3.5 text-cafe-muted mt-2.5" viewBox="0 0 20 20" fill="currentColor">
       <path
         fillRule="evenodd"
         d="M2 4.25A2.25 2.25 0 014.25 2h11.5A2.25 2.25 0 0118 4.25v11.5A2.25 2.25 0 0115.75 18H4.25A2.25 2.25 0 012 15.75V4.25zM7.664 6.23a.75.75 0 00-1.078 1.04l2.705 2.805-2.705 2.805a.75.75 0 001.078 1.04l3.25-3.37a.75.75 0 000-1.04l-3.25-3.28zM11 13a.75.75 0 000 1.5h3a.75.75 0 000-1.5h-3z"

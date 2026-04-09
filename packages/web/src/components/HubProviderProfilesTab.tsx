@@ -82,6 +82,7 @@ export function HubProviderProfilesTab() {
       setCreateApiKey('');
       setCreateModels([]);
       await fetchProfiles();
+      window.dispatchEvent(new CustomEvent('provider-profiles-changed'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -96,6 +97,7 @@ export function HubProviderProfilesTab() {
       try {
         await callApi(`/api/provider-profiles/${profileId}`, { method: 'DELETE' });
         await fetchProfiles();
+        window.dispatchEvent(new CustomEvent('provider-profiles-changed'));
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -115,6 +117,7 @@ export function HubProviderProfilesTab() {
           body: JSON.stringify(payload),
         });
         await fetchProfiles();
+        window.dispatchEvent(new CustomEvent('provider-profiles-changed'));
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -129,8 +132,8 @@ export function HubProviderProfilesTab() {
   const customProfiles = useMemo(() => displayProfiles.filter((profile) => !profile.builtin), [displayProfiles]);
   const displayCards = useMemo(() => [...builtinProfiles, ...customProfiles], [builtinProfiles, customProfiles]);
 
-  if (loading) return <p className="text-sm text-gray-400">加载中...</p>;
-  if (!data) return <p className="text-sm text-gray-400">暂无数据</p>;
+  if (loading) return <p className="text-sm text-cafe-muted">加载中...</p>;
+  if (!data) return <p className="text-sm text-cafe-muted">暂无数据</p>;
 
   return (
     <div className="space-y-4">
@@ -163,7 +166,7 @@ export function HubProviderProfilesTab() {
         onCreate={createProfile}
       />
       <p className="text-xs leading-5 text-[#B59A88]">
-        secrets 存储在 `~/.cat-cafe/provider-profiles.secrets.local.json`（全局），Git 忽略。
+        secrets 存储在 `~/.cat-cafe/credentials.json`（全局），Git 忽略。
       </p>
     </div>
   );

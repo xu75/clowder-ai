@@ -6,6 +6,7 @@ import {
   CODEX_AUTH_MODE_OPTIONS,
   CODEX_SANDBOX_OPTIONS,
   type CodexRuntimeSettings,
+  getCliEffortOptionsForClient,
   type HubCatEditorFormState,
   SESSION_CHAIN_OPTIONS,
   SESSION_STRATEGY_OPTIONS,
@@ -50,6 +51,7 @@ export function AdvancedRuntimeSection({
     approvalPolicy: 'on-request' as const,
     authMode: 'oauth' as const,
   };
+  const cliEffortOptions = getCliEffortOptionsForClient(form.client);
 
   return (
     <SectionCard
@@ -101,6 +103,18 @@ export function AdvancedRuntimeSection({
           onChange={(value) => onChange({ sessionChain: value as HubCatEditorFormState['sessionChain'] })}
           tone="success"
         />
+        {cliEffortOptions ? (
+          <SelectField
+            label="CLI Effort"
+            value={form.cliEffort}
+            options={[
+              { value: '', label: '默认（按 Client）' },
+              ...cliEffortOptions.map((value) => ({ value, label: value })),
+            ]}
+            onChange={(value) => onChange({ cliEffort: value as HubCatEditorFormState['cliEffort'] })}
+            tone="success"
+          />
+        ) : null}
         {form.client === 'openai' || form.client === 'opencode' ? (
           <div className="space-y-1">
             <p className="text-sm font-medium text-[#3D2E22]">额外 CLI 参数</p>
@@ -108,14 +122,12 @@ export function AdvancedRuntimeSection({
               tags={form.cliConfigArgs}
               onChange={(nextTags) => onChange({ cliConfigArgs: nextTags })}
               addLabel="+ 添加参数"
-              placeholder={
-                form.client === 'opencode' ? '例如 --variant low' : '例如 --config model_reasoning_effort="low"'
-              }
+              placeholder={form.client === 'opencode' ? '例如 --variant low' : '例如 --config model_provider="custom"'}
               emptyLabel="无额外参数"
               tone="green"
             />
             <p className="text-[11px] leading-4 text-[#8A776B]">
-              每条直接追加到 CLI 命令，不做隐式转换。 参考：
+              每条直接追加到 CLI 命令，不做隐式转换。`CLI Effort` 请优先用上面的结构化字段。参考：
               {form.client === 'opencode' ? (
                 <a href="https://opencode.ai/docs/cli" target="_blank" rel="noreferrer" className="underline">
                   OpenCode CLI
@@ -131,7 +143,7 @@ export function AdvancedRuntimeSection({
       </div>
 
       {cat ? (
-        <div className="space-y-3 rounded-2xl border border-[#DCE9E0] bg-white/80 p-4">
+        <div className="space-y-3 rounded-2xl border border-[#DCE9E0] bg-cafe-surface/80 p-4">
           {loadingStrategy ? <p className="text-sm text-[#7F7168]">Session 策略加载中...</p> : null}
           {strategyError ? (
             <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-600">{strategyError}</p>
@@ -152,16 +164,28 @@ export function AdvancedRuntimeSection({
                   tone="success"
                 />
                 <RangeField
-                  label="Session Warn Threshold"
+                  label={strategyForm.strategy === 'compress' ? 'Session Observe Threshold' : 'Session Warn Threshold'}
                   value={strategyForm.warnThreshold}
                   onChange={(value) => onStrategyChange({ warnThreshold: value })}
-                  hint="context 填充到此比例时前端弹出警告提示"
+                  hint={
+                    strategyForm.strategy === 'compress'
+                      ? 'context 填充到此比例时前端弹出观测提示（compress 下仅观测，不触发封印）'
+                      : 'context 填充到此比例时前端弹出警告提示'
+                  }
                 />
                 <RangeField
-                  label="Session Action Threshold"
+                  label={
+                    strategyForm.strategy === 'compress'
+                      ? 'Session Observe Threshold (upper)'
+                      : 'Session Action Threshold'
+                  }
                   value={strategyForm.actionThreshold}
                   onChange={(value) => onStrategyChange({ actionThreshold: value })}
-                  hint="context 填充到此比例时触发 Session 策略动作（如 handoff 换 session）"
+                  hint={
+                    strategyForm.strategy === 'compress'
+                      ? 'compress 策略下此阈值仅用于观测，不触发封印。Session 会在 CLI 压缩后继续存活'
+                      : 'context 填充到此比例时触发 Session 策略动作（如 handoff 换 session）'
+                  }
                 />
                 {strategyForm.strategy === 'hybrid' ? (
                   <TextField
@@ -179,7 +203,7 @@ export function AdvancedRuntimeSection({
       ) : null}
 
       {showCodexSettings ? (
-        <div className="space-y-3 rounded-2xl border border-[#DCE9E0] bg-white/80 p-4">
+        <div className="space-y-3 rounded-2xl border border-[#DCE9E0] bg-cafe-surface/80 p-4">
           {loadingCodexSettings ? <p className="text-sm text-[#7F7168]">Codex 运行参数加载中...</p> : null}
           {codexSettingsError ? (
             <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-600">{codexSettingsError}</p>

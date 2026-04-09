@@ -17,6 +17,7 @@
 import type { CatId, ConnectorSource, MessageContent } from '@cat-cafe/shared';
 import { catRegistry, getConnectorDefinition } from '@cat-cafe/shared';
 import type { FastifyBaseLogger } from 'fastify';
+import { findMonorepoRoot } from '../../utils/monorepo-root.js';
 import type { ConnectorCommandLayer } from './ConnectorCommandLayer.js';
 import { ConnectorMessageFormatter } from './ConnectorMessageFormatter.js';
 import type { IConnectorPermissionStore } from './ConnectorPermissionStore.js';
@@ -24,6 +25,25 @@ import type { IConnectorThreadBindingStore } from './ConnectorThreadBindingStore
 import type { InboundMessageDedup } from './InboundMessageDedup.js';
 import { parseMentions } from './mention-parser.js';
 import type { IOutboundAdapter } from './OutboundDeliveryHook.js';
+
+/** Emit a connector_message socket event using the canonical protocol.
+ *  All emit sites MUST use this to avoid protocol drift (旧/新 payload 不一致). */
+function emitConnectorMessage(
+  socketManager: { broadcastToRoom(room: string, event: string, data: unknown): void } | null | undefined,
+  threadId: string,
+  msg: { id: string; content: string; source: ConnectorSource; timestamp: number },
+): void {
+  socketManager?.broadcastToRoom(`thread:${threadId}`, 'connector_message', {
+    threadId,
+    message: {
+      id: msg.id,
+      type: 'connector' as const,
+      content: msg.content,
+      source: msg.source,
+      timestamp: msg.timestamp,
+    },
+  });
+}
 
 export type RouteResult =
   | { kind: 'routed'; threadId: string; messageId: string }
@@ -45,13 +65,14 @@ export interface ConnectorRouterOptions {
     }): Promise<{ id: string }>;
   };
   readonly threadStore: {
-    create(userId: string, title?: string): { id: string } | Promise<{ id: string }>;
+    create(userId: string, title?: string, projectPath?: string): { id: string } | Promise<{ id: string }>;
     updateConnectorHubState(
       threadId: string,
       state: { v: 1; connectorId: string; externalChatId: string; createdAt: number; lastCommandAt?: number } | null,
     ): void | Promise<void>;
     get?(threadId: string):
       | {
+          projectPath?: string;
           connectorHubState?: {
             v: 1;
             connectorId: string;
@@ -62,6 +83,7 @@ export interface ConnectorRouterOptions {
         }
       | null
       | Promise<{
+          projectPath?: string;
           connectorHubState?: {
             v: 1;
             connectorId: string;
@@ -70,6 +92,12 @@ export interface ConnectorRouterOptions {
             lastCommandAt?: number;
           };
         } | null>;
+    updateProjectPath?(threadId: string, projectPath: string): void | Promise<void>;
+    getParticipantsWithActivity?(
+      threadId: string,
+    ):
+      | Array<{ catId: string; lastMessageAt: number; messageCount: number }>
+      | Promise<Array<{ catId: string; lastMessageAt: number; messageCount: number }>>;
   };
   readonly invokeTrigger: {
     trigger(
@@ -81,7 +109,7 @@ export interface ConnectorRouterOptions {
       contentBlocks?: readonly MessageContent[],
       policy?: unknown,
       sender?: { id: string; name?: string },
-    ): void;
+    ): 'dispatched' | 'enqueued' | 'merged' | 'full';
   };
   readonly socketManager?:
     | {
@@ -178,6 +206,9 @@ export class ConnectorRouter {
           const adapter = this.opts.adapters?.get(connectorId);
           if (adapter) {
             await adapter.sendReply(externalChatId, '🔒 此群未授权使用 bot。请联系管理员使用 /allow-group 授权。');
+            if (adapter.onDeliveryBatchDone) {
+              await adapter.onDeliveryBatchDone(externalChatId, true);
+            }
           }
           log.info({ connectorId, externalChatId }, '[ConnectorRouter] Group not in whitelist, skipped');
           return { kind: 'skipped', reason: 'group_not_allowed' };
@@ -195,6 +226,9 @@ export class ConnectorRouter {
           const adapter = this.opts.adapters?.get(connectorId);
           if (adapter) {
             await adapter.sendReply(externalChatId, '🔒 此命令仅管理员可用。');
+            if (adapter.onDeliveryBatchDone) {
+              await adapter.onDeliveryBatchDone(externalChatId, true);
+            }
           }
           log.info({ connectorId, senderId: sender.id }, '[ConnectorRouter] Non-admin command in group, blocked');
           return { kind: 'skipped', reason: 'command_admin_only' };
@@ -226,7 +260,10 @@ export class ConnectorRouter {
           '[ConnectorRouter] Command handled → Hub thread',
         );
 
-        // /thread: forward message content to the target thread
+        // /thread: forward message content to the target thread.
+        // When forwarding, do NOT close the A2A task — the delivery
+        // pipeline's notifyDeliveryBatchDone signal will close it after
+        // the forwarded invocation completes (F151 P1-2 fix).
         if (cmdResult.forwardContent && cmdResult.newActiveThreadId) {
           const fwdThreadId = cmdResult.newActiveThreadId;
           const fwdText = cmdResult.forwardContent;
@@ -238,6 +275,7 @@ export class ConnectorRouter {
           };
           const mentionPatterns = this.getMentionPatterns();
           const { targetCatId } = parseMentions(fwdText, mentionPatterns, this.opts.defaultCatId);
+          const fwdTimestamp = Date.now();
           const fwdStored = await messageStore.append({
             threadId: fwdThreadId,
             userId: this.opts.defaultUserId,
@@ -245,17 +283,41 @@ export class ConnectorRouter {
             content: fwdText,
             source: fwdSource,
             mentions: [targetCatId],
-            timestamp: Date.now(),
+            timestamp: fwdTimestamp,
           });
-          socketManager?.broadcastToRoom(`thread:${fwdThreadId}`, 'connector_message', {
-            threadId: fwdThreadId,
-            messageId: fwdStored.id,
-            connectorId,
+          emitConnectorMessage(socketManager, fwdThreadId, {
+            id: fwdStored.id,
             content: fwdText,
+            source: fwdSource,
+            timestamp: fwdTimestamp,
           });
-          invokeTrigger.trigger(fwdThreadId, targetCatId, this.opts.defaultUserId, fwdText, fwdStored.id);
-          log.info({ connectorId, threadId: fwdThreadId }, '[ConnectorRouter] /thread message forwarded');
+          const triggerOutcome = invokeTrigger.trigger(
+            fwdThreadId,
+            targetCatId,
+            this.opts.defaultUserId,
+            fwdText,
+            fwdStored.id,
+          );
+          log.info(
+            { connectorId, threadId: fwdThreadId, triggerOutcome },
+            '[ConnectorRouter] /thread message forwarded',
+          );
+
+          // F151 P1: If the target queue was full, no invocation will run and no
+          // notifyDeliveryBatchDone signal will come — close the task here to
+          // prevent it from staying open until TASK_TIMEOUT_MS.
+          if (triggerOutcome === 'full' && adapter?.onDeliveryBatchDone) {
+            await adapter.onDeliveryBatchDone(externalChatId, true);
+          }
+
           return { kind: 'routed', threadId: fwdThreadId, messageId: fwdStored.id };
+        }
+
+        // F151: Close the A2A task after command response (non-forward path).
+        // Placed after /thread check so forwarded invocations can still
+        // deliver through the open task.
+        if (adapter?.onDeliveryBatchDone) {
+          await adapter.onDeliveryBatchDone(externalChatId, true);
         }
 
         const result: RouteResult = { kind: 'command' };
@@ -282,12 +344,18 @@ export class ConnectorRouter {
         chatType === 'group'
           ? `飞书群聊 · ${chatName || externalChatId.slice(-8)}`
           : `${def?.displayName ?? connectorId} DM`;
-      const thread = await threadStore.create(this.opts.defaultUserId, title);
+      const thread = await threadStore.create(this.opts.defaultUserId, title, findMonorepoRoot());
       binding = await bindingStore.bind(connectorId, externalChatId, thread.id, this.opts.defaultUserId);
       log.info(
         { connectorId, externalChatId, threadId: thread.id },
         '[ConnectorRouter] New thread created for external chat',
       );
+    } else if (threadStore.get && threadStore.updateProjectPath) {
+      // ISSUE-16 lazy heal: backfill projectPath for threads created before the fix
+      const existing = await threadStore.get(binding.threadId);
+      if (existing && (!existing.projectPath || existing.projectPath === 'default')) {
+        await threadStore.updateProjectPath(binding.threadId, findMonorepoRoot());
+      }
     }
 
     // 3. Post connector message
@@ -302,8 +370,19 @@ export class ConnectorRouter {
 
     // Parse @-mentions to determine target cat
     const mentionPatterns = this.getMentionPatterns();
-    const { targetCatId } = parseMentions(resolvedText, mentionPatterns, this.opts.defaultCatId);
+    const mentionResult = parseMentions(resolvedText, mentionPatterns, this.opts.defaultCatId);
+    let targetCatId = mentionResult.targetCatId;
+    if (!mentionResult.matched && this.opts.threadStore.getParticipantsWithActivity) {
+      const participants = await this.opts.threadStore.getParticipantsWithActivity(binding.threadId);
+      const lastActive = participants
+        .filter((p) => p.messageCount > 0)
+        .sort((a, b) => b.lastMessageAt - a.lastMessageAt)[0];
+      if (lastActive) {
+        targetCatId = lastActive.catId as CatId;
+      }
+    }
 
+    const storedTimestamp = Date.now();
     const stored = await messageStore.append({
       threadId: binding.threadId,
       userId: this.opts.defaultUserId,
@@ -311,15 +390,15 @@ export class ConnectorRouter {
       content: resolvedText,
       source,
       mentions: [targetCatId],
-      timestamp: Date.now(),
+      timestamp: storedTimestamp,
     });
 
     // 4. Broadcast to WebSocket
-    socketManager?.broadcastToRoom(`thread:${binding.threadId}`, 'connector_message', {
-      threadId: binding.threadId,
-      messageId: stored.id,
-      connectorId,
+    emitConnectorMessage(socketManager, binding.threadId, {
+      id: stored.id,
       content: resolvedText,
+      source,
+      timestamp: storedTimestamp,
     });
 
     // 5. Trigger cat invocation (use parsed targetCatId)
@@ -433,7 +512,7 @@ export class ConnectorRouter {
     const def = getConnectorDefinition(connectorId);
     const label = def?.displayName ?? connectorId;
     const hubTitle = chatLabel ? `${chatLabel} IM Hub` : `${label} IM Hub`;
-    const hubThread = await threadStore.create(this.opts.defaultUserId, hubTitle);
+    const hubThread = await threadStore.create(this.opts.defaultUserId, hubTitle, findMonorepoRoot());
     await threadStore.updateConnectorHubState(hubThread.id, {
       v: 1,
       connectorId,
@@ -479,17 +558,17 @@ export class ConnectorRouter {
     });
 
     // Broadcast both
-    socketManager?.broadcastToRoom(`thread:${threadId}`, 'connector_message', {
-      threadId,
-      messageId: cmdMsg.id,
-      connectorId,
+    emitConnectorMessage(socketManager, threadId, {
+      id: cmdMsg.id,
       content: commandText,
+      source: { connector: connectorId, label: def?.displayName ?? connectorId, icon: def?.icon ?? 'message' },
+      timestamp: now,
     });
-    socketManager?.broadcastToRoom(`thread:${threadId}`, 'connector_message', {
-      threadId,
-      messageId: resMsg.id,
-      connectorId: 'system-command',
+    emitConnectorMessage(socketManager, threadId, {
+      id: resMsg.id,
       content: responseText,
+      source: { connector: 'system-command', label: 'Clowder AI', icon: 'settings' },
+      timestamp: now + 1,
     });
 
     // G+: Update lastCommandAt on the Hub thread for audit visibility

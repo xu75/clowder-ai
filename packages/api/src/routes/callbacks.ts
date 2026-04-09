@@ -19,20 +19,21 @@ import type { IBacklogStore } from '../domains/cats/services/stores/ports/Backlo
 import type { DeliveryCursorStore } from '../domains/cats/services/stores/ports/DeliveryCursorStore.js';
 import type { IInvocationRecordStore } from '../domains/cats/services/stores/ports/InvocationRecordStore.js';
 import { hydrateReplyPreview, type IMessageStore } from '../domains/cats/services/stores/ports/MessageStore.js';
-import type { ITaskStore } from '../domains/cats/services/stores/ports/TaskStore.js';
+import { type ITaskStore, isSubjectOwnershipConflictError } from '../domains/cats/services/stores/ports/TaskStore.js';
 import type { IThreadStore, VotingStateV1 } from '../domains/cats/services/stores/ports/ThreadStore.js';
 import { canViewMessage } from '../domains/cats/services/stores/visibility.js';
 import { getVoiceBlockSynthesizer } from '../domains/cats/services/tts/VoiceBlockSynthesizer.js';
 import type { IEvidenceStore, IMarkerQueue, IReflectionService } from '../domains/memory/interfaces.js';
-import type { IPrTrackingStore } from '../infrastructure/email/PrTrackingStore.js';
 import { createModuleLogger } from '../infrastructure/logger.js';
 import type { SocketManager } from '../infrastructure/websocket/index.js';
+import { scoreKeywordRelevance, tokenizeKeyword } from '../utils/keyword-relevance.js';
 import { getFeatureTagId } from './backlog-doc-import.js';
 import { enqueueA2ATargets, triggerA2AInvocation } from './callback-a2a-trigger.js';
 import { callbackAuthSchema } from './callback-auth-schema.js';
 import { registerCallbackBootcampRoutes } from './callback-bootcamp-routes.js';
 import { registerCallbackDocumentRoutes } from './callback-document-routes.js';
 import { EXPIRED_CREDENTIALS_ERROR } from './callback-errors.js';
+import { registerCallbackGameRoutes } from './callback-game-routes.js';
 import { registerCallbackLimbRoutes } from './callback-limb-routes.js';
 import { registerCallbackMemoryRoutes } from './callback-memory-routes.js';
 import { getMultiMentionOrchestrator, registerMultiMentionRoutes } from './callback-multi-mention-routes.js';
@@ -58,8 +59,8 @@ export interface CallbackRoutesOptions {
   invocationTracker?: InvocationTracker;
   /** For mention ack cursor tracking (#77) */
   deliveryCursorStore?: DeliveryCursorStore;
-  /** TD091: PR tracking registration via MCP callback */
-  prTrackingStore?: IPrTrackingStore;
+  /** Phase D: validates GitHub repo exists before PR tracking registration */
+  validateRepo?: (repoFullName: string) => Promise<boolean>;
   /** F043 P1: feat_index provider override for tests */
   featIndexProvider?: () => Promise<FeatIndexEntry[]>;
   /** F073 P1: workflow SOP store for bulletin board */
@@ -287,7 +288,7 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
     invocationRecordStore,
     invocationTracker,
     deliveryCursorStore,
-    prTrackingStore,
+    validateRepo,
     featIndexProvider,
     queueProcessor,
   } = opts;
@@ -510,6 +511,7 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
         content: storedContent,
         origin: 'callback',
         messageId: storedMsg.id,
+        ...(invocationId ? { invocationId } : {}),
         // F52+F098-C1: Include crossPost + targetCats in real-time broadcast
         ...(isCrossThread || validExplicitTargets.length
           ? {
@@ -755,7 +757,8 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
 
     // F-Swarm-6: allow reading a different thread's context
     const effectiveThreadId = overrideThreadId ?? record.threadId;
-    const normalizedKeyword = keyword?.toLowerCase();
+    // F148 Phase B (AC-B2): tokenize keyword for relevance scoring
+    const keywordTerms = keyword ? tokenizeKeyword(keyword) : [];
 
     const requestedLimit = limit ?? 20;
     let needsPlayFilter = false;
@@ -773,6 +776,8 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       ? { type: 'cat' as const, catId: createCatId(record.catId) }
       : { type: 'user' as const };
     const matchesExtraFilters = (item: Awaited<ReturnType<typeof messageStore.getByThread>>[number]): boolean => {
+      // F148 Phase E (AC-E2): briefing messages are non-routing, never enter cat context
+      if (item.origin === 'briefing') return false;
       if (filterCatId) {
         if (filterCatId === 'user') {
           if (item.catId !== null) return false;
@@ -780,7 +785,8 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
           return false;
         }
       }
-      if (normalizedKeyword && !item.content.toLowerCase().includes(normalizedKeyword)) {
+      // F148 Phase B (AC-B2): tokenized keyword relevance (replaces substring .includes())
+      if (keywordTerms.length > 0 && scoreKeywordRelevance(item.content, keywordTerms) === 0) {
         return false;
       }
       return true;
@@ -813,8 +819,18 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
         cursorId = oldest.id;
       }
 
-      visible.sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
-      filtered = visible.slice(-requestedLimit);
+      // F148 Phase B (AC-B2): sort by keyword relevance when searching, chronological otherwise
+      if (keywordTerms.length > 0) {
+        visible.sort((a, b) => {
+          const sa = scoreKeywordRelevance(a.content, keywordTerms);
+          const sb = scoreKeywordRelevance(b.content, keywordTerms);
+          return sb - sa || b.timestamp - a.timestamp; // higher relevance first, then newest first
+        });
+        filtered = visible.slice(0, requestedLimit); // P1-1 fix: take HEAD (highest relevance)
+      } else {
+        visible.sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
+        filtered = visible.slice(-requestedLimit); // take TAIL (most recent)
+      }
     } else {
       // Play mode: paginate backwards collecting visible messages until we have enough
       // or data is exhausted. No fixed page cap — correctness over latency.
@@ -851,9 +867,18 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       }
 
       // visible is accumulated in reverse-chronological page order but each page is ascending.
-      // Re-sort ascending and take newest requestedLimit.
-      visible.sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
-      filtered = visible.slice(-requestedLimit);
+      // P2-1 fix: play mode also sorts by keyword relevance when keyword is active
+      if (keywordTerms.length > 0) {
+        visible.sort((a, b) => {
+          const sa = scoreKeywordRelevance(a.content, keywordTerms);
+          const sb = scoreKeywordRelevance(b.content, keywordTerms);
+          return sb - sa || b.timestamp - a.timestamp;
+        });
+        filtered = visible.slice(0, requestedLimit);
+      } else {
+        visible.sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
+        filtered = visible.slice(-requestedLimit);
+      }
     }
 
     // F073 P1: Look up workflow SOP for resume capsule if thread has linked backlog item
@@ -887,6 +912,8 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
         content: item.content,
         ...(item.contentBlocks ? { contentBlocks: item.contentBlocks } : {}),
         timestamp: item.timestamp,
+        // F148 Phase B (AC-B2): include relevance score when keyword search is active
+        ...(keywordTerms.length > 0 ? { relevanceScore: scoreKeywordRelevance(item.content, keywordTerms) } : {}),
       })),
       ...(workflowSop ? { workflowSop } : {}),
     };
@@ -992,9 +1019,10 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
   });
 
   app.post('/api/callbacks/register-pr-tracking', async (request, reply) => {
-    if (!prTrackingStore) {
+    // #320: Unified model — write to TaskStore instead of PrTrackingStore
+    if (!taskStore) {
       reply.status(503);
-      return { error: 'PR tracking not configured' };
+      return { error: 'Task store not configured' };
     }
 
     const parsed = registerPrTrackingSchema.safeParse(request.body);
@@ -1011,25 +1039,44 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
     }
 
     // Use authoritative catId from invocation record, not caller payload.
-    // LLMs may pass wrong catId (e.g. tool description examples bias).
     const catId = record.catId;
 
-    // Cloud Codex P1-2: ownership protection — reject cross-user overwrites
-    const existing = await prTrackingStore.get(repoFullName, prNumber);
-    if (existing && existing.userId !== record.userId) {
-      reply.status(409);
-      return { error: `PR ${repoFullName}#${prNumber} already registered by another user` };
+    // Phase D: validate repo exists and is accessible (AC-D1)
+    if (validateRepo) {
+      let repoOk: boolean;
+      try {
+        repoOk = await validateRepo(repoFullName);
+      } catch {
+        reply.status(503);
+        return { error: 'Repository validation unavailable — try again later' };
+      }
+      if (!repoOk) {
+        reply.status(422);
+        return { error: `Repository ${repoFullName} does not exist or is not accessible` };
+      }
     }
 
-    const entry = await prTrackingStore.register({
-      repoFullName,
-      prNumber,
-      catId,
-      threadId: record.threadId,
-      userId: record.userId,
-    });
+    const subjectKey = `pr:${repoFullName}#${prNumber}`;
+    try {
+      const task = await taskStore.upsertBySubject({
+        kind: 'pr_tracking',
+        subjectKey,
+        threadId: record.threadId,
+        title: `PR tracking: ${repoFullName}#${prNumber}`,
+        ownerCatId: catId,
+        why: `Tracking PR ${repoFullName}#${prNumber} for review feedback, CI/CD, and conflict detection`,
+        createdBy: catId,
+        userId: record.userId,
+      });
 
-    return { status: 'ok', threadId: record.threadId, entry };
+      return { status: 'ok', threadId: record.threadId, task };
+    } catch (error) {
+      if (isSubjectOwnershipConflictError(error)) {
+        reply.status(409);
+        return { error: `PR ${repoFullName}#${prNumber} already registered by another user` };
+      }
+      throw error;
+    }
   });
 
   // F22: Rich block creation via MCP callback
@@ -1287,4 +1334,7 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
 
   // F088 Phase J2: Document generation callback routes
   registerCallbackDocumentRoutes(app, { registry, socketManager });
+
+  // F101: Game action callback for non-Claude cats (OpenCode/Codex/Gemini)
+  registerCallbackGameRoutes(app, { registry });
 };

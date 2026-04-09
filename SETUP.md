@@ -26,9 +26,8 @@ pnpm install
 # 3. Build (required — creates dist/ for workspace packages)
 pnpm build
 
-# 4. Configure
+# 4. Configure infrastructure (API keys are added via UI after launch)
 cp .env.example .env
-# Edit .env — add model API keys or configure CLI auth (see below)
 
 # 5. Run
 pnpm start
@@ -60,7 +59,7 @@ your-projects/
 | `pnpm start --memory` | Same, but skip Redis (in-memory store, data lost on restart) |
 | `pnpm start --quick` | Same, but skip rebuild (use existing `dist/`) |
 | `pnpm start --daemon` | Same, but run in background (logs to `cat-cafe-daemon.log`) |
-| `pnpm start:direct` | Bypass worktree — run dev server directly in current checkout |
+| `pnpm start:direct` | Bypass worktree — start from current checkout without auto-update ([details](#running-a-specific-version-without-auto-update)) |
 | `pnpm stop` | Stop background daemon |
 | `pnpm start:status` | Check if daemon is running |
 | `pnpm runtime:init` | Only create the runtime worktree (no start) |
@@ -70,6 +69,54 @@ your-projects/
 First run creates `../cat-cafe-runtime` automatically. Subsequent runs do a fast-forward sync then start.
 
 > **Custom runtime path:** Set `CAT_CAFE_RUNTIME_DIR` to use a different location: `CAT_CAFE_RUNTIME_DIR=../my-clowder-runtime pnpm start`
+
+## Running a Specific Version (Without Auto-Update)
+
+By default, `pnpm start` auto-syncs to the latest `origin/main`. If you want to **stay on a specific release** — for stability, reproducibility, or because you're not ready to update — use `pnpm start:direct` instead.
+
+### Option 1: Checkout a Release Tag
+
+Clowder publishes [tagged releases](https://github.com/zts212653/clowder-ai/releases) (`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, etc.). To run a specific version:
+
+```bash
+# 1. Clone (or use your existing clone)
+git clone https://github.com/zts212653/clowder-ai.git
+cd clowder-ai
+
+# 2. Checkout the version you want
+git checkout v0.4.0          # or any tag from the Releases page
+
+# 3. Install + build
+pnpm install
+pnpm build
+
+# 4. Configure infrastructure (API keys are added via UI after launch)
+cp .env.example .env
+
+# 5. Start directly (bypasses worktree, won't auto-update)
+pnpm start:direct
+
+# No Redis? Use in-memory mode
+pnpm start:direct -- --memory
+```
+
+### Option 2: Stay on Your Current Commit
+
+If you've already cloned and are happy with the current version, just use `pnpm start:direct` instead of `pnpm start`:
+
+```bash
+pnpm start:direct            # Runs from current checkout, no sync
+pnpm start:direct -- --quick # Skip rebuild too
+```
+
+### Why `pnpm start:direct`?
+
+| Command | Auto-syncs to latest? | Creates worktree? | Use case |
+|---------|----------------------|-------------------|----------|
+| `pnpm start` | **Yes** — syncs to `origin/main` | Yes | Always run the latest version |
+| `pnpm start:direct` | **No** — runs from current checkout | No | Pin to a specific version or branch |
+
+> **Updating later:** When you're ready to update, simply `git fetch && git checkout v0.5.0` (or whichever new tag), then `pnpm install && pnpm build && pnpm start:direct`.
 
 ## Background / Daemon Mode
 
@@ -131,26 +178,11 @@ sudo journalctl -u clowder-ai -f
 
 ## Configuration
 
-### Model API Keys (recommended)
+### Infrastructure (`.env`)
 
-If you use API keys directly, at least one model provider is needed for a working agent. All three are recommended for full multi-agent collaboration.
+The `.env` file configures **infrastructure only** — ports, Redis, and optional service URLs. Model API keys are managed through the web UI (see below).
 
-> **Using CLI auth?** If you've already authenticated via `claude`, `codex`, or `gemini` CLI tools, you can skip API keys — the CLI subscription handles authentication. API keys are only needed for direct API access.
-
-```bash
-# Claude (Ragdoll cat / 布偶猫) — recommended as primary
-ANTHROPIC_API_KEY=your-anthropic-api-key
-
-# GPT / Codex (Maine Coon / 缅因猫) — code review specialist
-OPENAI_API_KEY=your-openai-api-key
-
-# Gemini (Siamese / 暹罗猫) — visual design
-GOOGLE_API_KEY=...
-```
-
-### Redis
-
-Redis is the persistent store for threads, messages, tasks, and memory.
+**Redis** — persistent store for threads, messages, tasks, and memory:
 
 ```bash
 REDIS_URL=redis://localhost:6399
@@ -160,15 +192,47 @@ The `pnpm start` command auto-starts Redis on port 6399. Data persists in `~/.ca
 
 **No Redis?** Use `pnpm start --memory` for in-memory mode (data lost on restart — fine for trying things out).
 
-### Frontend
+**Frontend:**
 
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:3004
 ```
 
+### Model Access (UI)
+
+After launching, open `http://localhost:3003` and navigate to **Hub → System Settings → Account Configuration** to set up your model providers.
+
+There are two types of accounts:
+
+| Type | How It Works | Providers |
+|------|-------------|-----------|
+| **Built-in (OAuth / CLI subscription)** | Authenticate via the provider's CLI tool (`claude`, `codex`, `gemini`). No API key needed — the CLI subscription handles auth. | Claude, GPT/Codex, Gemini |
+| **API Key** | Enter your API key + base URL for direct API access. Works with any OpenAI-compatible or Anthropic-compatible endpoint. | Claude, GPT, Gemini, **Kimi, GLM, MiniMax, Qwen, OpenRouter**, and more |
+
+**Steps:**
+1. Click **"Add Account"** in the Account Configuration tab
+2. Choose a provider or add a custom one
+3. For built-in providers: select OAuth/subscription mode (no key needed if CLI is authenticated)
+4. For API key providers: enter your API key and (optionally) a custom base URL
+5. Click **Test** to verify connectivity
+
+**Adding Chinese / third-party providers (Kimi, GLM, MiniMax, Qwen, OpenRouter):**
+
+These providers are configured as API key accounts with a custom base URL. For detailed setup instructions (base URLs, model names, protocol selection, common pitfalls), see the **[Third-Party AI Provider Guide](docs/guides/provider-configuration.md)**.
+
+> **Legacy `.env` fallback:** The system still reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GOOGLE_API_KEY` from `.env` as a fallback, but this path is deprecated. Use the UI for all new setups.
+
+### Member Configuration
+
+To add team members (cats) that use specific providers:
+
+1. Go to **Hub → Member Collaboration → Overview**
+2. Each member can be bound to a provider account from your Account Configuration
+3. Built-in providers support OAuth; third-party providers use API key accounts
+
 ## Optional Features
 
-Clowder works out of the box with model access (API keys or CLI auth) and Redis (or `--memory` mode). Everything below is opt-in.
+Clowder works out of the box with model access and Redis (or `--memory` mode). Everything below is opt-in.
 
 ### Voice Input / Output
 
@@ -494,7 +558,8 @@ No additional CORS configuration is needed for most LAN / VPN setups.
 - Make sure Redis is installed: `redis-server --version`
 
 **No agents responding?**
-- Check `.env` has at least one valid API key, or verify CLI auth is working (`claude --version`, `codex --version`)
+- Check that you've added at least one provider account in **Hub → System Settings → Account Configuration**
+- If using CLI auth, verify it's working (`claude --version`, `codex --version`)
 - Check the API logs in terminal for auth errors
 
 **Frontend can't connect to API?**

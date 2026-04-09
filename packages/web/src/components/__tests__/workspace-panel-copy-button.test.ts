@@ -177,9 +177,7 @@ describe('WorkspacePanel Copy button', () => {
     setupMocks({ truncated: true, content: 'partial content...' });
     await renderPanel();
 
-    const btn = container.querySelector(
-      'button[title="复制已加载内容（文件已截断，非完整全文）"]',
-    ) as HTMLButtonElement;
+    const btn = container.querySelector('button[title="复制已加载内容"]') as HTMLButtonElement;
     expect(btn).not.toBeNull();
     expect(btn.textContent).toBe('Copy…');
   });
@@ -196,5 +194,24 @@ describe('WorkspacePanel Copy button', () => {
       btn.click();
     });
     expect(clipboardWriteText).toHaveBeenCalledWith('');
+  });
+
+  it('prevents Enter default in workspace search input while composing', async () => {
+    setupMocks();
+    await renderPanel();
+
+    const searchInput = container.querySelector('input[placeholder="搜索全部..."]') as HTMLInputElement | null;
+    if (!searchInput) throw new Error('Missing workspace search input');
+
+    await act(async () => {
+      searchInput.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    });
+
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    await act(async () => {
+      searchInput.dispatchEvent(enter);
+    });
+
+    expect(enter.defaultPrevented).toBe(true);
   });
 });

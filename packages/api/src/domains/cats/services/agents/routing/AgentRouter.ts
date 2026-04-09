@@ -164,6 +164,10 @@ export interface AgentRouterOptions {
   >;
   /** F129: Pack store for loading active packs at invocation time */
   packStore?: import('../../../../packs/PackStore.js').PackStore;
+  /** F148: Evidence store for hierarchical context recall */
+  evidenceStore?: import('../../../../memory/interfaces.js').IEvidenceStore;
+  /** F150: Tool usage counter */
+  toolUsageCounter?: import('../../tool-usage/ToolUsageCounter.js').ToolUsageCounter;
 }
 
 /**
@@ -203,6 +207,9 @@ export class AgentRouter {
       >)
     | undefined;
   private packStore?: import('../../../../packs/PackStore.js').PackStore;
+  private evidenceStore?: import('../../../../memory/interfaces.js').IEvidenceStore;
+  /** F150 */
+  private toolUsageCounter?: import('../../tool-usage/ToolUsageCounter.js').ToolUsageCounter;
   private speechMentionRe: RegExp;
 
   private rebuildRuntimeCaches(agentRegistry: AgentRegistry): void {
@@ -239,6 +246,8 @@ export class AgentRouter {
     this.agentPaneRegistry = options.agentPaneRegistry;
     this.signalArticleLookup = options.signalArticleLookup;
     this.packStore = options.packStore;
+    this.evidenceStore = options.evidenceStore;
+    this.toolUsageCounter = options.toolUsageCounter;
   }
 
   refreshFromRegistry(agentRegistry: AgentRegistry): void {
@@ -663,6 +672,8 @@ export class AgentRouter {
       ...(this.draftStore ? { draftStore: this.draftStore } : {}),
       ...(this.socketManager ? { socketManager: this.socketManager } : {}),
       ...(this.packStore ? { packStore: this.packStore } : {}),
+      ...(this.evidenceStore ? { evidenceStore: this.evidenceStore } : {}),
+      ...(this.toolUsageCounter ? { toolUsageCounter: this.toolUsageCounter } : {}),
     };
   }
 
@@ -675,13 +686,14 @@ export class AgentRouter {
     message: string,
     threadId?: string,
     options?: { persist?: boolean },
-  ): Promise<{ targetCats: CatId[]; intent: IntentResult }> {
+  ): Promise<{ targetCats: CatId[]; intent: IntentResult; hasMentions: boolean }> {
     const resolvedThreadId = threadId ?? DEFAULT_THREAD_ID;
+    const hasMentions = (await this.parseAllMentions(message, resolvedThreadId)).length > 0;
     const targetCats = options?.persist
       ? await this.resolveTargets(message, resolvedThreadId)
       : await this.peekTargets(message, resolvedThreadId);
     const intent = parseIntent(message, targetCats.length);
-    return { targetCats, intent };
+    return { targetCats, intent, hasMentions };
   }
 
   /**

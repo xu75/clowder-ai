@@ -28,6 +28,8 @@ export interface IOutboundAdapter {
     externalChatId: string,
     payload: { type: 'image' | 'file' | 'audio'; [key: string]: unknown },
   ): Promise<void>;
+  /** F151: Delivery batch complete. `chainDone=true` = no more output for this task; send close frame. */
+  onDeliveryBatchDone?(externalChatId: string, chainDone: boolean): Promise<void>;
 }
 
 /** Adapter that supports edit-in-place streaming (placeholder → progressive edits). */
@@ -75,6 +77,18 @@ export class OutboundDeliveryHook {
   }
 
   async deliver(
+    threadId: string,
+    content: string,
+    catId?: CatId,
+    richBlocks?: RichBlock[],
+    threadMeta?: ThreadMeta,
+    origin?: MessageOrigin,
+    triggerMessageId?: string,
+  ): Promise<void> {
+    return this.executeDelivery(threadId, content, catId, richBlocks, threadMeta, origin, triggerMessageId);
+  }
+
+  private async executeDelivery(
     threadId: string,
     content: string,
     catId?: CatId,
@@ -165,13 +179,17 @@ export class OutboundDeliveryHook {
             richBlocks.some((b) => b.kind === 'audio' || b.kind === 'file' || b.kind === 'media_gallery')
           ) {
             // Media-capable adapter without sendRichMessage (e.g. WeChat):
-            // Skip text sendReply ONLY when sendable media blocks exist —
-            // audio/file/media_gallery will be sent below via sendMedia,
-            // which needs a fresh context_token (iLink single-token constraint).
-            this.opts.log.info(
-              { connectorId: binding.connectorId },
-              '[OutboundDeliveryHook] Skipping sendReply — sendable media blocks will use the token',
+            // BUG-5 corrected: context_token is reusable, so send text first, then media.
+            // Render non-media blocks (html_widget, card, etc.) as plaintext alongside text content.
+            const nonMediaBlocks = richBlocks.filter(
+              (b) => b.kind !== 'audio' && b.kind !== 'file' && b.kind !== 'media_gallery',
             );
+            const blockText = nonMediaBlocks.length > 0 ? renderAllRichBlocksPlaintext(nonMediaBlocks) : '';
+            const textToSend = blockText ? `${finalContent}\n\n${blockText}` : finalContent;
+            if (textToSend) {
+              await adapter.sendReply(binding.externalChatId, textToSend, outMeta);
+            }
+            // Media blocks sent below in Phase 5/6/J
           } else if (hasRichBlocks) {
             // Fallback for adapters without sendMedia: render blocks as plaintext
             const blockText = renderAllRichBlocksPlaintext(richBlocks);
@@ -251,11 +269,19 @@ export class OutboundDeliveryHook {
                       }
                     } else {
                       const absPath = resolve?.(item.url);
-                      await adapter.sendMedia(binding.externalChatId, {
-                        type: 'image',
-                        url: item.url,
-                        ...(absPath ? { absPath } : {}),
-                      });
+                      if (absPath) {
+                        await adapter.sendMedia(binding.externalChatId, { type: 'image', absPath });
+                      } else if (item.url.startsWith('https://')) {
+                        await adapter.sendMedia(binding.externalChatId, {
+                          type: 'image',
+                          url: item.url,
+                        });
+                      } else {
+                        this.opts.log.warn(
+                          { blockKind: block.kind, url: item.url },
+                          '[OutboundDeliveryHook] media_gallery image skipped — resolver failed and url is not https',
+                        );
+                      }
                     }
                   }
                 }

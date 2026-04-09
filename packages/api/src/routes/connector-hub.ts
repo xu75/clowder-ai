@@ -1,7 +1,9 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { applyConnectorSecretUpdates } from '../config/connector-secret-updater.js';
 import { DEFAULT_THREAD_ID, type IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
 import type { WeixinAdapter } from '../infrastructure/connectors/adapters/WeixinAdapter.js';
 import type { IConnectorPermissionStore } from '../infrastructure/connectors/ConnectorPermissionStore.js';
+import { DefaultFeishuQrBindClient, type FeishuQrBindClient } from '../infrastructure/connectors/FeishuQrBindClient.js';
 import { resolveHeaderUserId } from '../utils/request-identity.js';
 
 export interface ConnectorHubRoutesOptions {
@@ -16,6 +18,8 @@ export interface ConnectorHubRoutesOptions {
   startWeixinPolling?: () => void;
   /** F134 Phase D: Permission store for group whitelist + admin management */
   permissionStore?: IConnectorPermissionStore | null;
+  envFilePath?: string;
+  feishuQrBindClient?: FeishuQrBindClient;
 }
 
 function requireTrustedHubIdentity(request: FastifyRequest, reply: FastifyReply): string | null {
@@ -117,6 +121,56 @@ export const CONNECTOR_PLATFORMS: PlatformDef[] = [
     ],
   },
   {
+    id: 'wecom-bot',
+    name: '企业微信',
+    nameEn: 'WeCom Bot',
+    fields: [
+      { envName: 'WECOM_BOT_ID', label: 'Bot ID', sensitive: false },
+      { envName: 'WECOM_BOT_SECRET', label: 'Bot Secret', sensitive: true },
+    ],
+    docsUrl: 'https://developer.work.weixin.qq.com/document/path/105120',
+    steps: [
+      { text: '在企业微信管理后台创建智能机器人，获取 Bot ID 和 Bot Secret' },
+      { text: '启用「长连接」模式（WebSocket），无需公网 URL' },
+      { text: '填写以下配置并保存，重启 API 服务后生效' },
+    ],
+  },
+  {
+    id: 'wecom-agent',
+    name: '企微自建应用',
+    nameEn: 'WeCom Agent',
+    fields: [
+      { envName: 'WECOM_CORP_ID', label: 'Corp ID (企业 ID)', sensitive: false },
+      { envName: 'WECOM_AGENT_ID', label: 'Agent ID (应用 ID)', sensitive: false },
+      { envName: 'WECOM_AGENT_SECRET', label: 'Agent Secret', sensitive: true },
+      { envName: 'WECOM_TOKEN', label: '回调 Token', sensitive: true },
+      { envName: 'WECOM_ENCODING_AES_KEY', label: 'EncodingAESKey (43 字符)', sensitive: true },
+    ],
+    docsUrl: 'https://developer.work.weixin.qq.com/document/path/90238',
+    steps: [
+      { text: '在企业微信管理后台创建自建应用，获取 AgentId 和 Secret' },
+      { text: '在「API 接收消息」中设置回调 URL、Token 和 EncodingAESKey' },
+      { text: '回调 URL 需通过公网访问（可使用 Cloudflare Tunnel）' },
+      { text: '填写以下配置并保存，重启 API 服务后生效' },
+    ],
+  },
+  {
+    id: 'xiaoyi',
+    name: '小艺',
+    nameEn: 'XiaoYi (Huawei)',
+    fields: [
+      { envName: 'XIAOYI_AK', label: 'Access Key', sensitive: false },
+      { envName: 'XIAOYI_SK', label: 'Secret Key', sensitive: true },
+      { envName: 'XIAOYI_AGENT_ID', label: 'Agent ID', sensitive: false },
+    ],
+    docsUrl: 'https://developer.huawei.com/consumer/cn/service/josp/agc/index.html',
+    steps: [
+      { text: '在小艺开放平台创建 OpenClaw 模式智能体，获取 AK/SK 和 Agent ID' },
+      { text: '填写以下配置并保存，重启 API 服务后自动通过 WebSocket 连接华为 HAG' },
+      { text: '在小艺 APP 中发送消息验证对话链路是否正常' },
+    ],
+  },
+  {
     id: 'weixin',
     name: '微信',
     nameEn: 'WeChat Personal',
@@ -203,6 +257,7 @@ export function buildConnectorStatus(env: Record<string, string | undefined> = p
 
 export const connectorHubRoutes: FastifyPluginAsync<ConnectorHubRoutesOptions> = async (app, opts) => {
   const { threadStore } = opts;
+  const feishuQrBindClient = opts.feishuQrBindClient ?? new DefaultFeishuQrBindClient();
 
   app.get('/api/connector/hub-threads', async (request, reply) => {
     const userId = requireTrustedHubIdentity(request, reply);
@@ -238,6 +293,69 @@ export const connectorHubRoutes: FastifyPluginAsync<ConnectorHubRoutesOptions> =
       weixinStatus.configured = adapter != null && adapter.hasBotToken() && adapter.isPolling();
     }
     return { platforms: status };
+  });
+
+  app.post('/api/connector/feishu/qrcode', async (request, reply) => {
+    const userId = requireTrustedHubIdentity(request, reply);
+    if (!userId) return { error: 'Identity required' };
+
+    try {
+      const result = await feishuQrBindClient.create();
+      return result;
+    } catch (err) {
+      app.log.error({ err }, '[Feishu QR] Failed to fetch QR code');
+      reply.status(502);
+      return { error: 'Failed to fetch QR code from Feishu registration service' };
+    }
+  });
+
+  app.get('/api/connector/feishu/qrcode-status', async (request, reply) => {
+    const userId = requireTrustedHubIdentity(request, reply);
+    if (!userId) return { error: 'Identity required' };
+
+    const { qrPayload } = request.query as { qrPayload?: string };
+    if (!qrPayload) {
+      reply.status(400);
+      return { error: 'qrPayload query parameter required' };
+    }
+
+    try {
+      const status = await feishuQrBindClient.poll(qrPayload);
+      if (status.status !== 'confirmed') {
+        return status;
+      }
+
+      const updates = [
+        { name: 'FEISHU_APP_ID', value: status.appId ?? null },
+        { name: 'FEISHU_APP_SECRET', value: status.appSecret ?? null },
+      ];
+      const currentMode = process.env.FEISHU_CONNECTION_MODE === 'websocket' ? 'websocket' : 'webhook';
+      const verificationToken = process.env.FEISHU_VERIFICATION_TOKEN;
+      if (currentMode === 'webhook' && (!verificationToken || verificationToken.trim() === '')) {
+        updates.push({ name: 'FEISHU_CONNECTION_MODE', value: 'websocket' });
+      }
+      await applyConnectorSecretUpdates(updates, { envFilePath: opts.envFilePath });
+      return { status: 'confirmed' };
+    } catch (err) {
+      app.log.error({ err }, '[Feishu QR] Failed to poll QR status');
+      reply.status(502);
+      return { error: 'Failed to poll Feishu QR status' };
+    }
+  });
+
+  app.post('/api/connector/feishu/disconnect', async (request, reply) => {
+    const userId = requireTrustedHubIdentity(request, reply);
+    if (!userId) return { error: 'Identity required' };
+
+    await applyConnectorSecretUpdates(
+      [
+        { name: 'FEISHU_APP_ID', value: null },
+        { name: 'FEISHU_APP_SECRET', value: null },
+      ],
+      { envFilePath: opts.envFilePath },
+    );
+    app.log.info({ userId }, '[Feishu] Disconnected by user');
+    return { ok: true };
   });
 
   // ── F137: WeChat QR code login routes ──
@@ -283,8 +401,11 @@ export const connectorHubRoutes: FastifyPluginAsync<ConnectorHubRoutesOptions> =
           return { error: 'WeChat adapter not ready — please retry shortly' };
         }
         adapter.setBotToken(status.botToken);
+        await applyConnectorSecretUpdates([{ name: 'WEIXIN_BOT_TOKEN', value: status.botToken }], {
+          envFilePath: opts.envFilePath,
+        });
         opts.startWeixinPolling?.();
-        app.log.info('[WeChat QR] Auto-activated — bot_token set server-side, polling started');
+        app.log.info('[WeChat QR] Auto-activated — bot_token persisted to .env, polling started');
         return { status: 'confirmed' };
       }
 
@@ -315,6 +436,26 @@ export const connectorHubRoutes: FastifyPluginAsync<ConnectorHubRoutesOptions> =
     app.log.info('[WeChat QR] Manual activate — polling started');
 
     return { ok: true, polling: adapter.isPolling() };
+  });
+
+  // F137 Phase D: Disconnect WeChat — stop polling + clear token + clear state
+  app.post('/api/connector/weixin/disconnect', async (request, reply) => {
+    const userId = requireTrustedHubIdentity(request, reply);
+    if (!userId) return { error: 'Identity required' };
+
+    const adapter = opts.weixinAdapter;
+    if (!adapter) {
+      reply.status(503);
+      return { error: 'WeChat adapter not available (connector gateway not started)' };
+    }
+
+    await adapter.disconnect();
+    await applyConnectorSecretUpdates([{ name: 'WEIXIN_BOT_TOKEN', value: null }], {
+      envFilePath: opts.envFilePath,
+    });
+    app.log.info({ userId }, '[WeChat] Disconnected by user — token cleared from .env');
+
+    return { ok: true };
   });
 
   // ── F134 Phase D: Connector Permission API ──

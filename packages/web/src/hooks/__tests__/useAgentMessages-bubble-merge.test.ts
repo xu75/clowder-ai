@@ -25,6 +25,8 @@ const mockSetMessageUsage = vi.fn();
 const mockSetMessageMetadata = vi.fn();
 const mockSetMessageThinking = vi.fn();
 const mockRequestStreamCatchUp = vi.fn();
+const mockReplaceMessageId = vi.fn();
+const mockPatchMessage = vi.fn();
 
 const mockAddMessageToThread = vi.fn();
 const mockClearThreadActiveInvocation = vi.fn();
@@ -58,6 +60,8 @@ const storeState = {
   requestStreamCatchUp: mockRequestStreamCatchUp,
   setMessageMetadata: mockSetMessageMetadata,
   setMessageThinking: mockSetMessageThinking,
+  replaceMessageId: mockReplaceMessageId,
+  patchMessage: mockPatchMessage,
 
   addMessageToThread: mockAddMessageToThread,
   clearThreadActiveInvocation: mockClearThreadActiveInvocation,
@@ -159,6 +163,59 @@ describe('useAgentMessages bubble merge prevention (Bug B)', () => {
     expect(clearCalls.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('callback with explicit invocationId creates standalone bubble when strict match fails', () => {
+    act(() => {
+      root.render(React.createElement(Harness));
+    });
+
+    // Setup: an invocationless stream bubble exists (invocation_created was lost)
+    const placeholderMsg = {
+      id: 'msg-placeholder',
+      type: 'assistant',
+      catId: 'opus',
+      content: 'streaming...',
+      isStreaming: true,
+      origin: 'stream',
+      // No invocationId — this is the invocationless placeholder
+      extra: { stream: {} },
+      timestamp: Date.now() - 1000,
+    };
+    storeState.messages.push(placeholderMsg);
+
+    // Simulate text arriving (so activeRefs gets set for this cat)
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        content: 'streaming...',
+      });
+    });
+
+    vi.clearAllMocks();
+
+    // Callback arrives WITH invocationId, but no bubble has that invocationId tagged
+    // (because invocation_created was lost during micro-disconnect)
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        origin: 'callback',
+        content: 'Final callback response',
+        invocationId: 'inv-lost',
+        messageId: 'msg-final',
+      });
+    });
+
+    // Strict rule: explicit invocationId must NOT fall back to invocationless
+    // placeholder — the placeholder may belong to a newer invocation.
+    // A standalone callback bubble is created instead.
+    const newBubbleCalls = mockAddMessage.mock.calls.filter(
+      ([msg]) => msg.type === 'assistant' && msg.catId === 'opus',
+    );
+    expect(newBubbleCalls).toHaveLength(1);
+    expect(newBubbleCalls[0][0].content).toBe('Final callback response');
+  });
+
   it('new invocation text does not append to previous finalized message', () => {
     act(() => {
       root.render(React.createElement(Harness));
@@ -217,5 +274,147 @@ describe('useAgentMessages bubble merge prevention (Bug B)', () => {
       ([msg]) => msg.type === 'assistant' && msg.catId === 'opus',
     );
     expect(newAssistantCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('P1 regression: stale callback from inv-1 must NOT replace inv-2 active bubble (#266)', () => {
+    act(() => {
+      root.render(React.createElement(Harness));
+    });
+
+    const inv2Bubble = {
+      id: 'msg-inv2',
+      type: 'assistant',
+      catId: 'opus',
+      content: 'New response',
+      isStreaming: true,
+      origin: 'stream',
+      extra: { stream: { invocationId: 'inv-2' } },
+      timestamp: Date.now(),
+    };
+    storeState.messages.push(inv2Bubble);
+    storeState.catInvocations = { opus: { invocationId: 'inv-2' } };
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        content: 'New response',
+      });
+    });
+
+    vi.clearAllMocks();
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        origin: 'callback',
+        content: 'Old inv-1 response',
+        invocationId: 'inv-1',
+        messageId: 'stored-inv1-msg',
+      });
+    });
+
+    const newCallbackBubbles = mockAddMessage.mock.calls.filter(
+      ([msg]) => msg.type === 'assistant' && msg.catId === 'opus' && msg.origin === 'callback',
+    );
+    expect(newCallbackBubbles.length).toBe(1);
+    expect(newCallbackBubbles[0][0].content).toBe('Old inv-1 response');
+
+    const appendToInv2 = mockAppendToMessage.mock.calls.filter(([id]) => id === 'msg-inv2');
+    expect(appendToInv2).toHaveLength(0);
+  });
+
+  it('P1 regression: explicit-invocationId callback must NOT overwrite invocationless bubble when currentKnownInvId is undefined', () => {
+    act(() => {
+      root.render(React.createElement(Harness));
+    });
+
+    const newerBubble = {
+      id: 'msg-newer',
+      type: 'assistant',
+      catId: 'opus',
+      content: 'Newer response',
+      isStreaming: true,
+      origin: 'stream',
+      extra: { stream: {} },
+      timestamp: Date.now(),
+    };
+    storeState.messages.push(newerBubble);
+    storeState.catInvocations = {};
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        content: 'Newer response',
+      });
+    });
+
+    vi.clearAllMocks();
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        origin: 'callback',
+        content: 'Old callback response',
+        invocationId: 'inv-old',
+        messageId: 'stored-old-msg',
+      });
+    });
+
+    const appendToNewer = mockAppendToMessage.mock.calls.filter(([id]) => id === 'msg-newer');
+    expect(appendToNewer).toHaveLength(0);
+  });
+
+  it('P1 regression: stale callback standalone bubble must NOT suppress live stream chunks via replacedInvocationsRef', () => {
+    act(() => {
+      root.render(React.createElement(Harness));
+    });
+
+    storeState.messages.push({
+      id: 'msg-live',
+      type: 'assistant',
+      catId: 'opus',
+      content: 'Live response',
+      isStreaming: true,
+      origin: 'stream',
+      extra: { stream: {} },
+      timestamp: Date.now(),
+    });
+    storeState.catInvocations = {};
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        content: 'Live response',
+      });
+    });
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        origin: 'callback',
+        content: 'Old callback',
+        invocationId: 'inv-stale',
+        messageId: 'msg-stale-cb',
+      });
+    });
+
+    vi.clearAllMocks();
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'text',
+        catId: 'opus',
+        content: ' more live text',
+      });
+    });
+
+    const appendCalls = mockAppendToMessage.mock.calls.filter(([id]) => id === 'msg-live');
+    expect(appendCalls.length).toBeGreaterThanOrEqual(1);
   });
 });

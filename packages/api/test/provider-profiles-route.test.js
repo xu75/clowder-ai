@@ -1,7 +1,7 @@
 // @ts-check
 import './helpers/setup-cat-registry.js';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -31,107 +31,8 @@ describe('provider profiles routes', () => {
     else process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = savedGlobalRoot;
   }
 
-  it('migrates legacy v1 provider profiles with anthropic protocol metadata', async () => {
-    const { readProviderProfiles } = await import('../dist/config/provider-profiles.js');
-    const projectDir = await makeTmpDir('legacy-v1');
-    setGlobalRoot(projectDir);
-    try {
-      const catCafeDir = join(projectDir, '.cat-cafe');
-      await mkdir(catCafeDir, { recursive: true });
-      await writeFile(
-        join(catCafeDir, 'provider-profiles.json'),
-        JSON.stringify({
-          version: 1,
-          providers: {
-            anthropic: {
-              activeProfileId: 'anthropic-sponsor',
-              profiles: [
-                {
-                  id: 'anthropic-sponsor',
-                  displayName: 'Anthropic Sponsor',
-                  authType: 'api_key',
-                  mode: 'api_key',
-                  baseUrl: 'https://api.anthropic-proxy.dev',
-                },
-              ],
-            },
-          },
-        }),
-      );
-
-      const view = await readProviderProfiles(projectDir);
-      const migrated = view.providers.find((profile) => profile.id === 'anthropic-sponsor');
-      assert.ok(migrated, 'migrated anthropic profile should exist');
-      assert.equal(migrated.protocol, 'anthropic');
-      assert.deepEqual(view.bootstrapBindings.anthropic, {
-        enabled: true,
-        mode: 'api_key',
-        accountRef: 'anthropic-sponsor',
-      });
-    } finally {
-      restoreGlobalRoot();
-      await rm(projectDir, { recursive: true, force: true });
-    }
-  });
-
-  it('migrates legacy v2 provider profiles by preserving or inferring protocol metadata', async () => {
-    const { readProviderProfiles } = await import('../dist/config/provider-profiles.js');
-    const projectDir = await makeTmpDir('legacy-v2');
-    setGlobalRoot(projectDir);
-    try {
-      const catCafeDir = join(projectDir, '.cat-cafe');
-      await mkdir(catCafeDir, { recursive: true });
-      await writeFile(
-        join(catCafeDir, 'provider-profiles.json'),
-        JSON.stringify({
-          version: 2,
-          activeProfileIds: {
-            openai: 'openai-sponsor',
-            google: 'google-sponsor',
-          },
-          profiles: [
-            {
-              id: 'openai-sponsor',
-              displayName: 'OpenAI Sponsor',
-              authType: 'api_key',
-              mode: 'api_key',
-              protocol: 'openai',
-              baseUrl: 'https://api.openai-proxy.dev',
-            },
-            {
-              id: 'google-sponsor',
-              displayName: 'Google Sponsor',
-              authType: 'api_key',
-              mode: 'api_key',
-              provider: 'google',
-              baseUrl: 'https://generativelanguage.googleapis.com',
-            },
-          ],
-        }),
-      );
-
-      const view = await readProviderProfiles(projectDir);
-      const openai = view.providers.find((profile) => profile.id === 'openai-sponsor');
-      const google = view.providers.find((profile) => profile.id === 'google-sponsor');
-      assert.ok(openai, 'migrated openai profile should exist');
-      assert.ok(google, 'migrated google profile should exist');
-      assert.equal(openai.protocol, 'openai');
-      assert.equal(google.protocol, 'google');
-      assert.deepEqual(view.bootstrapBindings.openai, {
-        enabled: true,
-        mode: 'api_key',
-        accountRef: 'openai-sponsor',
-      });
-      assert.deepEqual(view.bootstrapBindings.google, {
-        enabled: true,
-        mode: 'api_key',
-        accountRef: 'google-sponsor',
-      });
-    } finally {
-      restoreGlobalRoot();
-      await rm(projectDir, { recursive: true, force: true });
-    }
-  });
+  // F136 Phase 4d: legacy v1/v2 migration tests removed — old provider-profiles.js store retired.
+  // Migration to accounts is tested in account-startup-hook.test.js.
 
   it('GET /api/provider-profiles requires identity', async () => {
     const Fastify = (await import('fastify')).default;
@@ -184,20 +85,11 @@ describe('provider profiles routes', () => {
       assert.equal(listRes.statusCode, 200);
       const list = listRes.json();
       assert.ok(Array.isArray(list.providers));
+      // F136 Phase 4d: new response format — no legacy bootstrapBindings
       assert.equal(list.activeProfileId, null);
-      assert.deepEqual(list.bootstrapBindings, {
-        anthropic: { enabled: true, mode: 'api_key', accountRef: created.profile.id },
-        openai: { enabled: true, mode: 'oauth', accountRef: 'codex' },
-        google: { enabled: true, mode: 'oauth', accountRef: 'gemini' },
-        dare: { enabled: false, mode: 'skip' },
-        opencode: { enabled: false, mode: 'skip' },
-      });
-      assert.deepEqual(
-        list.providers.slice(0, 3).map((profile) => profile.id),
-        ['claude', 'codex', 'gemini'],
-      );
+      assert.deepEqual(list.bootstrapBindings, {});
       const listed = list.providers.find((p) => p.id === created.profile.id);
-      assert.ok(listed);
+      assert.ok(listed, 'created profile should appear in list');
       assert.equal(listed.hasApiKey, true);
     } finally {
       restoreGlobalRoot();
@@ -407,6 +299,269 @@ describe('provider profiles routes', () => {
     }
   });
 
+  it('POST /api/provider-profiles assigns unique IDs when displayName collides', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { providerProfilesRoutes } = await import('../dist/routes/provider-profiles.js');
+    const app = Fastify();
+    await app.register(providerProfilesRoutes);
+    await app.ready();
+
+    const projectDir = await makeTmpDir('slug-collision');
+    setGlobalRoot(projectDir);
+    try {
+      const first = await app.inject({
+        method: 'POST',
+        url: '/api/provider-profiles',
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          displayName: 'My Sponsor',
+          authType: 'api_key',
+          baseUrl: 'https://api.first.example',
+          apiKey: 'sk-first',
+        }),
+      });
+      assert.equal(first.statusCode, 200, 'first create should succeed');
+      const firstId = first.json().profile.id;
+
+      const second = await app.inject({
+        method: 'POST',
+        url: '/api/provider-profiles',
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          displayName: 'My Sponsor',
+          authType: 'api_key',
+          baseUrl: 'https://api.second.example',
+          apiKey: 'sk-second',
+        }),
+      });
+      assert.equal(second.statusCode, 200, 'second create with same name should succeed');
+      const secondId = second.json().profile.id;
+      assert.notEqual(firstId, secondId, 'duplicate displayName must produce different IDs');
+
+      const listRes = await app.inject({
+        method: 'GET',
+        url: `/api/provider-profiles?projectPath=${encodeURIComponent(projectDir)}`,
+        headers: AUTH_HEADERS,
+      });
+      const list = listRes.json();
+      const ids = list.providers.map((p) => p.id);
+      assert.ok(ids.includes(firstId), 'first profile must still exist');
+      assert.ok(ids.includes(secondId), 'second profile must exist alongside first');
+    } finally {
+      restoreGlobalRoot();
+      await rm(projectDir, { recursive: true, force: true });
+      await app.close();
+    }
+  });
+
+  it('PATCH /api/provider-profiles/:id clears credential when apiKey is empty string', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { providerProfilesRoutes } = await import('../dist/routes/provider-profiles.js');
+    const app = Fastify();
+    await app.register(providerProfilesRoutes);
+    await app.ready();
+
+    const projectDir = await makeTmpDir('clear-cred');
+    setGlobalRoot(projectDir);
+    try {
+      // Create profile with apiKey
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/provider-profiles',
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          displayName: 'Clearable',
+          authType: 'api_key',
+          apiKey: 'sk-to-clear',
+        }),
+      });
+      assert.equal(createRes.statusCode, 200);
+      const profileId = createRes.json().profile.id;
+      assert.equal(createRes.json().profile.hasApiKey, true, 'should have credential after create');
+
+      // PATCH with empty apiKey to clear credential
+      const patchRes = await app.inject({
+        method: 'PATCH',
+        url: `/api/provider-profiles/${profileId}`,
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          apiKey: '',
+        }),
+      });
+      assert.equal(patchRes.statusCode, 200);
+      assert.equal(
+        patchRes.json().profile.hasApiKey,
+        false,
+        'credential should be cleared after PATCH with empty apiKey',
+      );
+
+      // Verify via GET
+      const listRes = await app.inject({
+        method: 'GET',
+        url: `/api/provider-profiles?projectPath=${encodeURIComponent(projectDir)}`,
+        headers: AUTH_HEADERS,
+      });
+      const profile = listRes.json().providers.find((p) => p.id === profileId);
+      assert.equal(profile.hasApiKey, false, 'credential should remain cleared');
+    } finally {
+      restoreGlobalRoot();
+      await rm(projectDir, { recursive: true, force: true });
+      await app.close();
+    }
+  });
+
+  it('PATCH /api/provider-profiles/:id preserves existing protocol when baseUrl changes without explicit override', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { providerProfilesRoutes } = await import('../dist/routes/provider-profiles.js');
+    const app = Fastify();
+    await app.register(providerProfilesRoutes);
+    await app.ready();
+
+    const projectDir = await makeTmpDir('reinfer-proto');
+    setGlobalRoot(projectDir);
+    try {
+      // Create an anthropic account behind a vendor-neutral proxy URL.
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/provider-profiles',
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          displayName: 'Anthropic Proxy',
+          authType: 'api_key',
+          protocol: 'anthropic',
+          baseUrl: 'https://proxy.example.com/v1',
+          apiKey: 'sk-test',
+          models: ['claude-sonnet-4-5'],
+        }),
+      });
+      assert.equal(createRes.statusCode, 200);
+      const profileId = createRes.json().profile.id;
+      assert.equal(createRes.json().profile.protocol, 'anthropic');
+
+      // Normal proxy baseUrl maintenance must not silently rewrite the account family.
+      const patchRes = await app.inject({
+        method: 'PATCH',
+        url: `/api/provider-profiles/${profileId}`,
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          baseUrl: 'https://proxy-2.example.com/v1',
+        }),
+      });
+      assert.equal(patchRes.statusCode, 200);
+      assert.equal(
+        patchRes.json().profile.protocol,
+        'anthropic',
+        'hidden protocol must be preserved across baseUrl-only edits',
+      );
+    } finally {
+      restoreGlobalRoot();
+      await rm(projectDir, { recursive: true, force: true });
+      await app.close();
+    }
+  });
+
+  it('PATCH keeps current protocol even when the new baseUrl would hint another family', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { providerProfilesRoutes } = await import('../dist/routes/provider-profiles.js');
+    const app = Fastify();
+    await app.register(providerProfilesRoutes);
+    await app.ready();
+
+    const projectDir = await makeTmpDir('reinfer-name-trap');
+    setGlobalRoot(projectDir);
+    try {
+      // displayName "Codex Sponsor" contains "codex" → would match openai in nameHints
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/provider-profiles',
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          displayName: 'Codex Sponsor',
+          authType: 'api_key',
+          baseUrl: 'https://proxy.example.com',
+          apiKey: 'sk-test',
+          models: ['gpt-5.4'],
+        }),
+      });
+      assert.equal(createRes.statusCode, 200);
+      const profileId = createRes.json().profile.id;
+      assert.equal(createRes.json().profile.protocol, 'openai');
+
+      // PATCH baseUrl to an anthropic-looking endpoint — protocol should stay openai.
+      const patchRes = await app.inject({
+        method: 'PATCH',
+        url: `/api/provider-profiles/${profileId}`,
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          baseUrl: 'https://api.minimaxi.com/anthropic',
+        }),
+      });
+      assert.equal(patchRes.statusCode, 200);
+      assert.equal(
+        patchRes.json().profile.protocol,
+        'openai',
+        'hidden protocol must not be silently reclassified by a new baseUrl hint',
+      );
+    } finally {
+      restoreGlobalRoot();
+      await rm(projectDir, { recursive: true, force: true });
+      await app.close();
+    }
+  });
+
+  it('PATCH /api/provider-profiles/:id accepts explicit protocol override for API clients', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { providerProfilesRoutes } = await import('../dist/routes/provider-profiles.js');
+    const app = Fastify();
+    await app.register(providerProfilesRoutes);
+    await app.ready();
+
+    const projectDir = await makeTmpDir('patch-explicit-protocol');
+    setGlobalRoot(projectDir);
+    try {
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/provider-profiles',
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          displayName: 'proxy-account',
+          authType: 'api_key',
+          baseUrl: 'https://proxy.example.com',
+          apiKey: 'sk-test',
+          models: ['gpt-5.4'],
+        }),
+      });
+      assert.equal(createRes.statusCode, 200);
+      const profileId = createRes.json().profile.id;
+
+      const patchRes = await app.inject({
+        method: 'PATCH',
+        url: `/api/provider-profiles/${profileId}`,
+        headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          projectPath: projectDir,
+          baseUrl: 'https://api.minimaxi.com/anthropic',
+          protocol: 'anthropic',
+        }),
+      });
+      assert.equal(patchRes.statusCode, 200);
+      assert.equal(patchRes.json().profile.protocol, 'anthropic');
+    } finally {
+      restoreGlobalRoot();
+      await rm(projectDir, { recursive: true, force: true });
+      await app.close();
+    }
+  });
+
   it('POST /api/provider-profiles/:id/test validates openai api_key providers via fetch', async () => {
     const Fastify = (await import('fastify')).default;
     const calls = [];
@@ -571,6 +726,54 @@ describe('provider profiles routes', () => {
       restoreGlobalRoot();
       if (prevTemplate === undefined) delete process.env.CAT_TEMPLATE_PATH;
       else process.env.CAT_TEMPLATE_PATH = prevTemplate;
+      await rm(projectDir, { recursive: true, force: true });
+      await app.close();
+    }
+  });
+
+  it('GET /api/provider-profiles returns correct client for non-standard builtins (dare/opencode)', async () => {
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const { writeCatalogAccount } = await import('../dist/config/catalog-accounts.js');
+    const Fastify = (await import('fastify')).default;
+    const { providerProfilesRoutes } = await import('../dist/routes/provider-profiles.js');
+    const app = Fastify();
+    await app.register(providerProfilesRoutes);
+    await app.ready();
+
+    const projectDir = await makeTmpDir('client-field');
+    setGlobalRoot(projectDir);
+    try {
+      // Bootstrap minimal catalog
+      const catCafeDir = join(projectDir, '.cat-cafe');
+      mkdirSync(catCafeDir, { recursive: true });
+      writeFileSync(
+        join(catCafeDir, 'cat-catalog.json'),
+        JSON.stringify({ version: 2, breeds: [], roster: {}, reviewPolicy: {}, accounts: {} }),
+      );
+
+      // Write builtin accounts with standard and non-standard clients
+      writeCatalogAccount(projectDir, 'claude', { authType: 'oauth', protocol: 'anthropic', models: ['m1'] });
+      writeCatalogAccount(projectDir, 'dare', { authType: 'oauth', protocol: 'openai', models: ['glm'] });
+      writeCatalogAccount(projectDir, 'opencode', { authType: 'oauth', protocol: 'anthropic', models: ['m2'] });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/provider-profiles?projectPath=${encodeURIComponent(projectDir)}`,
+        headers: AUTH_HEADERS,
+      });
+      assert.equal(res.statusCode, 200);
+      const providers = res.json().providers;
+
+      const claude = providers.find((p) => p.id === 'claude');
+      assert.equal(claude.client, 'anthropic', 'claude builtin client should be protocol (anthropic)');
+
+      const dare = providers.find((p) => p.id === 'dare');
+      assert.equal(dare.client, 'dare', 'dare builtin client should be its own ID, not protocol');
+
+      const opencode = providers.find((p) => p.id === 'opencode');
+      assert.equal(opencode.client, 'opencode', 'opencode builtin client should be its own ID, not protocol');
+    } finally {
+      restoreGlobalRoot();
       await rm(projectDir, { recursive: true, force: true });
       await app.close();
     }

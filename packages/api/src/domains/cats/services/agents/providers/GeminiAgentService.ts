@@ -23,7 +23,13 @@ import { getCatModel } from '../../../../../config/cat-models.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
 import { formatCliExitError } from '../../../../../utils/cli-format.js';
 import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/cli-resolve.js';
-import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
+import {
+  buildChildEnv,
+  isCliError,
+  isCliTimeout,
+  isLivenessWarning,
+  spawnCli,
+} from '../../../../../utils/cli-spawn.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
 import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata, TokenUsage } from '../../types.js';
 import { appendLocalImagePathHints, collectImageAccessDirectories } from '../providers/image-cli-bridge.js';
@@ -153,7 +159,7 @@ export class GeminiAgentService implements AgentService {
           yield {
             type: 'error',
             catId: this.catId,
-            error: `暹罗猫 CLI 响应超时 (${Math.round(event.timeoutMs / 1000)}s)`,
+            error: `暹罗猫 CLI 响应超时 (${Math.round(event.timeoutMs / 1000)}s${event.firstEventAt == null ? ', 未收到首帧' : ''})`,
             metadata,
             timestamp: Date.now(),
           };
@@ -161,6 +167,16 @@ export class GeminiAgentService implements AgentService {
         }
         // F118 Phase C: Forward liveness warnings to frontend with catId
         if (isLivenessWarning(event)) {
+          const warningEvent = event as { level?: string; silenceDurationMs?: number };
+          log.warn(
+            {
+              catId: this.catId,
+              invocationId: options?.invocationId,
+              level: warningEvent.level,
+              silenceMs: warningEvent.silenceDurationMs,
+            },
+            '[GeminiAgent] liveness warning — CLI may be stuck',
+          );
           yield {
             type: 'system_info' as const,
             catId: this.catId,
@@ -273,10 +289,14 @@ export class GeminiAgentService implements AgentService {
     let spawnError: Error | null = null;
 
     try {
+      // Clone all env, strip bloated vars (LS_COLORS etc.) to avoid E2BIG,
+      // then merge callbackEnv overrides. Preserves API keys etc. from parent env.
+      const childEnv = buildChildEnv(options.callbackEnv);
+
       const child = this.antigravitySpawnFn('antigravity', ['chat', '--mode', 'agent', prompt], {
         detached: true,
         stdio: 'ignore',
-        env: { ...process.env, ...options.callbackEnv },
+        env: childEnv as Record<string, string>,
       });
       // Capture async spawn errors (ENOENT etc.) that fire on next tick.
       child.on('error', (err: Error) => {

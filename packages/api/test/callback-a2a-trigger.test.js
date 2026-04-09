@@ -34,7 +34,14 @@ describe('triggerA2AInvocation (fallback path)', () => {
       start() {
         return abortController;
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockRouter = {
@@ -162,7 +169,14 @@ describe('triggerA2AInvocation (fallback path)', () => {
       start() {
         return new AbortController();
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockRouter = {
@@ -233,7 +247,14 @@ describe('triggerA2AInvocation (fallback path)', () => {
       start() {
         return new AbortController();
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockRouter = {
@@ -281,8 +302,13 @@ describe('triggerA2AInvocation (fallback path)', () => {
     // triggerA2AInvocation is fire-and-forget; wait for background task to flush.
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    assert.equal(roomEvents.length, 1, 'should emit intent_mode once execution starts');
-    assert.equal(roomEvents[0].event, 'intent_mode');
+    // #768: intent_mode is deferred to first CLI event; routeExecution threw before yielding,
+    // so intent_mode must NOT be broadcast.
+    assert.equal(
+      roomEvents.filter((e) => e.event === 'intent_mode').length,
+      0,
+      '#768: intent_mode must NOT be broadcast when routeExecution throws before yielding',
+    );
     assert.equal(
       agentBroadcasts.some((b) => b.msg.type === 'error'),
       true,
@@ -298,6 +324,82 @@ describe('triggerA2AInvocation (fallback path)', () => {
       true,
       'failed status should be persisted',
     );
+  });
+
+  test('#768 regression: intent_mode IS broadcast once CLI produces first event (a2a path)', async () => {
+    const { triggerA2AInvocation } = await import('../dist/routes/callback-a2a-trigger.js');
+
+    const roomEvents = [];
+    const mockInvocationRecordStore = {
+      create() {
+        return { outcome: 'created', invocationId: 'inv-768-ok' };
+      },
+      update() {},
+    };
+
+    const mockInvocationTracker = {
+      has() {
+        return false;
+      },
+      start() {
+        return new AbortController();
+      },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
+      complete() {},
+      completeAll() {},
+    };
+
+    const mockRouter = {
+      async *routeExecution() {
+        yield { type: 'text', catId: 'codex', content: 'hello', timestamp: Date.now() };
+        yield { type: 'done', catId: 'codex', isFinal: true, timestamp: Date.now() };
+      },
+    };
+
+    const mockSocketManager = {
+      broadcastAgentMessage() {},
+      broadcastToRoom(room, event, payload) {
+        roomEvents.push({ room, event, payload });
+      },
+    };
+
+    const mockLog = { error() {}, warn() {}, info() {} };
+
+    await triggerA2AInvocation(
+      {
+        router: mockRouter,
+        invocationRecordStore: mockInvocationRecordStore,
+        socketManager: mockSocketManager,
+        invocationTracker: mockInvocationTracker,
+        log: mockLog,
+      },
+      {
+        targetCats: ['codex'],
+        content: '@缅因猫\nreview',
+        userId: 'user-1',
+        threadId: 't-768-ok',
+        triggerMessage: {
+          id: 'msg-768-ok',
+          threadId: 't-768-ok',
+          userId: 'user-1',
+          catId: 'opus',
+          content: 'test',
+          mentions: [],
+          timestamp: Date.now(),
+        },
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const intentEvents = roomEvents.filter((e) => e.event === 'intent_mode');
+    assert.equal(intentEvents.length, 1, '#768: intent_mode must be broadcast exactly once when CLI yields');
+    assert.equal(intentEvents[0].payload.threadId, 't-768-ok');
   });
 
   test('calls queueProcessor.onInvocationComplete on success', async () => {
@@ -324,7 +426,14 @@ describe('triggerA2AInvocation (fallback path)', () => {
       start() {
         return new AbortController();
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockRouter = {
@@ -397,7 +506,14 @@ describe('triggerA2AInvocation (fallback path)', () => {
       start() {
         return new AbortController();
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockRouter = {
@@ -473,7 +589,14 @@ describe('triggerA2AInvocation (fallback path)', () => {
         setTimeout(() => abortController.abort(), 5);
         return abortController;
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockRouter = {
@@ -690,7 +813,14 @@ describe('enqueueA2ATargets (F27 primary path)', () => {
         startCalled++;
         return new AbortController();
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockInvocationRecordStore = {
@@ -764,7 +894,14 @@ describe('enqueueA2ATargets (F27 primary path)', () => {
         startCalled++;
         return new AbortController();
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockInvocationRecordStore = {
@@ -859,7 +996,14 @@ describe('enqueueA2ATargets (F27 primary path)', () => {
       start() {
         return new AbortController();
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     const mockRouter = {
@@ -933,7 +1077,14 @@ describe('enqueueA2ATargets (F27 primary path)', () => {
       start() {
         return new AbortController();
       },
+      startAll() {
+        return new AbortController();
+      },
+      tryStartThreadAll() {
+        return new AbortController();
+      },
       complete() {},
+      completeAll() {},
     };
 
     let routeCalled = 0;
@@ -1036,7 +1187,14 @@ describe('enqueueA2ATargets F122B (InvocationQueue path)', () => {
           start() {
             return new AbortController();
           },
+          startAll() {
+            return new AbortController();
+          },
+          tryStartThreadAll() {
+            return new AbortController();
+          },
           complete() {},
+          completeAll() {},
         },
         queueProcessor: mockQueueProcessor,
         invocationQueue: mockInvocationQueue,
@@ -1097,7 +1255,14 @@ describe('enqueueA2ATargets F122B (InvocationQueue path)', () => {
           start() {
             return new AbortController();
           },
+          startAll() {
+            return new AbortController();
+          },
+          tryStartThreadAll() {
+            return new AbortController();
+          },
           complete() {},
+          completeAll() {},
         },
         queueProcessor: {
           onInvocationComplete() {},
@@ -1156,7 +1321,14 @@ describe('enqueueA2ATargets F122B (InvocationQueue path)', () => {
           start() {
             return new AbortController();
           },
+          startAll() {
+            return new AbortController();
+          },
+          tryStartThreadAll() {
+            return new AbortController();
+          },
           complete() {},
+          completeAll() {},
         },
         queueProcessor: {
           onInvocationComplete() {},
@@ -1218,7 +1390,14 @@ describe('enqueueA2ATargets F122B (InvocationQueue path)', () => {
           start() {
             return new AbortController();
           },
+          startAll() {
+            return new AbortController();
+          },
+          tryStartThreadAll() {
+            return new AbortController();
+          },
           complete() {},
+          completeAll() {},
         },
         queueProcessor: {
           onInvocationComplete() {},
@@ -1279,7 +1458,14 @@ describe('enqueueA2ATargets F122B (InvocationQueue path)', () => {
           start() {
             return new AbortController();
           },
+          startAll() {
+            return new AbortController();
+          },
+          tryStartThreadAll() {
+            return new AbortController();
+          },
           complete() {},
+          completeAll() {},
         },
         queueProcessor: {
           onInvocationComplete() {},

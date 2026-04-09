@@ -5,22 +5,31 @@
  */
 
 import { resolve } from 'node:path';
-import { type CatConfig, type CatProvider, type ContextBudget, catRegistry, type RosterEntry } from '@cat-cafe/shared';
+import {
+  type CatConfig,
+  type CatProvider,
+  CLI_EFFORT_VALUES,
+  type CliConfig,
+  type ContextBudget,
+  catRegistry,
+  getCliEffortOptionsForProvider,
+  isValidCliEffortForProvider,
+  type RosterEntry,
+} from '@cat-cafe/shared';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { isSeedCat, resolveBoundAccountRefForCat } from '../config/cat-account-binding.js';
-import { bootstrapCatCatalog, resolveCatCatalogPath } from '../config/cat-catalog-store.js';
-import { getRoster, loadCatConfig, toAllCatConfigs } from '../config/cat-config-loader.js';
-import { resolveProjectTemplatePath } from '../config/project-template-path.js';
 import {
   resolveBuiltinClientForProvider,
+  resolveByAccountRef,
+  resolveForClient,
   validateModelFormatForProvider,
   validateRuntimeProviderBinding,
-} from '../config/provider-binding-compat.js';
-import {
-  resolveRuntimeProviderProfileById,
-  resolveRuntimeProviderProfileForClient,
-} from '../config/provider-profiles.js';
+} from '../config/account-resolver.js';
+import { isSeedCat, resolveBoundAccountRefForCat } from '../config/cat-account-binding.js';
+import { bootstrapCatCatalog, resolveCatCatalogPath } from '../config/cat-catalog-store.js';
+import { getAcpConfig, getRoster, loadCatConfig, toAllCatConfigs } from '../config/cat-config-loader.js';
+import { configEventBus, createChangeSetId } from '../config/config-event-bus.js';
+import { resolveProjectTemplatePath } from '../config/project-template-path.js';
 import { createRuntimeCat, deleteRuntimeCat, updateRuntimeCat } from '../config/runtime-cat-catalog.js';
 import { deleteRuntimeOverride, getRuntimeOverride, setRuntimeOverride } from '../config/session-strategy-overrides.js';
 import { resolveActiveProjectRoot } from '../utils/active-project-root.js';
@@ -37,10 +46,12 @@ const contextBudgetSchema = z.object({
   maxContentLengthPerMsg: z.number().int().positive(),
 });
 
+const cliEffortSchema = z.enum(CLI_EFFORT_VALUES);
 const cliSchema = z.object({
-  command: z.string().min(1),
-  outputFormat: z.string().min(1),
+  command: z.string().min(1).optional(),
+  outputFormat: z.string().min(1).optional(),
   defaultArgs: z.array(z.string().min(1)).optional(),
+  effort: cliEffortSchema.nullable().optional(),
 });
 
 const clientSchema = z.enum(['anthropic', 'openai', 'google', 'dare', 'antigravity', 'opencode']);
@@ -72,9 +83,16 @@ const baseCatSchema = z.object({
   sessionChain: z.boolean().optional(),
 });
 
+/** Strip trailing slashes from model names — prevents "MiniMax-M2.7/" artifacts. */
+const modelSchema = z
+  .string()
+  .min(1)
+  .transform((v) => v.replace(/\/+$/, ''))
+  .pipe(z.string().min(1));
+
 const createNormalCatSchema = baseCatSchema.extend({
   client: clientSchema.exclude(['antigravity']),
-  defaultModel: z.string().min(1),
+  defaultModel: modelSchema,
   mcpSupport: z.boolean().optional(),
   cli: cliSchema.optional(),
   cliConfigArgs: z.array(z.string().min(1)).optional(),
@@ -83,7 +101,7 @@ const createNormalCatSchema = baseCatSchema.extend({
 
 const createAntigravityCatSchema = baseCatSchema.extend({
   client: z.literal('antigravity'),
-  defaultModel: z.string().min(1),
+  defaultModel: modelSchema,
   commandArgs: z.array(z.string().min(1)).min(1).optional(),
 });
 
@@ -107,7 +125,7 @@ const updateCatSchema = z.object({
   sessionChain: z.boolean().optional(),
   available: z.boolean().optional(),
   client: clientSchema.optional(),
-  defaultModel: z.string().min(1).optional(),
+  defaultModel: modelSchema.optional(),
   mcpSupport: z.boolean().optional(),
   cli: cliSchema.optional(),
   commandArgs: z.array(z.string().min(1)).optional(),
@@ -183,6 +201,36 @@ function defaultCliForClient(client: CatProvider): { command: string; outputForm
   }
 }
 
+type CliPatch = z.infer<typeof cliSchema>;
+
+function buildResolvedCliConfig(client: CatProvider, baseCli: CliConfig, patch?: CliPatch): CliConfig {
+  const defaultArgs =
+    patch?.defaultArgs !== undefined
+      ? patch.defaultArgs.length > 0
+        ? patch.defaultArgs
+        : undefined
+      : baseCli.defaultArgs && baseCli.defaultArgs.length > 0
+        ? [...baseCli.defaultArgs]
+        : undefined;
+
+  const effortTouched = patch ? Object.hasOwn(patch, 'effort') : false;
+  const nextEffort = effortTouched ? patch?.effort : baseCli.effort;
+  if (nextEffort !== undefined && nextEffort !== null && !isValidCliEffortForProvider(client, nextEffort)) {
+    const options = getCliEffortOptionsForProvider(client);
+    if (!options) {
+      throw new Error(`client "${client}" does not support cli.effort`);
+    }
+    throw new Error(`client "${client}" only supports cli.effort ${options.join(' / ')}`);
+  }
+
+  return {
+    command: patch?.command ?? baseCli.command,
+    outputFormat: patch?.outputFormat ?? baseCli.outputFormat,
+    ...(defaultArgs ? { defaultArgs } : {}),
+    ...(nextEffort !== undefined && nextEffort !== null ? { effort: nextEffort } : {}),
+  };
+}
+
 function resolveAccountRef(body: {
   accountRef?: string | null;
   providerProfileId?: string | null;
@@ -205,9 +253,7 @@ function buildEffectiveAccountRefResolver(projectRoot: string) {
 
     let runtimeProfilePromise = inheritedBindingCache.get(builtinClient);
     if (!runtimeProfilePromise) {
-      runtimeProfilePromise = resolveRuntimeProviderProfileForClient(projectRoot, builtinClient).then(
-        (profile) => profile?.id,
-      );
+      runtimeProfilePromise = Promise.resolve(resolveForClient(projectRoot, builtinClient)?.id);
       inheritedBindingCache.set(builtinClient, runtimeProfilePromise);
     }
     return (await runtimeProfilePromise) ?? cat.accountRef;
@@ -230,7 +276,7 @@ async function validateAccountBindingOrThrow(
     throw new Error(`client "${client}" requires a provider binding`);
   }
   if (!trimmedAccountRef) return;
-  const runtimeProfile = await resolveRuntimeProviderProfileById(projectRoot, trimmedAccountRef);
+  const runtimeProfile = resolveByAccountRef(projectRoot, trimmedAccountRef);
   if (!runtimeProfile) {
     throw new Error(`provider "${trimmedAccountRef}" not found`);
   }
@@ -238,13 +284,10 @@ async function validateAccountBindingOrThrow(
   if (compatibilityError) {
     throw new Error(compatibilityError);
   }
-  const modelFormatError = validateModelFormatForProvider(
-    client,
-    defaultModel,
-    runtimeProfile.kind,
-    ocProviderName,
-    options,
-  );
+  const modelFormatError = validateModelFormatForProvider(client, defaultModel, runtimeProfile.kind, ocProviderName, {
+    ...options,
+    accountModels: runtimeProfile.models,
+  });
   if (modelFormatError) {
     throw new Error(modelFormatError);
   }
@@ -266,6 +309,7 @@ async function toCatResponse(
     accountRef: await resolveEffectiveAccountRef(cat),
     provider: cat.provider,
     defaultModel: cat.defaultModel,
+    cli: cat.cli,
     contextBudget: cat.contextBudget,
     avatar: cat.avatar,
     roleDescription: cat.roleDescription,
@@ -291,14 +335,11 @@ async function toCatResponse(
         }
       : null,
     source: metadata.source,
+    adapterMode: cat.provider === 'google' ? (getAcpConfig(cat.id as string) ? 'acp' : 'cli') : undefined,
   };
 }
 
-async function reconcileCatRegistry(
-  projectRoot: string,
-  managedIdsBefore: ReadonlySet<string>,
-  onCatalogChanged?: (cats: Record<string, CatConfig>) => Promise<void> | void,
-) {
+async function reconcileCatRegistry(projectRoot: string, managedIdsBefore: ReadonlySet<string>) {
   const runtimeCats = toAllCatConfigs(loadCatConfig(resolve(projectRoot, '.cat-cafe', 'cat-catalog.json')));
   const extraCats = catRegistry.getAllConfigs();
   catRegistry.reset();
@@ -308,9 +349,7 @@ async function reconcileCatRegistry(
   for (const [id, config] of Object.entries(extraCats)) {
     if (!runtimeCats[id] && !managedIdsBefore.has(id)) catRegistry.register(id, config);
   }
-  const allCats = catRegistry.getAllConfigs();
-  await onCatalogChanged?.(allCats);
-  return allCats;
+  return catRegistry.getAllConfigs();
 }
 
 function getManagedCatalogIds(projectRoot: string): Set<string> {
@@ -335,11 +374,7 @@ function getResolvedCats(projectRoot: string) {
   }
 }
 
-interface CatsRoutesOptions {
-  onCatalogChanged?: (cats: Record<string, CatConfig>) => Promise<void> | void;
-}
-
-export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opts) => {
+export const catsRoutes: FastifyPluginAsync = async (app) => {
   // GET /api/cats - 获取所有猫猫配置
   app.get('/api/cats', async () => {
     const projectRoot = resolveProjectRoot();
@@ -423,6 +458,7 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
           commandArgs: body.commandArgs,
         });
       } else {
+        const resolvedCli = buildResolvedCliConfig(body.client, defaultCliForClient(body.client), body.cli);
         createRuntimeCat(projectRoot, {
           catId: body.catId,
           name: body.name,
@@ -447,7 +483,7 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
               body.client === 'openai' ||
               body.client === 'google' ||
               body.client === 'opencode'),
-          cli: body.cli ?? defaultCliForClient(body.client),
+          cli: resolvedCli,
           ...(body.cliConfigArgs ? { cliConfigArgs: body.cliConfigArgs } : {}),
           ...(body.ocProviderName ? { ocProviderName: body.ocProviderName } : {}),
         });
@@ -458,7 +494,14 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
       return { error: message };
     }
 
-    const resolved = await reconcileCatRegistry(projectRoot, managedIdsBefore, opts.onCatalogChanged);
+    const resolved = await reconcileCatRegistry(projectRoot, managedIdsBefore);
+    await configEventBus.emitChangeAsync({
+      source: 'cat-config',
+      scope: 'domain',
+      changedKeys: [body.catId],
+      changeSetId: createChangeSetId(),
+      timestamp: Date.now(),
+    });
     const cat = resolved[body.catId];
     const metadata = buildCatResponseMetadataResolver(projectRoot);
     const resolveEffectiveAccountRef = buildEffectiveAccountRefResolver(projectRoot);
@@ -552,6 +595,10 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
     try {
       const hasCommandArgsPatch = body.commandArgs !== undefined;
       const nextCommandArgs = body.commandArgs ?? [];
+      const clientSwitched = body.client !== undefined && body.client !== currentCat.provider;
+      const baseCli = clientSwitched || !currentCat.cli ? defaultCliForClient(effectiveClient) : currentCat.cli;
+      const shouldPatchCli = effectiveClient !== 'antigravity' && (body.cli !== undefined || clientSwitched);
+      const resolvedCli = shouldPatchCli ? buildResolvedCliConfig(effectiveClient, baseCli, body.cli) : undefined;
       const antigravityCliPatch =
         body.client === 'antigravity' || (currentCat.provider === 'antigravity' && hasCommandArgsPatch)
           ? {
@@ -586,7 +633,7 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
             }
           : {}),
         ...(!hasCommandArgsPatch ? antigravityCliPatch : {}),
-        ...(body.cli !== undefined ? { cli: body.cli } : {}),
+        ...(resolvedCli ? { cli: resolvedCli } : {}),
         ...(body.available !== undefined ? { available: body.available } : {}),
         ...(body.cliConfigArgs !== undefined ? { cliConfigArgs: body.cliConfigArgs } : {}),
         ...(body.ocProviderName !== undefined
@@ -595,7 +642,14 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
             : { ocProviderName: body.ocProviderName }
           : {}),
       });
-      const resolved = await reconcileCatRegistry(projectRoot, managedIdsBefore, opts.onCatalogChanged);
+      const resolved = await reconcileCatRegistry(projectRoot, managedIdsBefore);
+      await configEventBus.emitChangeAsync({
+        source: 'cat-config',
+        scope: 'domain',
+        changedKeys: [request.params.id],
+        changeSetId: createChangeSetId(),
+        timestamp: Date.now(),
+      });
       const cat = resolved[request.params.id];
       const metadata = buildCatResponseMetadataResolver(projectRoot);
       return { cat: await toCatResponse(cat, metadata(cat.id), resolveEffectiveAccountRef), updatedBy: operator };
@@ -640,7 +694,14 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
         }
         throw err;
       }
-      await reconcileCatRegistry(projectRoot, managedIdsBefore, opts.onCatalogChanged);
+      await reconcileCatRegistry(projectRoot, managedIdsBefore);
+      await configEventBus.emitChangeAsync({
+        source: 'cat-config',
+        scope: 'domain',
+        changedKeys: [request.params.id],
+        changeSetId: createChangeSetId(),
+        timestamp: Date.now(),
+      });
       return { deleted: true, id: request.params.id, updatedBy: operator };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

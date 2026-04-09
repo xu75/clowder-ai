@@ -6,6 +6,7 @@ import { SignalInboxView } from '@/components/signals/SignalInboxView';
 
 const mocks = vi.hoisted(() => ({
   fetchSignalArticle: vi.fn(),
+  fetchSignalSources: vi.fn(),
   fetchSignalStats: vi.fn(),
   fetchSignalsInbox: vi.fn(),
   searchSignals: vi.fn(),
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/utils/signals-api', () => ({
   fetchSignalArticle: (...args: unknown[]) => mocks.fetchSignalArticle(...args),
+  fetchSignalSources: (...args: unknown[]) => mocks.fetchSignalSources(...args),
   fetchSignalStats: (...args: unknown[]) => mocks.fetchSignalStats(...args),
   fetchSignalsInbox: (...args: unknown[]) => mocks.fetchSignalsInbox(...args),
   searchSignals: (...args: unknown[]) => mocks.searchSignals(...args),
@@ -77,11 +79,13 @@ describe('SignalInboxView', () => {
 
     const article = createArticle();
     mocks.fetchSignalArticle.mockReset();
+    mocks.fetchSignalSources.mockReset();
     mocks.fetchSignalStats.mockReset();
     mocks.fetchSignalsInbox.mockReset();
     mocks.searchSignals.mockReset();
     mocks.updateSignalArticle.mockReset();
 
+    mocks.fetchSignalSources.mockResolvedValue([{ name: 'anthropic-news', url: 'https://example.com' }]);
     mocks.fetchSignalsInbox.mockResolvedValue([article]);
     mocks.fetchSignalStats.mockResolvedValue({
       todayCount: 1,
@@ -242,5 +246,33 @@ describe('SignalInboxView', () => {
       tier: undefined,
     });
     expect(container.textContent).toContain('共 1 篇');
+  });
+
+  it('prevents Enter default while composing in search input', async () => {
+    await act(async () => {
+      root.render(React.createElement(SignalInboxView));
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const queryInput = container.querySelector(
+      'input[placeholder="搜索标题、来源、标签..."]',
+    ) as HTMLInputElement | null;
+    if (!queryInput) throw new Error('Missing query input');
+
+    await act(async () => {
+      queryInput.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    });
+
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    await act(async () => {
+      queryInput.dispatchEvent(enter);
+    });
+
+    expect(enter.defaultPrevented).toBe(true);
   });
 });

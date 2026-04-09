@@ -25,7 +25,7 @@ export function CatAvatar({ catId, size = 32, status }: CatAvatarProps) {
 
   return (
     <div
-      className={`rounded-full ring-2 overflow-hidden flex-shrink-0 bg-gray-100 flex items-center justify-center transition-shadow duration-300 ${
+      className={`rounded-full ring-2 overflow-hidden flex-shrink-0 bg-cafe-surface-elevated flex items-center justify-center transition-shadow duration-300 ${
         isStreaming ? 'animate-pulse' : ''
       }`}
       style={{
@@ -36,8 +36,9 @@ export function CatAvatar({ catId, size = 32, status }: CatAvatarProps) {
       }}
     >
       {imgError ? (
-        <PawIcon className="w-4 h-4 text-gray-400" />
+        <PawIcon className="w-4 h-4 text-cafe-muted" />
       ) : (
+        // eslint-disable-next-line @next/next/no-img-element
         <img
           src={cat?.avatar ?? `/avatars/${catId}.png`}
           alt={cat?.displayName ?? catId}

@@ -1,5 +1,6 @@
 'use client';
 
+import { ExpandableText } from './ExpandableText';
 import { CommitIcon, DecisionIcon, DiscussionIcon, PhaseIcon } from './icons/EvidenceIcons';
 
 export type EvidenceConfidence = 'high' | 'mid' | 'low';
@@ -36,14 +37,18 @@ const STATUS_CONFIG: Record<
     badge?: string;
   }
 > = {
-  draft: { label: '草稿', className: 'border-dashed opacity-80', badge: 'bg-gray-100 text-gray-500 border-gray-200' },
+  draft: {
+    label: '草稿',
+    className: 'border-dashed opacity-80',
+    badge: 'bg-cafe-surface-elevated text-cafe-secondary border-cafe',
+  },
   pending: {
     label: '待审',
     className: 'ring-1 ring-amber-400/30',
     badge: 'bg-amber-100 text-amber-700 border-amber-200 animate-pulse',
   },
   published: { label: '正式', className: '', badge: '' },
-  archived: { label: '归档', className: 'grayscale-[0.5] opacity-60', badge: 'bg-gray-200 text-gray-600' },
+  archived: { label: '归档', className: 'grayscale-[0.5] opacity-60', badge: 'bg-gray-200 text-cafe-secondary' },
 };
 
 const CONFIDENCE_STYLES: Record<
@@ -65,8 +70,6 @@ export function EvidenceCard({ result }: { result: EvidenceResult }) {
   const status = result.status ? STATUS_CONFIG[result.status] : null;
   const Icon = source.icon;
 
-  const snippet = result.snippet.length > 160 ? `${result.snippet.slice(0, 160)}...` : result.snippet;
-
   return (
     <div
       className={`flex gap-2.5 p-3 rounded-xl bg-slate-900/80 border border-slate-700 hover:border-slate-500 hover:shadow-sm transition-all duration-200 group relative ${status?.className ?? ''}`}
@@ -82,11 +85,12 @@ export function EvidenceCard({ result }: { result: EvidenceResult }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-start justify-between gap-2">
           <div className="flex flex-col gap-0.5 min-w-0">
-            <h4
-              className={`text-xs font-bold text-slate-100 leading-snug line-clamp-2 ${result.status === 'archived' ? 'line-through decoration-gray-400/50' : ''}`}
-            >
-              {result.title}
-            </h4>
+            <ExpandableText
+              text={result.title}
+              as="h4"
+              clampClass="line-clamp-2"
+              className={`text-xs font-bold text-slate-100 leading-snug ${result.status === 'archived' ? 'line-through decoration-gray-400/50' : ''}`}
+            />
           </div>
           <div className="flex flex-col items-end gap-1 flex-shrink-0">
             <span
@@ -102,12 +106,21 @@ export function EvidenceCard({ result }: { result: EvidenceResult }) {
           </div>
         </div>
 
-        <p className="text-[11px] text-slate-400 leading-relaxed mt-1.5 line-clamp-2">{snippet}</p>
+        <ExpandableText
+          text={result.snippet}
+          as="p"
+          clampClass="line-clamp-2"
+          className="text-[11px] text-slate-400 leading-relaxed mt-1.5"
+        />
 
         <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-700">
           <span className="text-[10px] text-slate-400 font-bold">{source.label}</span>
-          <span className="text-[10px] text-gray-300">·</span>
-          <span className="text-[10px] text-gray-400 truncate font-mono opacity-70 italic">{result.anchor}</span>
+          <span className="text-[10px] text-cafe-muted">·</span>
+          <ExpandableText
+            text={result.anchor}
+            clampClass="truncate"
+            className="text-[10px] text-cafe-muted font-mono opacity-70 italic"
+          />
         </div>
       </div>
     </div>

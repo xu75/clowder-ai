@@ -1,20 +1,31 @@
 /**
- * F139: CiCdCheckTaskSpec — wraps CiCdCheckPoller.pollOne as a TaskSpec_P1.
+ * F139/F320: CiCdCheckTaskSpec — wraps CiCdCheckPoller.pollOne as a TaskSpec_P1.
  *
- * Gate: list tracked PRs → filter active → one workItem per PR.
+ * #320: Reads from unified TaskStore (kind=pr_tracking) instead of PrTrackingStore.
+ *
+ * Gate: list pr_tracking tasks → filter active → one workItem per PR.
  * Execute: fetchPrStatus → route → optional trigger (same logic as pollOne).
  */
-import type { CatId } from '@cat-cafe/shared';
+import type { CatId, TaskItem } from '@cat-cafe/shared';
+import { parsePrSubjectKey } from '@cat-cafe/shared';
+import type { ITaskStore } from '../../domains/cats/services/stores/ports/TaskStore.js';
 import type { ExecuteContext, TaskSpec_P1 } from '../scheduler/types.js';
-import { CiCdCheckPoller } from './CiCdCheckPoller.js';
-import type { CiCdRouter } from './CiCdRouter.js';
+import type { CiCdRouter, CiPollResult } from './CiCdRouter.js';
 import type { ConnectorInvokeTrigger, ConnectorTriggerPolicy } from './ConnectorInvokeTrigger.js';
-import type { IPrTrackingStore, PrTrackingEntry } from './PrTrackingStore.js';
+import { fetchPrCiStatus } from './ci-status-fetcher.js';
+
+/** Signal carries the TaskItem so execute can access threadId/catId/userId */
+export interface CiCdCheckSignal {
+  task: TaskItem;
+  repoFullName: string;
+  prNumber: number;
+}
 
 export interface CiCdCheckTaskSpecOptions {
-  readonly prTrackingStore: IPrTrackingStore;
+  readonly taskStore: ITaskStore;
   readonly cicdRouter: CiCdRouter;
   readonly invokeTrigger?: ConnectorInvokeTrigger;
+  readonly fetchPrStatus?: (repoFullName: string, prNumber: number) => Promise<CiPollResult | null>;
   readonly log: {
     info: (...args: unknown[]) => void;
     error: (...args: unknown[]) => void;
@@ -23,15 +34,8 @@ export interface CiCdCheckTaskSpecOptions {
   readonly pollIntervalMs?: number;
 }
 
-export function createCiCdCheckTaskSpec(opts: CiCdCheckTaskSpecOptions): TaskSpec_P1<PrTrackingEntry> {
-  // Reuse fetchPrStatus from CiCdCheckPoller (public method)
-  const poller = new CiCdCheckPoller({
-    prTrackingStore: opts.prTrackingStore,
-    cicdRouter: opts.cicdRouter,
-    invokeTrigger: opts.invokeTrigger,
-    log: opts.log as never,
-    pollIntervalMs: opts.pollIntervalMs,
-  });
+export function createCiCdCheckTaskSpec(opts: CiCdCheckTaskSpecOptions): TaskSpec_P1<CiCdCheckSignal> {
+  const fetchPrStatus = opts.fetchPrStatus ?? ((repo: string, pr: number) => fetchPrCiStatus(repo, pr, opts.log));
 
   return {
     id: 'cicd-check',
@@ -39,44 +43,57 @@ export function createCiCdCheckTaskSpec(opts: CiCdCheckTaskSpecOptions): TaskSpe
     trigger: { type: 'interval', ms: opts.pollIntervalMs ?? 60_000 },
     admission: {
       async gate() {
-        const entries = await opts.prTrackingStore.listAll();
-        const active = entries.filter((e: PrTrackingEntry) => e.ciTrackingEnabled !== false);
+        // #320: Read from unified TaskStore — exclude done tasks (PR merged/closed)
+        const allTasks = await opts.taskStore.listByKind('pr_tracking');
+        const active = allTasks.filter((t) => t.status !== 'done' && t.automationState?.ci?.enabled !== false);
 
         if (active.length === 0) {
           return { run: false, reason: 'no active tracked PRs' };
         }
 
-        return {
-          run: true,
-          workItems: active.map((entry: PrTrackingEntry) => ({
-            signal: entry,
-            subjectKey: `pr-${entry.repoFullName}#${entry.prNumber}`,
-          })),
-        };
+        const workItems: { signal: CiCdCheckSignal; subjectKey: string }[] = [];
+        for (const task of active) {
+          const parsed = task.subjectKey ? parsePrSubjectKey(task.subjectKey) : null;
+          if (!parsed) continue;
+          workItems.push({
+            signal: { task, repoFullName: parsed.repoFullName, prNumber: parsed.prNumber },
+            subjectKey: task.subjectKey!,
+          });
+        }
+
+        if (workItems.length === 0) {
+          return { run: false, reason: 'no parseable PR tasks' };
+        }
+
+        return { run: true, workItems };
       },
     },
     run: {
       overlap: 'skip',
       timeoutMs: 30_000,
-      async execute(entry: PrTrackingEntry, _subjectKey: string, _ctx: ExecuteContext) {
-        // Replicate pollOne logic: fetch → route → optional trigger
-        const pollResult = await poller.fetchPrStatus(entry.repoFullName, entry.prNumber);
+      async execute(signal: CiCdCheckSignal, _subjectKey: string, _ctx: ExecuteContext) {
+        const pollResult = await fetchPrStatus(signal.repoFullName, signal.prNumber);
         if (!pollResult) return;
 
         const routeResult = await opts.cicdRouter.route(pollResult);
 
-        if (routeResult.kind === 'notified' && routeResult.bucket === 'fail' && opts.invokeTrigger) {
-          const policy: ConnectorTriggerPolicy = { priority: 'urgent', reason: 'github_ci_failure' };
+        if (routeResult.kind === 'notified' && opts.invokeTrigger) {
+          const isFail = routeResult.bucket === 'fail';
+          const policy: ConnectorTriggerPolicy = {
+            priority: isFail ? 'urgent' : 'normal',
+            reason: isFail ? 'github_ci_failure' : 'github_ci_pass',
+            suggestedSkill: isFail ? undefined : 'merge-gate',
+          };
           opts.invokeTrigger.trigger(
             routeResult.threadId,
             routeResult.catId as CatId,
-            entry.userId,
+            signal.task.userId ?? '',
             routeResult.content,
             routeResult.messageId,
             undefined,
             policy,
           );
-          opts.log.info(`[cicd-check] Triggered ${routeResult.catId} for CI failure`);
+          opts.log.info(`[cicd-check] Triggered ${routeResult.catId} for CI ${isFail ? 'failure' : 'pass'}`);
         }
       },
     },
@@ -84,5 +101,11 @@ export function createCiCdCheckTaskSpec(opts: CiCdCheckTaskSpecOptions): TaskSpe
     outcome: { whenNoSignal: 'record' },
     enabled: () => true,
     actor: { role: 'repo-watcher', costTier: 'cheap' },
+    display: {
+      label: 'CI/CD 检查',
+      category: 'pr',
+      description: '监控 tracked PR 的 CI 状态变化',
+      subjectKind: 'pr',
+    },
   };
 }

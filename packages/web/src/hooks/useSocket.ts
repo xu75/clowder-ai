@@ -11,7 +11,7 @@ import {
 import { useBrakeStore } from '@/stores/brakeStore';
 import { useChatStore } from '@/stores/chatStore';
 import { useToastStore } from '@/stores/toastStore';
-import { API_URL } from '@/utils/api-client';
+import { API_URL, apiFetch } from '@/utils/api-client';
 import { getUserId } from '@/utils/userId';
 import { reconnectGame } from './useGameReconnect';
 import {
@@ -70,11 +70,10 @@ type DebugWebSocket = WebSocket & { __catCafeCloseLoggerAttached?: boolean };
 
 export interface SocketCallbacks {
   onMessage: (msg: AgentMessage) => void;
-  onThreadUpdated?: (data: { threadId: string; title: string }) => void;
+  onThreadUpdated?: (data: { threadId: string; title?: string; participants?: string[] }) => void;
   onIntentMode?: (data: { threadId: string; mode: string; targetCats: string[] }) => void;
   onTaskCreated?: (task: Record<string, unknown>) => void;
   onTaskUpdated?: (task: Record<string, unknown>) => void;
-  onThreadSummary?: (summary: Record<string, unknown>) => void;
   onHeartbeat?: (data: { threadId: string; timestamp: number }) => void;
   onMessageDeleted?: (data: { messageId: string; threadId: string; deletedBy: string }) => void;
   onMessageRestored?: (data: { messageId: string; threadId: string }) => void;
@@ -112,6 +111,113 @@ export interface SocketCallbacks {
     reason: 'canceled' | 'failed';
     queue: import('../stores/chat-types').QueueEntry[];
   }) => void;
+}
+
+const RECONNECT_RECONCILE_DELAY_MS = 2000;
+
+/** Generation counter: each reconnect increments, stale callbacks discard themselves. */
+let reconcileGeneration = 0;
+
+/**
+ * After socket reconnect, bidirectionally reconcile invocation state with server.
+ * Socket disconnect can lose done(isFinal) events (UI stuck in "replying") or
+ * cause local state to drift from server truth. Fetches the queue endpoint and:
+ * - Server has active cats → re-hydrate local slots to match (fixes ID mismatches)
+ * - Server has no active cats → clear stale local invocation state
+ */
+function reconcileInvocationStateOnReconnect(activeThreadId: string | null): void {
+  const generation = ++reconcileGeneration;
+  const state = useChatStore.getState();
+
+  // Collect threads to reconcile: always check the active thread (server might
+  // still be processing even if local cleared state during disconnect), plus
+  // any background threads that think they have active invocations.
+  const threadsToCheck: string[] = [];
+  if (activeThreadId) {
+    threadsToCheck.push(activeThreadId);
+  }
+  for (const [threadId, ts] of Object.entries(state.threadStates ?? {})) {
+    if (ts.hasActiveInvocation && threadId !== activeThreadId) {
+      threadsToCheck.push(threadId);
+    }
+  }
+  if (threadsToCheck.length === 0) return;
+
+  // Small delay: let any buffered socket events arrive first
+  setTimeout(async () => {
+    // Discard if a newer reconnect has started its own reconciliation
+    if (generation !== reconcileGeneration) return;
+    for (const threadId of threadsToCheck) {
+      if (generation !== reconcileGeneration) return;
+      try {
+        const res = await apiFetch(`/api/threads/${threadId}/queue`);
+        if (generation !== reconcileGeneration) return; // stale after await
+        if (!res.ok) continue;
+        const data = (await res.json()) as {
+          activeInvocations?: Array<{ catId: string; startedAt: number }>;
+        };
+        if (generation !== reconcileGeneration) return; // stale after await
+        const store = useChatStore.getState();
+        const serverSlots = data.activeInvocations && data.activeInvocations.length > 0 ? data.activeInvocations : null;
+        const isActiveThread = store.currentThreadId === threadId;
+
+        if (serverSlots) {
+          // Server still processing — re-hydrate local slots to match server truth.
+          // Stale hydrated/mismatched invocationIds get replaced so done(isFinal)
+          // cleanup works correctly when the response finishes.
+          const serverActiveCats = serverSlots.map((s) => s.catId);
+          store.clearThreadActiveInvocation(threadId);
+          store.replaceThreadTargetCats(threadId, serverActiveCats);
+          for (const slot of serverSlots) {
+            store.updateThreadCatStatus(threadId, slot.catId, 'streaming');
+            const syntheticId = `hydrated-${threadId}-${slot.catId}`;
+            if (isActiveThread) {
+              store.addActiveInvocation(syntheticId, slot.catId, 'execute', slot.startedAt);
+            } else {
+              store.addThreadActiveInvocation(threadId, syntheticId, slot.catId, 'execute', slot.startedAt);
+            }
+          }
+          console.log('[ws] Reconnect reconciliation: re-hydrated active slots from server', {
+            threadId,
+            cats: serverActiveCats,
+          });
+          continue;
+        }
+
+        if (isActiveThread && store.hasActiveInvocation) {
+          store.clearAllActiveInvocations();
+          store.setLoading(false);
+          store.setIntentMode(null);
+          store.clearCatStatuses();
+          for (const msg of store.messages) {
+            if (msg.type === 'assistant' && msg.isStreaming) {
+              store.setStreaming(msg.id, false);
+            }
+          }
+          // Reconnect catch-up (#276): server finished during disconnect,
+          // done(isFinal) was lost → fetch missed messages so user doesn't need F5
+          store.requestStreamCatchUp(threadId);
+          console.log('[ws] Reconnect reconciliation: cleared stale active-thread invocation state', { threadId });
+        } else if (!isActiveThread) {
+          const ts = store.getThreadState(threadId);
+          if (ts.hasActiveInvocation) {
+            store.clearThreadActiveInvocation(threadId);
+            store.setThreadLoading(threadId, false);
+            for (const msg of ts.messages) {
+              if (msg.type === 'assistant' && msg.isStreaming) {
+                store.setThreadMessageStreaming(threadId, msg.id, false);
+              }
+            }
+            console.log('[ws] Reconnect reconciliation: cleared stale background-thread invocation state', {
+              threadId,
+            });
+          }
+        }
+      } catch {
+        // Non-critical — don't break reconnect flow
+      }
+    }
+  }, RECONNECT_RECONCILE_DELAY_MS);
 }
 
 export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
@@ -232,6 +338,11 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
       if (tid) {
         reconnectGame(tid).catch(() => {});
       }
+
+      // Reconnect reconciliation: verify invocation state against server truth.
+      // Socket disconnect can lose done(isFinal) events, leaving stale "replying" UI.
+      // Delay slightly so any buffered events arrive first.
+      reconcileInvocationStateOnReconnect(tid ?? null);
     });
 
     socket.on('agent_message', (msg: AgentMessage) => {
@@ -279,7 +390,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
       });
     });
 
-    socket.on('thread_updated', (data: { threadId: string; title: string }) => {
+    socket.on('thread_updated', (data: { threadId: string; title?: string; participants?: string[] }) => {
       callbacksRef.current.onThreadUpdated?.(data);
     });
 
@@ -303,10 +414,23 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
 
         if (isActiveThread) {
           callbacksRef.current.onIntentMode?.(data);
-          // F108: Register invocation slot in active thread store
+          // F108: Register invocation slot for ALL targetCats (not just the first)
           if (data.invocationId) {
-            const primaryCat = data.targetCats?.[0] ?? 'unknown';
-            useChatStore.getState().addActiveInvocation(data.invocationId, primaryCat, data.mode);
+            const cats = data.targetCats ?? [];
+            for (let i = 0; i < cats.length; i++) {
+              const invId = i === 0 ? data.invocationId : `${data.invocationId}-${cats[i]}`;
+              // #963 fix: preempt stale slot for same cat before registering.
+              // Side-dispatch callbacks send their own intent_mode, orphaning the
+              // parent's slot (parentInvId-catId). Remove it to match backend
+              // tracker.start() preemption behavior.
+              const cur = useChatStore.getState().activeInvocations;
+              for (const [key, info] of Object.entries(cur)) {
+                if (info.catId === cats[i] && key !== invId) {
+                  useChatStore.getState().removeActiveInvocation(key);
+                }
+              }
+              useChatStore.getState().addActiveInvocation(invId, cats[i]!, data.mode);
+            }
           }
           return;
         }
@@ -315,10 +439,20 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
         if (data.threadId) {
           const store = useChatStore.getState();
           store.setThreadLoading(data.threadId, true);
-          // F108: slot-aware — register specific invocation if ID available
+          // F108: slot-aware — register ALL targetCats (not just the first)
           if (data.invocationId) {
-            const primaryCat = data.targetCats?.[0] ?? 'unknown';
-            store.addThreadActiveInvocation(data.threadId, data.invocationId, primaryCat, data.mode);
+            const cats = data.targetCats ?? [];
+            for (let i = 0; i < cats.length; i++) {
+              const invId = i === 0 ? data.invocationId : `${data.invocationId}-${cats[i]}`;
+              // #963 fix: preempt stale slot (same as active-thread path above)
+              const threadState = store.getThreadState(data.threadId);
+              for (const [key, info] of Object.entries(threadState.activeInvocations)) {
+                if (info.catId === cats[i] && key !== invId) {
+                  store.removeThreadActiveInvocation(data.threadId, key);
+                }
+              }
+              store.addThreadActiveInvocation(data.threadId, invId, cats[i]!, data.mode);
+            }
           } else {
             store.setThreadHasActiveInvocation(data.threadId, true);
           }
@@ -336,22 +470,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
       callbacksRef.current.onTaskUpdated?.(task);
     });
 
-    socket.on('thread_summary', (summary: Record<string, unknown>) => {
-      const routeThread = threadIdRef.current;
-      const storeThread = useChatStore.getState().currentThreadId;
-      // Dual-pointer guard: both route and store must agree on the active thread.
-      // Blocks switch-window race where route already points to thread-B
-      // but flat store still belongs to thread-A (same pattern as agent_message).
-      const isActiveThread = Boolean(
-        summary.threadId &&
-          routeThread &&
-          storeThread &&
-          summary.threadId === routeThread &&
-          summary.threadId === storeThread,
-      );
-      if (!isActiveThread) return;
-      callbacksRef.current.onThreadSummary?.(summary);
-    });
+    // thread_summary listener removed (clowder-ai#343): summaries no longer injected into chat flow.
 
     socket.on('heartbeat', (data: { threadId: string; timestamp: number }) => {
       callbacksRef.current.onHeartbeat?.(data);

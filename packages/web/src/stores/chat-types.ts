@@ -251,12 +251,10 @@ export interface ChatMessage {
       invocationId?: string;
     };
   };
-  /** A2A chain group ID — messages in the same A2A chain share this ID */
-  a2aGroupId?: string;
   /** F045: Extended thinking content, rendered as collapsible block inside assistant bubble */
   thinking?: string;
-  /** Message origin: stream = CLI stdout (thinking), callback = MCP post_message (speech) */
-  origin?: 'stream' | 'callback';
+  /** Message origin: stream = CLI stdout (thinking), callback = MCP post_message (speech), briefing = F148 Phase E context briefing */
+  origin?: 'stream' | 'callback' | 'briefing';
   /** F35: Message visibility. undefined/public = visible to all */
   visibility?: 'public' | 'whisper';
   /** F35: Whisper recipients (cat IDs). Only meaningful when visibility='whisper' */
@@ -287,6 +285,10 @@ export interface Thread {
   favoritedAt?: number | null;
   /** CLI stream visibility mode: play = 💭心里话 hidden cross-cat, debug = 💭心里话 shared cross-cat. 🧠Thinking (extended reasoning) is NEVER shared regardless of mode. */
   thinkingMode?: 'debug' | 'play';
+  /** UI bubble display override: thinking block expand/collapse. 'global' = follow config hub default. */
+  bubbleThinking?: 'global' | 'expanded' | 'collapsed';
+  /** UI bubble display override: CLI output block expand/collapse. 'global' = follow config hub default. */
+  bubbleCli?: 'global' | 'expanded' | 'collapsed';
   /** F32-b: Thread-level default cat preference */
   preferredCats?: string[];
   /** F049: workflow phase for mission-control dispatch */
@@ -491,6 +493,14 @@ export interface ThreadState {
   queueFull: boolean;
   /** F39: Who triggered the full warning */
   queueFullSource?: 'user' | 'connector';
+  /** F063: Active worktree per thread (null = inherit global, non-null = restore on switch) */
+  workspaceWorktreeId: string | null;
+  /** F063: Workspace open tabs per thread */
+  workspaceOpenTabs: string[];
+  /** F063: Currently displayed file per thread */
+  workspaceOpenFilePath: string | null;
+  /** F063: Scroll-to line per thread */
+  workspaceOpenFileLine: number | null;
 }
 
 /** F097: CLI Output unified event stream */
@@ -524,4 +534,8 @@ export const DEFAULT_THREAD_STATE: ThreadState = {
   activeInvocations: {},
   queuePaused: false,
   queueFull: false,
+  workspaceWorktreeId: null,
+  workspaceOpenTabs: [],
+  workspaceOpenFilePath: null,
+  workspaceOpenFileLine: null,
 };

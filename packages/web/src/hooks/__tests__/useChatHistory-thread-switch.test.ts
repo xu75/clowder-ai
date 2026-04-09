@@ -123,6 +123,10 @@ describe('useChatHistory thread switch ordering', () => {
           queue: [],
           queuePaused: false,
           queueFull: false,
+          workspaceWorktreeId: null,
+          workspaceOpenTabs: [],
+          workspaceOpenFilePath: null,
+          workspaceOpenFileLine: null,
         },
       },
     });
@@ -169,6 +173,10 @@ describe('useChatHistory thread switch ordering', () => {
           queue: [],
           queuePaused: false,
           queueFull: false,
+          workspaceWorktreeId: null,
+          workspaceOpenTabs: [],
+          workspaceOpenFilePath: null,
+          workspaceOpenFileLine: null,
         },
       },
     });
@@ -227,6 +235,10 @@ describe('useChatHistory thread switch ordering', () => {
           queue: [],
           queuePaused: false,
           queueFull: false,
+          workspaceWorktreeId: null,
+          workspaceOpenTabs: [],
+          workspaceOpenFilePath: null,
+          workspaceOpenFileLine: null,
         },
       },
     });
@@ -264,6 +276,10 @@ describe('useChatHistory thread switch ordering', () => {
           queue: [],
           queuePaused: false,
           queueFull: false,
+          workspaceWorktreeId: null,
+          workspaceOpenTabs: [],
+          workspaceOpenFilePath: null,
+          workspaceOpenFileLine: null,
         },
       },
     });
@@ -293,7 +309,10 @@ describe('useChatHistory thread switch ordering', () => {
       }
       if (typeof url === 'string' && url.includes('/queue')) {
         return Promise.resolve(
-          new Response(JSON.stringify({ queue: [], paused: false, activeInvocations: ['opus'] }), { status: 200 }),
+          new Response(
+            JSON.stringify({ queue: [], paused: false, activeInvocations: [{ catId: 'opus', startedAt: Date.now() }] }),
+            { status: 200 },
+          ),
         );
       }
       if (typeof url === 'string' && url.includes('/task-progress')) {
@@ -335,6 +354,10 @@ describe('useChatHistory thread switch ordering', () => {
           queue: [],
           queuePaused: false,
           queueFull: false,
+          workspaceWorktreeId: null,
+          workspaceOpenTabs: [],
+          workspaceOpenFilePath: null,
+          workspaceOpenFileLine: null,
         },
       },
     });

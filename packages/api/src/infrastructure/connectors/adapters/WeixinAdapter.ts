@@ -34,6 +34,44 @@ const QRCODE_STATUS_POLL_TIMEOUT_MS = 40_000;
 /** QR code timeout (5 minutes) */
 const QRCODE_TIMEOUT_MS = 5 * 60 * 1000;
 
+/**
+ * Voice item payload mode for WeChat voice delivery.
+ * - `minimal` (default): send only `{ media }` — safest fallback ("1s fake" but visible).
+ * - `playtime`: send `{ media, playtime }` — shows correct duration but won't play.
+ * - `playtime-sec`: send `{ media, playtime }` with playtime in SECONDS (not ms) — hypothesis test.
+ * - `playtime-encode`: send `{ media, encode_type: 6, playtime }` — confirmed broken (encode_type is poison).
+ * - `metadata`: send all SILK fields — confirmed broken (voice "completely gone").
+ *
+ * Runtime-configurable via WEIXIN_VOICE_ITEM_MODE so 铲屎官 can A/B test without code changes.
+ */
+type WeixinVoiceItemMode = 'minimal' | 'playtime' | 'playtime-sec' | 'playtime-encode' | 'metadata';
+const UNSAFE_VOICE_MODE_ENV = 'WEIXIN_ENABLE_UNSAFE_VOICE_MODES';
+const UNSAFE_VOICE_MODES = new Set<WeixinVoiceItemMode>(['playtime-encode', 'metadata']);
+const CAPTURE_INBOUND_VOICE_ENV = 'WEIXIN_CAPTURE_INBOUND_VOICE_MEDIA';
+
+function isUnsafeVoiceModeEnabled(): boolean {
+  return process.env[UNSAFE_VOICE_MODE_ENV] === '1';
+}
+
+function isInboundVoiceCaptureEnabled(): boolean {
+  return process.env[CAPTURE_INBOUND_VOICE_ENV] === '1';
+}
+
+function getWeixinVoiceItemMode(log?: FastifyBaseLogger): WeixinVoiceItemMode {
+  const mode = process.env.WEIXIN_VOICE_ITEM_MODE?.trim().toLowerCase();
+  if (mode === 'playtime' || mode === 'playtime-sec' || mode === 'playtime-encode' || mode === 'metadata') {
+    if (UNSAFE_VOICE_MODES.has(mode) && !isUnsafeVoiceModeEnabled()) {
+      log?.warn(
+        { requestedMode: mode, fallbackMode: 'playtime', unsafeModeEnv: UNSAFE_VOICE_MODE_ENV },
+        '[WeixinAdapter] unsafe voice mode disabled — falling back to playtime',
+      );
+      return 'playtime';
+    }
+    return mode;
+  }
+  return 'minimal';
+}
+
 function generateClientId(): string {
   return `cat-cafe-weixin-${crypto.randomUUID()}`;
 }
@@ -202,6 +240,28 @@ export class WeixinAdapter implements IOutboundAdapter {
     this.botToken = token;
   }
 
+  /**
+   * F137 Phase D: Full disconnect — stop polling, clear bot_token and all session state.
+   * After disconnect, the adapter returns to pre-login state (hasBotToken() === false).
+   */
+  async disconnect(): Promise<void> {
+    await this.stopPolling();
+    this.botToken = '';
+    this.contextTokens.clear();
+    this.getUpdatesBuf = '';
+    // Reject all pending sendReply promises before clearing (P1: no dangling promises)
+    const disconnectError = new Error('Disconnected by user');
+    for (const [, bucket] of this.pendingReplies) {
+      clearTimeout(bucket.timer);
+      for (const { reject } of bucket.resolvers) {
+        reject(disconnectError);
+      }
+    }
+    this.pendingReplies.clear();
+    this.typingTickets.clear();
+    this.log.info('[WeixinAdapter] Disconnected — bot_token and session state cleared');
+  }
+
   setOnSessionExpired(cb: () => void): void {
     this.sessionExpiredCallback = cb;
   }
@@ -301,12 +361,21 @@ export class WeixinAdapter implements IOutboundAdapter {
     }
 
     if (itemType === MessageItemType.VOICE) {
+      const media = firstItem.voice_item?.media;
+      const mediaKey =
+        media?.encrypt_query_param && media?.aes_key
+          ? JSON.stringify({ encryptQueryParam: media.encrypt_query_param, aesKey: media.aes_key })
+          : '';
       return {
         chatId: senderId,
         text: firstItem.voice_item?.text || '[语音]',
         messageId: msgId,
         senderId,
         contextToken,
+        attachments:
+          isInboundVoiceCaptureEnabled() && mediaKey
+            ? [{ type: 'file' as const, mediaUrl: mediaKey, fileName: `weixin-voice-${msgId}.silk` }]
+            : undefined,
       };
     }
 
@@ -639,94 +708,277 @@ export class WeixinAdapter implements IOutboundAdapter {
       return;
     }
 
+    let actualFilePath = filePath;
+    let tempFilePath: string | undefined;
+
+    // HTTPS URLs: download to temp file first (CDN upload needs a local file)
+    if (filePath.startsWith('https://')) {
+      const downloaded = await this.downloadToTemp(filePath);
+      if (!downloaded) {
+        throw new Error(`Media download failed for ${filePath.slice(0, 80)}`);
+      }
+      actualFilePath = downloaded;
+      tempFilePath = downloaded;
+    }
+
+    // WeChat voice messages require SILK codec; when conversion fails, degrade to file delivery.
+    let voiceMeta: { durationMs: number; sampleRate: number } | undefined;
+    if (payload.type === 'audio' && actualFilePath.endsWith('.wav')) {
+      const converted = await this.convertWavToSilk(actualFilePath);
+      if (converted) {
+        // If we downloaded to temp, clean up the download temp
+        if (tempFilePath) {
+          const { unlink } = await import('node:fs/promises');
+          await unlink(tempFilePath).catch(() => {});
+        }
+        actualFilePath = converted.silkPath;
+        tempFilePath = converted.silkPath;
+        voiceMeta = { durationMs: converted.durationMs, sampleRate: converted.sampleRate };
+      }
+    }
+
     const { uploadMediaToCdn, UploadMediaType } = await import('./weixin-cdn.js');
     const cdnBaseUrl = 'https://novac2c.cdn.weixin.qq.com/c2c';
+    const audioAsVoice = payload.type === 'audio' && actualFilePath.endsWith('.silk');
     const mediaTypeMap = {
       image: UploadMediaType.IMAGE,
       file: UploadMediaType.FILE,
-      audio: UploadMediaType.VOICE,
+      audio: audioAsVoice ? UploadMediaType.VOICE : UploadMediaType.FILE,
     } as const;
 
     this.log.info(
-      { chatId: externalChatId, type: payload.type, filePath },
+      { chatId: externalChatId, type: payload.type, filePath: actualFilePath },
       '[WeixinAdapter] sendMedia: uploading to CDN',
     );
 
-    const uploaded = await uploadMediaToCdn({
-      filePath,
-      toUserId: externalChatId,
-      mediaType: mediaTypeMap[payload.type],
-      botToken: this.botToken,
-      cdnBaseUrl,
-      log: this.log,
-      fetchFn: this.fetchFn,
-    });
-
-    const itemType =
-      payload.type === 'image'
-        ? MessageItemType.IMAGE
-        : payload.type === 'audio'
-          ? MessageItemType.VOICE
-          : MessageItemType.FILE;
-    const mediaRef = {
-      encrypt_query_param: uploaded.downloadEncryptedQueryParam,
-      aes_key: Buffer.from(uploaded.aeskey, 'hex').toString('base64'),
-      encrypt_type: 1,
-    };
-
-    const mediaItem: Record<string, unknown> = { type: itemType };
-    if (payload.type === 'image') {
-      mediaItem.image_item = { media: mediaRef, mid_size: uploaded.fileSizeCiphertext };
-    } else if (payload.type === 'audio') {
-      mediaItem.voice_item = { media: mediaRef };
-    } else {
-      mediaItem.file_item = { media: mediaRef, file_name: payload.fileName ?? 'file' };
-    }
-
-    const body = {
-      msg: {
-        from_user_id: '',
-        to_user_id: externalChatId,
-        client_id: generateClientId(),
-        message_type: 2,
-        context_token: contextToken,
-        message_state: MessageState.FINISH,
-        item_list: [mediaItem],
-      },
-      base_info: { channel_version: '1.0.0' },
-    };
-
-    const res = await this.fetchFn(`${ILINK_BASE_URL}/ilink/bot/sendmessage`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => '');
-      throw new Error(`sendMedia HTTP ${res.status}: ${errorText}`);
-    }
-
-    const rawText = await res.text().catch(() => '');
-    if (!rawText.trim()) {
-      throw new Error('sendMedia returned empty response body');
-    }
-    let data: ILinkSendResponse;
     try {
-      data = JSON.parse(rawText) as ILinkSendResponse;
-    } catch {
-      throw new Error(`sendMedia returned non-JSON response: ${rawText}`);
+      const uploaded = await uploadMediaToCdn({
+        filePath: actualFilePath,
+        toUserId: externalChatId,
+        mediaType: mediaTypeMap[payload.type],
+        botToken: this.botToken,
+        cdnBaseUrl,
+        log: this.log,
+        fetchFn: this.fetchFn,
+      });
+
+      const itemType =
+        payload.type === 'image'
+          ? MessageItemType.IMAGE
+          : payload.type === 'audio' && audioAsVoice
+            ? MessageItemType.VOICE
+            : MessageItemType.FILE;
+      const mediaRef = {
+        encrypt_query_param: uploaded.downloadEncryptedQueryParam,
+        aes_key: Buffer.from(uploaded.aeskey).toString('base64'),
+        encrypt_type: 1,
+      };
+
+      const mediaItem: Record<string, unknown> = { type: itemType };
+      if (payload.type === 'image') {
+        mediaItem.image_item = { media: mediaRef, mid_size: uploaded.fileSizeCiphertext };
+      } else if (payload.type === 'audio' && audioAsVoice) {
+        const voiceMode = getWeixinVoiceItemMode(this.log);
+        if (voiceMode === 'metadata') {
+          mediaItem.voice_item = {
+            media: mediaRef,
+            encode_type: 6,
+            bits_per_sample: 16,
+            sample_rate: voiceMeta?.sampleRate ?? 24_000,
+            playtime: voiceMeta?.durationMs ?? 0,
+          };
+        } else if (voiceMode === 'playtime-encode' && voiceMeta?.durationMs && voiceMeta.durationMs > 0) {
+          mediaItem.voice_item = { media: mediaRef, encode_type: 6, playtime: Math.round(voiceMeta.durationMs) };
+        } else if (voiceMode === 'playtime-sec' && voiceMeta?.durationMs && voiceMeta.durationMs > 0) {
+          mediaItem.voice_item = { media: mediaRef, playtime: Math.max(1, Math.round(voiceMeta.durationMs / 1000)) };
+        } else if (voiceMode === 'playtime' && voiceMeta?.durationMs && voiceMeta.durationMs > 0) {
+          mediaItem.voice_item = { media: mediaRef, playtime: Math.round(voiceMeta.durationMs) };
+        } else {
+          mediaItem.voice_item = { media: mediaRef };
+        }
+        this.log.info(
+          {
+            chatId: externalChatId,
+            mode: voiceMode,
+            requestedMode: process.env.WEIXIN_VOICE_ITEM_MODE,
+            unsafeVoiceModesEnabled: isUnsafeVoiceModeEnabled(),
+            durationMs: voiceMeta?.durationMs,
+          },
+          '[WeixinAdapter] sendMedia: voice_item mode',
+        );
+      } else {
+        const { basename } = await import('node:path');
+        mediaItem.file_item = {
+          media: mediaRef,
+          file_name:
+            payload.type === 'audio' ? (payload.fileName ?? basename(actualFilePath)) : (payload.fileName ?? 'file'),
+        };
+      }
+
+      const body = {
+        msg: {
+          from_user_id: '',
+          to_user_id: externalChatId,
+          client_id: generateClientId(),
+          message_type: 2,
+          context_token: contextToken,
+          message_state: MessageState.FINISH,
+          item_list: [mediaItem],
+        },
+        base_info: { channel_version: '1.0.0' },
+      };
+
+      const res = await this.fetchFn(`${ILINK_BASE_URL}/ilink/bot/sendmessage`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => '');
+        throw new Error(`sendMedia HTTP ${res.status}: ${errorText}`);
+      }
+
+      const rawText = await res.text().catch(() => '');
+      if (!rawText.trim()) {
+        throw new Error('sendMedia returned empty response body');
+      }
+      let data: ILinkSendResponse;
+      try {
+        data = JSON.parse(rawText) as ILinkSendResponse;
+      } catch {
+        throw new Error(`sendMedia returned non-JSON response: ${rawText}`);
+      }
+      const errorCode = data.errcode ?? data.ret;
+      if (errorCode && errorCode !== 0) {
+        throw new Error(`sendMedia errcode ${errorCode}: ${data.errmsg ?? 'unknown'}`);
+      }
+
+      // BUG-5: token is reusable — do NOT consume/delete.
+      this.log.info(
+        { chatId: externalChatId, type: payload.type, filekey: uploaded.filekey },
+        '[WeixinAdapter] sendMedia: delivered — token retained',
+      );
+    } finally {
+      if (tempFilePath) {
+        const { unlink } = await import('node:fs/promises');
+        await unlink(tempFilePath).catch(() => {});
+      }
     }
-    const errorCode = data.errcode ?? data.ret;
-    if (errorCode && errorCode !== 0) {
-      throw new Error(`sendMedia errcode ${errorCode}: ${data.errmsg ?? 'unknown'}`);
+  }
+
+  /** Download an HTTPS URL to a temp file for CDN upload. */
+  private async downloadToTemp(url: string): Promise<string | null> {
+    try {
+      const { writeFile } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join, extname } = await import('node:path');
+
+      const res = await this.fetchFn(url, { signal: AbortSignal.timeout(30_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      const { randomUUID } = await import('node:crypto');
+      const ext = extname(new URL(url).pathname) || '.tmp';
+      const tempPath = join(tmpdir(), `cat-cafe-weixin-dl-${Date.now()}-${randomUUID().slice(0, 8)}${ext}`);
+      await writeFile(tempPath, buf);
+      this.log.info({ url: url.slice(0, 80), tempPath, size: buf.length }, '[WeixinAdapter] downloadToTemp: success');
+      return tempPath;
+    } catch (err) {
+      this.log.warn({ err, url: url.slice(0, 80) }, '[WeixinAdapter] downloadToTemp: failed');
+      return null;
+    }
+  }
+
+  /**
+   * Convert WAV audio to SILK v3 (WeChat's native voice codec).
+   * Returns path to temp .silk file, or null if conversion fails.
+   */
+  private async convertWavToSilk(
+    wavPath: string,
+  ): Promise<{ silkPath: string; durationMs: number; sampleRate: number } | null> {
+    try {
+      const { readFile, writeFile } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const { encode } = await import('silk-wasm');
+
+      const wavData = await readFile(wavPath);
+      const parsed = this.extractMonoPcmFromWav(wavData);
+      if (!parsed) {
+        this.log.warn({ wavPath, len: wavData.length }, '[WeixinAdapter] convertWavToSilk: unsupported WAV format');
+        return null;
+      }
+      const result = await encode(parsed.pcm, parsed.sampleRate);
+      // Write raw SILK output — do NOT append 0xFFFF EOS marker.
+      // Evidence: inbound WeChat SILK has no EOS marker and ends exactly at last frame.
+      // The 0xFFFF bytes are read as int16LE frame-size = -1, which crashes WeChat's decoder.
+      const silkPath = join(tmpdir(), `cat-cafe-weixin-${Date.now()}.silk`);
+      await writeFile(silkPath, Buffer.from(result.data));
+      this.log.info(
+        { wavPath, silkPath, duration: result.duration, sampleRate: parsed.sampleRate },
+        '[WeixinAdapter] convertWavToSilk: success',
+      );
+      return { silkPath, durationMs: result.duration, sampleRate: parsed.sampleRate };
+    } catch (err) {
+      this.log.warn({ err, wavPath }, '[WeixinAdapter] convertWavToSilk: failed, uploading WAV as fallback');
+      return null;
+    }
+  }
+
+  /**
+   * Parse WAV buffer (tolerant to RIFF size mismatch) and return mono PCM s16le.
+   * This avoids passing malformed WAV headers directly into silk-wasm as raw PCM.
+   */
+  private extractMonoPcmFromWav(wavData: Buffer): { pcm: Buffer; sampleRate: number } | null {
+    if (wavData.length < 44) return null;
+    if (wavData.toString('ascii', 0, 4) !== 'RIFF' || wavData.toString('ascii', 8, 12) !== 'WAVE') return null;
+
+    let offset = 12;
+    let sampleRate = 0;
+    let channels = 0;
+    let bitsPerSample = 0;
+    let dataOffset = -1;
+    let dataSize = 0;
+
+    while (offset + 8 <= wavData.length) {
+      const chunkId = wavData.toString('ascii', offset, offset + 4);
+      const chunkSize = wavData.readUInt32LE(offset + 4);
+      const chunkDataStart = offset + 8;
+      if (chunkDataStart > wavData.length) break;
+      const maxReadable = Math.max(0, Math.min(chunkSize, wavData.length - chunkDataStart));
+
+      if (chunkId === 'fmt ' && maxReadable >= 16) {
+        channels = wavData.readUInt16LE(chunkDataStart + 2);
+        sampleRate = wavData.readUInt32LE(chunkDataStart + 4);
+        bitsPerSample = wavData.readUInt16LE(chunkDataStart + 14);
+      } else if (chunkId === 'data') {
+        dataOffset = chunkDataStart;
+        dataSize = maxReadable;
+        break;
+      }
+
+      offset = chunkDataStart + maxReadable + (chunkSize % 2);
     }
 
-    // BUG-5: token is reusable — do NOT consume/delete.
-    this.log.info(
-      { chatId: externalChatId, type: payload.type, filekey: uploaded.filekey },
-      '[WeixinAdapter] sendMedia: delivered — token retained',
-    );
+    if (dataOffset < 0 || dataSize <= 0) return null;
+    if (sampleRate <= 0 || channels <= 0 || bitsPerSample !== 16) return null;
+
+    const data = wavData.subarray(dataOffset, dataOffset + dataSize);
+    if (channels === 1) return { pcm: data, sampleRate };
+
+    // Downmix multi-channel int16 PCM to mono.
+    const frameCount = Math.floor(data.length / (channels * 2));
+    const mono = Buffer.alloc(frameCount * 2);
+    for (let i = 0; i < frameCount; i++) {
+      let sum = 0;
+      const base = i * channels * 2;
+      for (let ch = 0; ch < channels; ch++) {
+        sum += data.readInt16LE(base + ch * 2);
+      }
+      const mixed = Math.max(-32768, Math.min(32767, Math.round(sum / channels)));
+      mono.writeInt16LE(mixed, i * 2);
+    }
+    return { pcm: mono, sampleRate };
   }
 
   static stripMarkdownForWeixin(text: string): string {

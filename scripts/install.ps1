@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-  Clowder AI - Windows Repo-Local Install Helper
+  Cat Cafe - Windows Repo-Local Install Helper
 
 .DESCRIPTION
-  Installs prerequisites and sets up the current checked-out clowder-ai repo.
+  Installs prerequisites and sets up the current checked-out cat-cafe repo.
   Clone or download the repo first, then run this helper from inside it.
-  Steps: env detect -> Node/pnpm install -> Redis -> .env generate -> deps & build
-         -> skills mount -> AI CLI tools -> auth config -> verify & optionally start
+  Steps: env detect -> preflight network check -> Node/pnpm install -> Redis -> .env generate
+         -> deps & build -> skills mount -> AI CLI tools -> auth config -> verify & optionally start
 
 .EXAMPLE
   # From repo root:
@@ -17,6 +17,7 @@ param(
     [switch]$Start,
     [switch]$SkipBuild,
     [switch]$SkipCli,
+    [switch]$SkipPreflight,
     [switch]$Debug
 )
 
@@ -91,7 +92,7 @@ function Resolve-ProjectRoot {
     $projectRoot = Split-Path -Parent $ScriptDir
     if (-not (Test-Path (Join-Path $projectRoot "package.json")) -or
         -not (Test-Path (Join-Path $projectRoot "packages/api"))) {
-        Write-Err "Run this helper from a checked-out clowder-ai repo: .\scripts\install.ps1"
+        Write-Err "Run this helper from a checked-out cat-cafe repo: .\scripts\install.ps1"
         exit 1
     }
     $gitRepoUnavailable = $false
@@ -130,6 +131,26 @@ $authState = New-InstallerAuthState -ProjectRoot $ProjectRoot
 if ($env:CAT_CAFE_NPM_REGISTRY) {
     $env:NPM_CONFIG_REGISTRY = $env:CAT_CAFE_NPM_REGISTRY.Trim()
     Write-Ok "npm registry override: $($env:NPM_CONFIG_REGISTRY)"
+}
+
+# Preflight network check - fail early before installer-managed downloads.
+$preflightScript = Join-Path $ProjectRoot "scripts\preflight.ps1"
+if (-not $SkipPreflight -and (Test-Path $preflightScript)) {
+    $pfArgs = @("-Timeout", "3")
+    if ($env:CAT_CAFE_NPM_REGISTRY) { $pfArgs += @("-Registry", $env:CAT_CAFE_NPM_REGISTRY) }
+    $pfResult = & powershell -ExecutionPolicy Bypass -File $preflightScript @pfArgs 2>&1
+    $pfResult | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Preflight detected unreachable endpoints (see above)."
+        Write-Warn "Install may fail. Fix the issues above or use -SkipPreflight to bypass."
+        if ([Environment]::UserInteractive -and -not $env:CI) {
+            $continue = Read-Host "  Continue anyway? [y/N]"
+            if ($continue -notmatch '^[Yy]') { Write-Err "Aborted by user"; exit 1 }
+        } else {
+            Write-Err "Non-interactive mode - aborting. Use -SkipPreflight to force."
+            exit 1
+        }
+    }
 }
 
 Write-Step "Step 2/9 - Node.js and pnpm"
@@ -252,7 +273,7 @@ if (Test-Path $envFile) {
 } elseif (Test-Path $envExample) {
     Copy-Item $envExample $envFile
     Write-Ok ".env created from .env.example"
-    Write-Warn "Edit .env to add your API keys and customize ports"
+    Write-Warn "After launch, add API keys in Hub > System Settings > Account Configuration"
 } else {
     Write-Warn ".env.example not found - creating minimal .env"
     @"
@@ -384,7 +405,7 @@ if (-not $allGood -and -not $SkipBuild) {
 
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor Green
-Write-Host "  Clowder AI installed!" -ForegroundColor Green
+Write-Host "  Cat Cafe installed!" -ForegroundColor Green
 Write-Host "  ========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Project: $ProjectRoot"

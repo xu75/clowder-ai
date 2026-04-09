@@ -60,6 +60,34 @@ skills:
     sop_step: null
     merged_from: ["brainstorming", "multi-cat-brainstorm", "discussion-convergence"]
 
+  # ── 专家辩论团 ──
+  expert-panel:
+    description: >
+      多猫专家辩论团：独立分析→挑战→收敛→风险预演→语音汇报→文档交付。
+      Use when: 技术趋势判断、竞品分析、行业事件分析、需要多视角决策支持、铲屎官说"帮我分析一下"。
+      Not for: 单猫能搞定的问题、代码实现、bug fix、日常聊天。
+      Output: 洞察卡片(rich block) + 语音总结 + 会议纪要 + 正式报告(DOCX/PDF)。
+    triggers:
+      - "帮我分析一下"
+      - "专家辩论"
+      - "expert panel"
+      - "技术参谋"
+      - "竞品分析"
+      - "行业分析"
+      - "趋势判断"
+      - "多猫分析"
+      - "三猫讨论"
+      - "showcase"
+    not_for:
+      - "单猫能搞定的问题"
+      - "代码实现"
+      - "bug fix"
+      - "日常聊天"
+    output: "Insight card + voice summary + meeting notes + formal report (DOCX/PDF)"
+    next: ["feat-lifecycle", "deep-research", "collaborative-thinking"]
+    sop_step: null
+    merged_from: null
+
   # ── 计划编写 ──
   writing-plans:
     description: >
@@ -311,6 +339,33 @@ skills:
     sop_step: null
     merged_from: ["deep-research-pipeline"]
 
+  # ── 定时任务 ──
+  schedule-tasks:
+    description: >
+      定时任务注册、管理、能力指南。
+      Use when: 用户想设定时任务、定期提醒、周期巡检、定时发送内容。
+      Not for: 一次性即时操作、已有 builtin 任务的手动触发。
+      Output: 注册/管理定时任务，任务到点唤醒猫执行。
+    triggers:
+      - "定时"
+      - "每天"
+      - "每小时"
+      - "每隔"
+      - "提醒我"
+      - "remind me"
+      - "schedule"
+      - "cron"
+      - "定期"
+      - "周期"
+      - "定时任务"
+    not_for:
+      - "一次性即时操作"
+      - "builtin 任务手动触发"
+    output: "Registered/managed scheduled task"
+    next: ["rich-messaging"]
+    sop_step: null
+    merged_from: null
+
   # ── Skill 编写 ──
   writing-skills:
     description: >
@@ -349,6 +404,8 @@ skills:
     not_for:
       - "纯代码无设计"
     output: ".pen file or React/Tailwind component"
+    requires_mcp:
+      - "pencil"
     next: []
     sop_step: null
     merged_from: ["pencil-to-code", "pencil-renderer"]
@@ -450,6 +507,41 @@ skills:
     merged_from: null
     feature: "F120"
 
+  browser-automation:
+    description: >
+      浏览器工作流总路由：为外部网站浏览、登录态流程、浏览器自动化、证据采集选择合适后端。
+      Use when: 需要操作外部网站、登录页、JS 重页面、没有 webfetch/VL 但需要浏览器、或需要在多种浏览器工具之间路由。
+      Not for: localhost 页面预览（用 browser-preview）、本地 WebApp 确定性测试（用 webapp-testing）、简单网页抓取/搜索。
+      Output: 选定浏览器后端 + 执行路径 + 证据/结果。
+    triggers:
+      - "浏览器自动化"
+      - "browser mcp"
+      - "浏览器 skill"
+      - "用浏览器"
+      - "外部网站"
+      - "登录网站"
+      - "登录态"
+      - "agent-browser"
+      - "pinchtab"
+      - "playwriter"
+      - "playwright mcp"
+      - "没有 webfetch"
+      - "无 webfetch"
+      - "没有 vl"
+    not_for:
+      - "localhost 页面预览（用 browser-preview）"
+      - "本地 WebApp 确定性测试（用 webapp-testing）"
+      - "简单网页抓取/搜索"
+    output: "Browser backend choice + execution path + evidence/result"
+    requires_mcp:
+      - "playwright"
+      - "claude-in-chrome"
+      - "agent-browser"
+      - "pinchtab"
+    next: []
+    sop_step: null
+    merged_from: null
+
   # ── 健康提醒 (F085) ──
   hyperfocus-brake:
     description: >
@@ -537,6 +629,33 @@ skills:
     next: []
     sop_step: null
     merged_from: null
+
+  # ── PPT 制作全链路 (F144) ──
+  ppt-forge:
+    description: >
+      PPT 制作全链路：内容规划 → 风格定调 → Slide 制作 → 视觉审查 → 导出验证 → 交付。
+      Use when: 做 PPT、做演示文稿、做 slide、做海报、PPT review、视觉审查。
+      Not for: 纯代码开发（用 worktree/tdd）、纯文档写作（直接写）。
+      Output: 高密度 HTML slide + 多猫审查通过 + 导出验证。
+    triggers:
+      - "做 PPT"
+      - "做个 PPT"
+      - "做演示"
+      - "做 slide"
+      - "PPT review"
+      - "视觉审查"
+      - "ppt-forge"
+      - "做海报"
+      - "华为风格"
+      - "做个演示文稿"
+    not_for:
+      - "纯代码开发"
+      - "纯文档写作"
+    output: "High-density HTML slides + multi-cat visual review pass + export verification"
+    next: ["feat-lifecycle"]
+    sop_step: null
+    merged_from: null
+    feature: "F144"
 
 # ─── 降级为 refs/（不再是独立 skill） ─────────────────
 refs:

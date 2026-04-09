@@ -10,7 +10,9 @@ function stubDeps(overrides = {}) {
     queue: new InvocationQueue(),
     invocationTracker: {
       start: mock.fn(() => new AbortController()),
+      startAll: mock.fn(() => new AbortController()),
       complete: mock.fn(),
+      completeAll: mock.fn(),
       has: mock.fn(() => false),
     },
     invocationRecordStore: {
@@ -76,7 +78,7 @@ describe('QueueProcessor', () => {
     await processor.onInvocationComplete('t1', 'opus', 'succeeded');
 
     // Should have started execution (invocationTracker.start called)
-    assert.ok(deps.invocationTracker.start.mock.calls.length > 0);
+    assert.ok(deps.invocationTracker.startAll.mock.calls.length > 0);
     // Entry should be marked processing then removed
     // Wait a tick for background execution
     await new Promise((r) => setTimeout(r, 50));
@@ -84,7 +86,7 @@ describe('QueueProcessor', () => {
 
   it('succeeded + empty queue → no action', async () => {
     await processor.onInvocationComplete('t1', 'opus', 'succeeded');
-    assert.equal(deps.invocationTracker.start.mock.calls.length, 0);
+    assert.equal(deps.invocationTracker.startAll.mock.calls.length, 0);
   });
 
   it('canceled → pauses queue, emits queue_paused', async () => {
@@ -93,7 +95,7 @@ describe('QueueProcessor', () => {
     await processor.onInvocationComplete('t1', 'opus', 'canceled');
 
     // Should NOT start new execution
-    assert.equal(deps.invocationTracker.start.mock.calls.length, 0);
+    assert.equal(deps.invocationTracker.startAll.mock.calls.length, 0);
     // Should emit queue_paused
     const emitCalls = deps.socketManager.emitToUser.mock.calls;
     assert.ok(emitCalls.length > 0);
@@ -120,7 +122,7 @@ describe('QueueProcessor', () => {
 
     await processor.onInvocationComplete('t1', 'opus', 'failed');
 
-    assert.equal(deps.invocationTracker.start.mock.calls.length, 0);
+    assert.equal(deps.invocationTracker.startAll.mock.calls.length, 0);
     const emitCalls = deps.socketManager.emitToUser.mock.calls;
     const pausedCall = emitCalls.find((c) => c.arguments[1] === 'queue_paused');
     assert.ok(pausedCall);
@@ -267,9 +269,64 @@ describe('QueueProcessor', () => {
 
     // Both entries should have been processed (tracker.start called twice)
     assert.ok(
-      deps.invocationTracker.start.mock.calls.length >= 2,
-      `expected >=2 tracker.start calls, got ${deps.invocationTracker.start.mock.calls.length}`,
+      deps.invocationTracker.startAll.mock.calls.length >= 2,
+      `expected >=2 tracker.start calls, got ${deps.invocationTracker.startAll.mock.calls.length}`,
     );
+  });
+
+  // ── #768: intent_mode deferred until CLI is alive ──
+
+  it('#768 regression: intent_mode is NOT broadcast when routeExecution throws before yielding', async () => {
+    const failDeps = stubDeps({
+      router: {
+        routeExecution: mock.fn(async function* () {
+          throw new Error('CLI spawn failed');
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+    });
+    const failProcessor = new QueueProcessor(failDeps);
+
+    const entry = enqueueEntry(failDeps.queue);
+    failDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    await failProcessor.processNext('t1', 'u1');
+    await new Promise((r) => setTimeout(r, 100));
+
+    const intentCall = failDeps.socketManager.broadcastToRoom.mock.calls.find((c) => c.arguments[1] === 'intent_mode');
+    assert.equal(intentCall, undefined, 'intent_mode must NOT be broadcast when CLI fails before producing events');
+  });
+
+  it('#768 regression: intent_mode IS broadcast once CLI produces first event', async () => {
+    const entry = enqueueEntry(deps.queue, { targetCats: ['codex'], intent: 'execute' });
+    deps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    await processor.processNext('t1', 'u1');
+    await new Promise((r) => setTimeout(r, 50));
+
+    const intentCall = deps.socketManager.broadcastToRoom.mock.calls.find((c) => c.arguments[1] === 'intent_mode');
+    assert.ok(intentCall, 'intent_mode should be broadcast after first CLI event');
+  });
+
+  it('#768 regression: intent_mode is NOT broadcast when routeExecution yields nothing (empty generator)', async () => {
+    const emptyDeps = stubDeps({
+      router: {
+        routeExecution: mock.fn(async function* () {
+          // Generator completes without yielding any events
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+    });
+    const emptyProcessor = new QueueProcessor(emptyDeps);
+
+    const entry = enqueueEntry(emptyDeps.queue);
+    emptyDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    await emptyProcessor.processNext('t1', 'u1');
+    await new Promise((r) => setTimeout(r, 100));
+
+    const intentCall = emptyDeps.socketManager.broadcastToRoom.mock.calls.find((c) => c.arguments[1] === 'intent_mode');
+    assert.equal(intentCall, undefined, 'intent_mode must NOT be broadcast when CLI produces zero events');
   });
 
   // ── P1 fix: executeEntry failure marks InvocationRecord ──
@@ -370,8 +427,8 @@ describe('QueueProcessor', () => {
 
       // Both entries should have been processed
       assert.ok(
-        deps.invocationTracker.start.mock.calls.length >= 2,
-        `expected >=2 tracker.start calls, got ${deps.invocationTracker.start.mock.calls.length}`,
+        deps.invocationTracker.startAll.mock.calls.length >= 2,
+        `expected >=2 tracker.start calls, got ${deps.invocationTracker.startAll.mock.calls.length}`,
       );
     });
 
@@ -546,7 +603,7 @@ describe('QueueProcessor', () => {
       // Give fire-and-forget a tick
       await new Promise((r) => setTimeout(r, 50));
 
-      assert.ok(deps.invocationTracker.start.mock.calls.length > 0, 'should start execution');
+      assert.ok(deps.invocationTracker.startAll.mock.calls.length > 0, 'should start execution');
     });
 
     it('does not execute autoExecute entry when target cat slot is busy', async () => {
@@ -564,7 +621,7 @@ describe('QueueProcessor', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // Entry stays queued, not executed
-      assert.equal(deps.invocationTracker.start.mock.calls.length, 0, 'should not start when slot busy');
+      assert.equal(deps.invocationTracker.startAll.mock.calls.length, 0, 'should not start when slot busy');
       const queued = deps.queue.list('t1', 'system');
       assert.equal(queued.length, 1, 'entry should remain in queue');
       assert.equal(queued[0].status, 'queued', 'entry should still be queued');
@@ -581,7 +638,7 @@ describe('QueueProcessor', () => {
       await processor.tryAutoExecute('t1');
       await new Promise((r) => setTimeout(r, 50));
 
-      assert.equal(deps.invocationTracker.start.mock.calls.length, 0, 'should not execute user entries');
+      assert.equal(deps.invocationTracker.startAll.mock.calls.length, 0, 'should not execute user entries');
     });
 
     it('skips stale queued autoExecute entries older than threshold', async () => {
@@ -600,7 +657,7 @@ describe('QueueProcessor', () => {
       await processor.tryAutoExecute('t1');
       await new Promise((r) => setTimeout(r, 50));
 
-      assert.equal(deps.invocationTracker.start.mock.calls.length, 0, 'stale autoExecute entry must not start');
+      assert.equal(deps.invocationTracker.startAll.mock.calls.length, 0, 'stale autoExecute entry must not start');
       const stillQueued = deps.queue.list('t1', 'system');
       assert.equal(stillQueued.length, 1);
       assert.equal(stillQueued[0].status, 'queued');
@@ -624,7 +681,10 @@ describe('QueueProcessor', () => {
       await processor.tryAutoExecute('t1');
       await new Promise((r) => setTimeout(r, 50));
 
-      assert.ok(deps.invocationTracker.start.mock.calls.length > 0, 'should execute on free slot despite thread pause');
+      assert.ok(
+        deps.invocationTracker.startAll.mock.calls.length > 0,
+        'should execute on free slot despite thread pause',
+      );
     });
 
     it('skips busy-slot entry and executes next free-slot autoExecute entry (P2 scan)', async () => {
@@ -652,9 +712,10 @@ describe('QueueProcessor', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // First start should be codex (skipped opus because slot is busy)
-      assert.ok(deps.invocationTracker.start.mock.calls.length >= 1, 'should start at least one');
-      const firstStartCall = deps.invocationTracker.start.mock.calls[0];
-      assert.equal(firstStartCall.arguments[1], 'codex', 'should start codex (free slot) first, not opus (busy)');
+      assert.ok(deps.invocationTracker.startAll.mock.calls.length >= 1, 'should start at least one');
+      const firstStartCall = deps.invocationTracker.startAll.mock.calls[0];
+      // startAll receives catIds[] as second arg
+      assert.deepEqual(firstStartCall.arguments[1], ['codex'], 'should start codex (free slot) first, not opus (busy)');
     });
 
     it('starts multiple free-slot entries in a single tryAutoExecute call (parallel dispatch)', async () => {
@@ -685,9 +746,10 @@ describe('QueueProcessor', () => {
       await new Promise((r) => setTimeout(r, 100));
 
       // All 3 should have been started (different cat slots, all free)
-      const startCalls = deps.invocationTracker.start.mock.calls;
+      const startCalls = deps.invocationTracker.startAll.mock.calls;
       assert.equal(startCalls.length, 3, 'should start all 3 entries in one call');
-      const startedCats = startCalls.map((c) => c.arguments[1]);
+      // startAll receives catIds[] as second arg — flatten to get primary cats
+      const startedCats = startCalls.map((c) => c.arguments[1][0]);
       assert.ok(startedCats.includes('opus'), 'opus should be started');
       assert.ok(startedCats.includes('codex'), 'codex should be started');
       assert.ok(startedCats.includes('gemini'), 'gemini should be started');
@@ -711,7 +773,7 @@ describe('QueueProcessor', () => {
 
       // executeEntry must NOT have been called
       assert.equal(
-        deps.invocationTracker.start.mock.calls.length,
+        deps.invocationTracker.startAll.mock.calls.length,
         0,
         'must not call executeEntry (tracker.start not called)',
       );
@@ -737,7 +799,7 @@ describe('QueueProcessor', () => {
       assert.equal(result.started, false, 'must not start when tracker has active invocation');
       // executeEntry must NOT have been called
       assert.equal(
-        deps.invocationTracker.start.mock.calls.length,
+        deps.invocationTracker.startAll.mock.calls.length,
         0,
         'must not call executeEntry (tracker.start not called)',
       );
@@ -920,11 +982,11 @@ describe('QueueProcessor', () => {
     });
 
     it('delivery failure: cleanupPlaceholders NOT called when delivery partially fails', async () => {
-      let deliverCallCount = 0;
+      // F151: mid-loop delivery retries failed turns in the final phase,
+      // so use catId-based failure to ensure opus consistently fails.
       const outboundHook = {
-        deliver: mock.fn(async () => {
-          deliverCallCount++;
-          if (deliverCallCount === 1) throw new Error('delivery failed');
+        deliver: mock.fn(async (_threadId, _content, catId) => {
+          if (catId === 'opus') throw new Error('delivery failed');
         }),
       };
       const streamingHook = {
@@ -954,9 +1016,10 @@ describe('QueueProcessor', () => {
       hookDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
 
       await hookProcessor.processNext('t1', 'u1');
-      await waitFor(() => outboundHook.deliver.mock.calls.length >= 2);
+      // F151: mid-loop delivers both, opus fails and retries in final phase = 3 calls total
+      await waitFor(() => outboundHook.deliver.mock.calls.length >= 3);
 
-      assert.equal(outboundHook.deliver.mock.calls.length, 2, 'deliver should be attempted for both turns');
+      assert.equal(outboundHook.deliver.mock.calls.length, 3, 'mid-loop (2) + final-phase retry (1)');
 
       // One rejection → Promise.allSettled sees mixed results → cleanupPlaceholders skipped
       await new Promise((r) => setTimeout(r, 50));
@@ -1032,6 +1095,83 @@ describe('QueueProcessor', () => {
 
       assert.equal(deliverCalls.length, 1, 'late-bound hook should be called');
       assert.equal(deliverCalls[0].content, 'Late-bound delivery');
+    });
+
+    it('P2-1 regression: failed invocation still triggers notifyDeliveryBatchDone', async () => {
+      const batchDoneCalls = [];
+      const streamingHook = {
+        onStreamStart: mock.fn(async () => {}),
+        onStreamChunk: mock.fn(async () => {}),
+        onStreamEnd: mock.fn(async () => {}),
+        cleanupPlaceholders: mock.fn(async () => {}),
+        notifyDeliveryBatchDone: mock.fn(async (threadId, chainDone) => {
+          batchDoneCalls.push({ threadId, chainDone });
+        }),
+      };
+
+      const hookDeps = stubDeps({
+        router: {
+          routeExecution: mock.fn(async function* () {
+            throw new Error('invocation crashed');
+          }),
+          ackCollectedCursors: mock.fn(async () => {}),
+        },
+        streamingHook,
+        threadMetaLookup: mock.fn(async () => undefined),
+      });
+      const hookProcessor = new QueueProcessor(hookDeps);
+
+      const entry = enqueueEntry(hookDeps.queue);
+      hookDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+      await hookProcessor.processNext('t1', 'u1');
+      await waitFor(() => batchDoneCalls.length >= 1);
+
+      assert.equal(batchDoneCalls.length, 1, 'notifyDeliveryBatchDone must fire on failure');
+      assert.equal(batchDoneCalls[0].threadId, 't1');
+      assert.equal(batchDoneCalls[0].chainDone, true, 'single invocation failure → chainDone=true');
+    });
+
+    it('P3-P2: reject callback (executeEntry throws in finally) still triggers notifyDeliveryBatchDone', async () => {
+      const batchDoneCalls = [];
+      const streamingHook = {
+        onStreamStart: mock.fn(async () => {}),
+        onStreamChunk: mock.fn(async () => {}),
+        onStreamEnd: mock.fn(async () => {}),
+        cleanupPlaceholders: mock.fn(async () => {}),
+        notifyDeliveryBatchDone: mock.fn(async (threadId, chainDone) => {
+          batchDoneCalls.push({ threadId, chainDone });
+        }),
+      };
+
+      // Make invocationTracker.complete throw in finally block → executeEntry rejects
+      const hookDeps = stubDeps({
+        invocationTracker: {
+          start: mock.fn(() => new AbortController()),
+          complete: mock.fn(() => {
+            throw new Error('tracker.complete crashed');
+          }),
+          has: mock.fn(() => false),
+        },
+        router: {
+          routeExecution: mock.fn(async function* () {
+            yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+          }),
+          ackCollectedCursors: mock.fn(async () => {}),
+        },
+        streamingHook,
+        threadMetaLookup: mock.fn(async () => undefined),
+      });
+      const hookProcessor = new QueueProcessor(hookDeps);
+
+      const entry = enqueueEntry(hookDeps.queue);
+      hookDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+      await hookProcessor.processNext('t1', 'u1');
+      await waitFor(() => batchDoneCalls.length >= 1);
+
+      assert.equal(batchDoneCalls.length, 1, 'reject callback must also fire notifyDeliveryBatchDone');
+      assert.equal(batchDoneCalls[0].threadId, 't1');
     });
   });
 });

@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useAgentMessages } from '@/hooks/useAgentMessages';
 import { useAuthorization } from '@/hooks/useAuthorization';
 import { useCatData } from '@/hooks/useCatData';
@@ -9,6 +9,7 @@ import { useChatHistory } from '@/hooks/useChatHistory';
 import { useChatSocketCallbacks } from '@/hooks/useChatSocketCallbacks';
 import { godAction, submitAction } from '@/hooks/useGameApi';
 import { reconnectGame } from '@/hooks/useGameReconnect';
+import { useGovernanceStatus } from '@/hooks/useGovernanceStatus';
 import { usePersistedState } from '@/hooks/usePersistedState';
 import { usePreviewAutoOpen } from '@/hooks/usePreviewAutoOpen';
 import { useSendMessage } from '@/hooks/useSendMessage';
@@ -24,7 +25,6 @@ import { useTaskStore } from '@/stores/taskStore';
 import { apiFetch } from '@/utils/api-client';
 import { computeScrollRecomputeSignal } from '@/utils/scrollRecomputeSignal';
 import { getUserId } from '@/utils/userId';
-import { A2ACollapsible } from './A2ACollapsible';
 import { AuthorizationCard } from './AuthorizationCard';
 import { BootcampListModal } from './BootcampListModal';
 import { CatCafeHub } from './CatCafeHub';
@@ -39,6 +39,7 @@ import { MessageActions } from './MessageActions';
 import { MessageNavigator } from './MessageNavigator';
 import { MobileStatusSheet } from './MobileStatusSheet';
 import { ParallelStatusBar } from './ParallelStatusBar';
+import { ProjectSetupCard } from './ProjectSetupCard';
 import { QueuePanel } from './QueuePanel';
 import { RightStatusPanel } from './RightStatusPanel';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
@@ -98,7 +99,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // AC-6: research=multi hint from Signal study "多猫研究" button
   const isResearchMode = searchParams?.get('research') === 'multi';
   const { clearTasks } = useTaskStore();
-  const { getCatById } = useCatData();
+  const { getCatById, isLoading } = useCatData();
   const workspaceWorktreeId = useChatStore((s) => s.workspaceWorktreeId);
   usePreviewAutoOpen(workspaceWorktreeId);
   useWorkspaceNavigate(workspaceWorktreeId, threadId);
@@ -177,8 +178,9 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     }
   }, [rightPanelMode, statusPanelOpen]);
 
-  // Desktop: auto-open sidebar on mount (mobile stays closed)
-  useEffect(() => {
+  // Desktop: open sidebar before first paint (useLayoutEffect avoids false→true flicker).
+  // SSR parity: both server and client start with false, layoutEffect flips before paint.
+  useLayoutEffect(() => {
     if (typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 768px)').matches) {
       setSidebarOpen(true);
     }
@@ -299,6 +301,25 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     }
   }, [threadId, storeThreads, setCurrentProject]);
 
+  // F113-E: Fetch governance status for the current project (drives ProjectSetupCard)
+  const currentProjectPath = useChatStore((s) => s.currentProjectPath);
+  const { status: govStatus, refetch: govRefetch } = useGovernanceStatus(currentProjectPath);
+  const [setupDone, setSetupDone] = useState(false);
+  // Show card when: needs setup (idle) OR just completed setup (done) — only in empty threads
+  const showSetupCard = !!(
+    (govStatus?.needsBootstrap || govStatus?.needsConfirmation || setupDone) &&
+    messages.length === 0
+  );
+  // Reset setupDone + refetch governance on thread switch (same project may have stale status)
+  const prevThreadSetup = useRef(threadId);
+  useEffect(() => {
+    if (prevThreadSetup.current !== threadId) {
+      prevThreadSetup.current = threadId;
+      setSetupDone(false);
+      govRefetch();
+    }
+  }, [threadId, govRefetch]);
+
   const socketCallbacks = useChatSocketCallbacks({
     threadId,
     userId: getUserId(),
@@ -309,34 +330,6 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     handleAuthResponse,
     onNavigateToThread: (tid) => router.push(`/thread/${tid}`),
   });
-
-  type RenderItem =
-    | { kind: 'message'; msg: ChatMessageData }
-    | { kind: 'a2a_group'; groupId: string; messages: ChatMessageData[] };
-
-  const renderItems = useMemo<RenderItem[]>(() => {
-    const items: RenderItem[] = [];
-    let currentGroup: { groupId: string; messages: ChatMessageData[] } | null = null;
-
-    for (const msg of messages) {
-      if (msg.a2aGroupId) {
-        if (currentGroup && currentGroup.groupId === msg.a2aGroupId) {
-          currentGroup.messages.push(msg);
-        } else {
-          if (currentGroup) items.push({ kind: 'a2a_group', ...currentGroup });
-          currentGroup = { groupId: msg.a2aGroupId, messages: [msg] };
-        }
-      } else {
-        if (currentGroup) {
-          items.push({ kind: 'a2a_group', ...currentGroup });
-          currentGroup = null;
-        }
-        items.push({ kind: 'message', msg });
-      }
-    }
-    if (currentGroup) items.push({ kind: 'a2a_group', ...currentGroup });
-    return items;
-  }, [messages]);
 
   const renderSingleMessage = useCallback(
     (msg: ChatMessageData) => (
@@ -434,24 +427,13 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     );
   }
 
-  // Export mode: print-friendly layout — no sidebars, no scroll containers
+  // Export mode: print-friendly layout — no sidebars, no scroll containers.
+  // data-export-ready signals to Puppeteer that messages + cat data are fully loaded and rendered.
   if (isExport) {
+    const exportReady = !isLoadingHistory && messages.length > 0 && !isLoading;
     return (
-      <div className="min-h-screen bg-white">
-        <div className="max-w-4xl mx-auto p-4">
-          {renderItems.map((item) =>
-            item.kind === 'a2a_group' ? (
-              <A2ACollapsible
-                key={item.groupId}
-                group={{ groupId: item.groupId, messages: item.messages }}
-                renderMessage={renderSingleMessage}
-                getCatColor={(catId) => getCatById(catId)?.color.primary}
-              />
-            ) : (
-              renderSingleMessage(item.msg)
-            ),
-          )}
-        </div>
+      <div className="min-h-screen bg-cafe-surface" {...(exportReady ? { 'data-export-ready': 'true' } : {})}>
+        <div className="max-w-4xl mx-auto p-4">{messages.map(renderSingleMessage)}</div>
       </div>
     );
   }
@@ -514,15 +496,30 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
             className="h-full overflow-y-auto p-4"
             data-chat-container
           >
-            {isLoadingHistory && <div className="text-center py-3 text-sm text-gray-400">加载历史消息...</div>}
+            {isLoadingHistory && <div className="text-center py-3 text-sm text-cafe-muted">加载历史消息...</div>}
             {!hasMore && messages.length > 0 && (
-              <div className="text-center py-3 text-xs text-gray-300">没有更多消息了</div>
+              <div className="text-center py-3 text-xs text-cafe-muted">没有更多消息了</div>
             )}
             {messages.length === 0 && !isLoadingHistory ? (
               <div className="text-center mt-20">
                 <PawIcon className="w-12 h-12 text-cocreator-light mx-auto mb-4" />
-                <p className="text-lg text-gray-500 mb-1">欢迎来到 Clowder AI!</p>
-                <p className="text-sm text-gray-400">输入 @布偶 召唤布偶猫开始聊天</p>
+                <p className="text-lg text-cafe-secondary mb-1">欢迎来到 Clowder AI!</p>
+                <p className="text-sm text-cafe-muted">输入 @布偶 召唤布偶猫开始聊天</p>
+                {showSetupCard && govStatus && (
+                  <div className="mt-6 text-left">
+                    <ProjectSetupCard
+                      key={threadId}
+                      projectPath={currentProjectPath}
+                      isEmptyDir={govStatus.isEmptyDir}
+                      isGitRepo={govStatus.isGitRepo}
+                      gitAvailable={govStatus.gitAvailable}
+                      onComplete={() => {
+                        setSetupDone(true);
+                        govRefetch();
+                      }}
+                    />
+                  </div>
+                )}
                 {(() => {
                   const isCurrentBootcamp = storeThreads.find((t) => t.id === threadId)?.bootcampState;
                   if (isCurrentBootcamp) return null; // already in bootcamp thread
@@ -553,18 +550,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
                 })()}
               </div>
             ) : (
-              renderItems.map((item) =>
-                item.kind === 'a2a_group' ? (
-                  <A2ACollapsible
-                    key={item.groupId}
-                    group={{ groupId: item.groupId, messages: item.messages }}
-                    renderMessage={renderSingleMessage}
-                    getCatColor={(catId) => getCatById(catId)?.color.primary}
-                  />
-                ) : (
-                  renderSingleMessage(item.msg)
-                ),
-              )
+              messages.map(renderSingleMessage)
             )}
             <div ref={messagesEndRef} />
           </main>

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import Fastify from 'fastify';
 
@@ -38,6 +41,180 @@ async function buildApp(overrides = {}) {
   await app.ready();
   return { app, listCalls };
 }
+
+describe('F134 follow-up — Feishu QR bind routes', () => {
+  it('POST /api/connector/feishu/qrcode returns QR payload from bind client', async () => {
+    const app = Fastify();
+    await app.register(connectorHubRoutes, {
+      threadStore: {
+        async list() {
+          return [];
+        },
+      },
+      feishuQrBindClient: {
+        async create() {
+          return {
+            qrUrl: 'data:image/png;base64,abc',
+            qrPayload: 'device-123',
+            intervalMs: 5000,
+            expireMs: 600000,
+          };
+        },
+        async poll() {
+          throw new Error('not used');
+        },
+      },
+    });
+    await app.ready();
+
+    const res = await app.inject({ method: 'POST', url: '/api/connector/feishu/qrcode', headers: AUTH_HEADERS });
+    const body = JSON.parse(res.body);
+    assert.equal(res.statusCode, 200);
+    assert.equal(body.qrPayload, 'device-123');
+    assert.equal(body.qrUrl, 'data:image/png;base64,abc');
+    assert.equal(body.intervalMs, 5000);
+    assert.equal(body.expireMs, 600000);
+    await app.close();
+  });
+
+  it('GET /api/connector/feishu/qrcode-status persists credentials and auto-switches to websocket when webhook lacks verification token', async () => {
+    const tmpDir = mkdtempSync(join(os.tmpdir(), 'feishu-qr-bind-'));
+    const envFilePath = join(tmpDir, '.env');
+    writeFileSync(envFilePath, 'FEISHU_CONNECTION_MODE=webhook\n');
+    delete process.env.FEISHU_APP_ID;
+    delete process.env.FEISHU_APP_SECRET;
+    delete process.env.FEISHU_VERIFICATION_TOKEN;
+    process.env.FEISHU_CONNECTION_MODE = 'webhook';
+
+    const app = Fastify();
+    await app.register(connectorHubRoutes, {
+      threadStore: {
+        async list() {
+          return [];
+        },
+      },
+      envFilePath,
+      feishuQrBindClient: {
+        async create() {
+          throw new Error('not used');
+        },
+        async poll() {
+          return { status: 'confirmed', appId: 'cli_feishu', appSecret: 'sec_feishu' };
+        },
+      },
+    });
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/connector/feishu/qrcode-status?qrPayload=device-123',
+      headers: AUTH_HEADERS,
+    });
+    const body = JSON.parse(res.body);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(body.status, 'confirmed');
+    assert.equal(process.env.FEISHU_APP_ID, 'cli_feishu');
+    assert.equal(process.env.FEISHU_APP_SECRET, 'sec_feishu');
+    assert.equal(process.env.FEISHU_CONNECTION_MODE, 'websocket');
+
+    const envText = readFileSync(envFilePath, 'utf8');
+    assert.match(envText, /FEISHU_APP_ID=cli_feishu/);
+    assert.match(envText, /FEISHU_APP_SECRET=sec_feishu/);
+    assert.match(envText, /FEISHU_CONNECTION_MODE=websocket/);
+
+    await app.close();
+  });
+
+  it('GET /api/connector/feishu/qrcode-status preserves explicit webhook mode when verification token exists', async () => {
+    const tmpDir = mkdtempSync(join(os.tmpdir(), 'feishu-qr-bind-'));
+    const envFilePath = join(tmpDir, '.env');
+    writeFileSync(envFilePath, 'FEISHU_CONNECTION_MODE=webhook\nFEISHU_VERIFICATION_TOKEN=vt_123\n');
+    delete process.env.FEISHU_APP_ID;
+    delete process.env.FEISHU_APP_SECRET;
+    process.env.FEISHU_CONNECTION_MODE = 'webhook';
+    process.env.FEISHU_VERIFICATION_TOKEN = 'vt_123';
+
+    const app = Fastify();
+    await app.register(connectorHubRoutes, {
+      threadStore: {
+        async list() {
+          return [];
+        },
+      },
+      envFilePath,
+      feishuQrBindClient: {
+        async create() {
+          throw new Error('not used');
+        },
+        async poll() {
+          return { status: 'confirmed', appId: 'cli_feishu_2', appSecret: 'sec_feishu_2' };
+        },
+      },
+    });
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/connector/feishu/qrcode-status?qrPayload=device-456',
+      headers: AUTH_HEADERS,
+    });
+    const body = JSON.parse(res.body);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(body.status, 'confirmed');
+    assert.equal(process.env.FEISHU_CONNECTION_MODE, 'webhook');
+    assert.doesNotMatch(readFileSync(envFilePath, 'utf8'), /FEISHU_CONNECTION_MODE=websocket/);
+
+    await app.close();
+  });
+});
+
+describe('POST /api/connector/feishu/disconnect', () => {
+  it('clears FEISHU_APP_ID and FEISHU_APP_SECRET via applyConnectorSecretUpdates and returns ok', async () => {
+    const tmpDir = mkdtempSync(join(os.tmpdir(), 'feishu-disconnect-'));
+    const envFilePath = join(tmpDir, '.env');
+    writeFileSync(envFilePath, 'FEISHU_APP_ID=cli_old\nFEISHU_APP_SECRET=sec_old\nFEISHU_CONNECTION_MODE=websocket\n');
+    process.env.FEISHU_APP_ID = 'cli_old';
+    process.env.FEISHU_APP_SECRET = 'sec_old';
+    process.env.FEISHU_CONNECTION_MODE = 'websocket';
+
+    const app = Fastify();
+    await app.register(connectorHubRoutes, {
+      threadStore: {
+        async list() {
+          return [];
+        },
+      },
+      envFilePath,
+    });
+    await app.ready();
+
+    const res = await app.inject({ method: 'POST', url: '/api/connector/feishu/disconnect', headers: AUTH_HEADERS });
+    const body = JSON.parse(res.body);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(body.ok, true);
+    assert.equal(process.env.FEISHU_APP_ID, undefined);
+    assert.equal(process.env.FEISHU_APP_SECRET, undefined);
+    // Connection mode should NOT be cleared (user preference)
+    assert.equal(process.env.FEISHU_CONNECTION_MODE, 'websocket');
+
+    const envText = readFileSync(envFilePath, 'utf8');
+    assert.doesNotMatch(envText, /FEISHU_APP_ID=/);
+    assert.doesNotMatch(envText, /FEISHU_APP_SECRET=/);
+    assert.match(envText, /FEISHU_CONNECTION_MODE=websocket/);
+
+    await app.close();
+  });
+
+  it('returns 401 without auth header', async () => {
+    const { app } = await buildApp();
+    const res = await app.inject({ method: 'POST', url: '/api/connector/feishu/disconnect' });
+    assert.equal(res.statusCode, 401);
+    await app.close();
+  });
+});
 
 describe('GET /api/connector/weixin/qrcode-status — adapter not ready', () => {
   it('P1: returns 503 when QR confirms but weixinAdapter is not available (cloud review a312a53f)', async () => {
@@ -129,6 +306,171 @@ describe('GET /api/connector/weixin/qrcode-status — adapter not ready', () => 
     assert.equal(pollingStarted, true, 'Polling should be started');
 
     WA._injectStaticFetch(originalFetch);
+    await app.close();
+  });
+
+  it('P1: persists WEIXIN_BOT_TOKEN to .env on QR confirmation so restarts skip re-scan', async () => {
+    const { WeixinAdapter: WA } = await import('../dist/infrastructure/connectors/adapters/WeixinAdapter.js');
+    const originalFetch = globalThis.fetch;
+    WA._injectStaticFetch(async () => ({
+      ok: true,
+      json: async () => ({ errcode: 0, status: 2, bot_token: 'tok_persist_789' }),
+    }));
+
+    const tmpDir = mkdtempSync(join(os.tmpdir(), 'weixin-qr-persist-'));
+    const envFilePath = join(tmpDir, '.env');
+    writeFileSync(envFilePath, 'SOME_OTHER_KEY=existing\n');
+
+    const mockAdapter = {
+      setBotToken() {},
+      hasBotToken() {
+        return true;
+      },
+      isPolling() {
+        return false;
+      },
+    };
+
+    const app = Fastify();
+    await app.register(connectorHubRoutes, {
+      threadStore: {
+        async list() {
+          return [];
+        },
+      },
+      weixinAdapter: mockAdapter,
+      startWeixinPolling: () => {},
+      envFilePath,
+    });
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/connector/weixin/qrcode-status?qrPayload=test-payload',
+      headers: AUTH_HEADERS,
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(JSON.parse(res.body).status, 'confirmed');
+
+    // Key assertion: token must be persisted to .env for restart survival
+    const envContent = readFileSync(envFilePath, 'utf8');
+    assert.ok(
+      envContent.includes('WEIXIN_BOT_TOKEN=tok_persist_789'),
+      `Expected .env to contain WEIXIN_BOT_TOKEN=tok_persist_789 but got:\n${envContent}`,
+    );
+    // Original keys should be preserved
+    assert.ok(envContent.includes('SOME_OTHER_KEY=existing'), 'Existing .env entries should be preserved');
+
+    WA._injectStaticFetch(originalFetch);
+    await app.close();
+  });
+});
+
+describe('POST /api/connector/weixin/disconnect', () => {
+  it('returns 401 without auth header', async () => {
+    const { app } = await buildApp();
+    const res = await app.inject({ method: 'POST', url: '/api/connector/weixin/disconnect' });
+    assert.equal(res.statusCode, 401);
+    await app.close();
+  });
+
+  it('returns 503 when adapter is not available', async () => {
+    const app = Fastify();
+    await app.register(connectorHubRoutes, {
+      threadStore: {
+        async list() {
+          return [];
+        },
+      },
+      weixinAdapter: undefined,
+    });
+    await app.ready();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/connector/weixin/disconnect',
+      headers: AUTH_HEADERS,
+    });
+    assert.equal(res.statusCode, 503);
+    await app.close();
+  });
+
+  it('calls disconnect on adapter and returns ok', async () => {
+    let disconnected = false;
+    const mockAdapter = {
+      hasBotToken: () => true,
+      isPolling: () => true,
+      async disconnect() {
+        disconnected = true;
+      },
+    };
+
+    const app = Fastify();
+    await app.register(connectorHubRoutes, {
+      threadStore: {
+        async list() {
+          return [];
+        },
+      },
+      weixinAdapter: mockAdapter,
+    });
+    await app.ready();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/connector/weixin/disconnect',
+      headers: AUTH_HEADERS,
+    });
+    const body = JSON.parse(res.body);
+    assert.equal(res.statusCode, 200);
+    assert.equal(body.ok, true);
+    assert.equal(disconnected, true, 'adapter.disconnect() must be called');
+    await app.close();
+  });
+
+  it("P1: clears persisted WEIXIN_BOT_TOKEN from .env on disconnect so restart won't auto-reconnect", async () => {
+    const tmpDir = mkdtempSync(join(os.tmpdir(), 'weixin-disconnect-clear-'));
+    const envFilePath = join(tmpDir, '.env');
+    writeFileSync(envFilePath, 'SOME_KEY=keep\nWEIXIN_BOT_TOKEN=tok_old_abc\n');
+
+    let disconnected = false;
+    const mockAdapter = {
+      hasBotToken: () => true,
+      isPolling: () => true,
+      async disconnect() {
+        disconnected = true;
+      },
+    };
+
+    const app = Fastify();
+    await app.register(connectorHubRoutes, {
+      threadStore: {
+        async list() {
+          return [];
+        },
+      },
+      weixinAdapter: mockAdapter,
+      envFilePath,
+    });
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/connector/weixin/disconnect',
+      headers: AUTH_HEADERS,
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(disconnected, true);
+
+    // Key assertion: persisted token must be cleared from .env
+    const envContent = readFileSync(envFilePath, 'utf8');
+    assert.ok(
+      !envContent.includes('WEIXIN_BOT_TOKEN'),
+      `Expected .env to NOT contain WEIXIN_BOT_TOKEN after disconnect but got:\n${envContent}`,
+    );
+    // Other keys should survive
+    assert.ok(envContent.includes('SOME_KEY=keep'), 'Other .env entries should be preserved');
+
     await app.close();
   });
 });

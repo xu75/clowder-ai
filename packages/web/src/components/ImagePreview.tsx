@@ -29,10 +29,11 @@ export function ImagePreview({ files, onRemove }: ImagePreviewProps) {
       <div className="flex gap-2 px-4 py-2 overflow-x-auto">
         {files.map((file, i) => (
           <div key={`${file.name}-${i}`} className="relative flex-shrink-0 group">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={urls[i]}
               alt={file.name}
-              className="w-16 h-16 object-cover rounded-lg border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity"
+              className="w-16 h-16 object-cover rounded-lg border border-cafe cursor-pointer hover:opacity-90 transition-opacity"
               onClick={() => setLightboxIdx(i)}
             />
             <button
@@ -43,7 +44,7 @@ export function ImagePreview({ files, onRemove }: ImagePreviewProps) {
             >
               x
             </button>
-            <span className="block text-[9px] text-gray-400 truncate w-16 mt-0.5 text-center">{file.name}</span>
+            <span className="block text-[9px] text-cafe-muted truncate w-16 mt-0.5 text-center">{file.name}</span>
           </div>
         ))}
       </div>
