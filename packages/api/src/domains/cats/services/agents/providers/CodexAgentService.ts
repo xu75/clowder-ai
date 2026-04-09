@@ -85,6 +85,7 @@ function applyAuthMode(env: Record<string, string>, authMode: CodexAuthMode): Re
 
 const MAX_RECENT_STREAM_ERRORS = 5;
 const MAX_STREAM_ERROR_LENGTH = 240;
+const TERMINAL_RECONNECT_PATTERN = /^Reconnecting\.\.\.\s*5\/5\b/i;
 
 function collectCodexStreamError(event: unknown, recentErrors: string[]): void {
   if (typeof event !== 'object' || event === null) return;
@@ -103,6 +104,15 @@ function collectCodexStreamError(event: unknown, recentErrors: string[]): void {
   if (recentErrors.length > MAX_RECENT_STREAM_ERRORS) {
     recentErrors.shift();
   }
+}
+
+function isTerminalReconnectFailure(event: unknown): boolean {
+  if (typeof event !== 'object' || event === null) return false;
+  const record = event as Record<string, unknown>;
+  if (record.type !== 'error') return false;
+  const raw = record.message;
+  if (typeof raw !== 'string') return false;
+  return TERMINAL_RECONNECT_PATTERN.test(raw.trim());
 }
 
 function withRecentDiagnostics(base: string, recentErrors: string[]): string {
@@ -466,6 +476,19 @@ export class CodexAgentService implements AgentService {
             timestamp: Date.now(),
           };
           continue;
+        }
+        if (isTerminalReconnectFailure(event)) {
+          yield {
+            type: 'error',
+            catId: this.catId,
+            error: withRecentDiagnostics('缅因猫连接中断，重连 5 次后仍失败', recentStreamErrors),
+            metadata,
+            timestamp: Date.now(),
+          };
+          // Codex may stay alive after 5/5 reconnect failures; stop reading and let
+          // spawnCli finalizer terminate the child to avoid hanging the invocation.
+          semanticCompletionController.abort();
+          break;
         }
         if (isCliError(event)) {
           // Codex CLI 0.98+ returns exit code 1 after successful completion.

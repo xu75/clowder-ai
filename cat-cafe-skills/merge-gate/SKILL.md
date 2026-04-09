@@ -125,27 +125,7 @@ gh pr merge {PR_NUMBER} --squash --delete-branch
 # → 见下方「Phase 文档同步」章节
 
 # 8. 更新本地 + 清理
-# ⚠️ LL (2026-04-09): 禁止 git stash -u！
-# git stash -u 会 clean 所有 untracked 文件，如果其他 session
-# 在 main 上有未 commit 的产出，会被静默删除且 pop 时可能
-# 因同名文件冲突导致 ALL untracked files 不恢复（连坐丢失）。
-#
-# 正确做法：先检查 untracked 新文件，有就先 commit 再 pull。
-UNTRACKED_NEW=$(git ls-files --others --exclude-standard -- docs/ | head -5)
-if [ -n "$UNTRACKED_NEW" ]; then
-  echo "⚠️ 发现 untracked 新文件（可能是其他 session 的产出）："
-  echo "$UNTRACKED_NEW"
-  echo "→ 先 commit 这些文件再继续，防止 stash/pull 丢失"
-  git add $UNTRACKED_NEW && git commit -m "docs: rescue untracked files before merge-gate pull
-
-Why: prevent data loss from git stash -u (see agent-mesh#25)
-
-[merge-gate/auto🐾]"
-fi
-# 只 stash tracked 修改（绝不用 -u）
-git stash --quiet 2>/dev/null || true
 git checkout main && git pull origin main
-git stash pop --quiet 2>/dev/null || true
 git worktree remove ../cat-cafe-{feature-name}
 git branch -d {branch-name} && git worktree prune
 

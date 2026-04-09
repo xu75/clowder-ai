@@ -610,6 +610,41 @@ test('includes reconnect diagnostics in CLI exit error when available', async ()
   assert.ok(errMsg.error.includes('Reconnecting... 2/5'), 'error should include multiple reconnect attempts');
 });
 
+test('terminates immediately when reconnect reaches 5/5 even if child keeps running', async () => {
+  const proc = createMockProcess();
+  const spawnFn = createMockSpawnFn(proc);
+  const service = new CodexAgentService({ spawnFn });
+
+  const promise = collect(service.invoke('reconnect terminal failure'));
+
+  // Intentionally DO NOT close stdout or emit exit: this reproduces a stuck codex child.
+  proc.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: 'thread-reconnect-stuck' })}\n`);
+  proc.stdout.write(
+    `${JSON.stringify({
+      type: 'error',
+      message: 'Reconnecting... 2/5 (stream disconnected before completion)',
+    })}\n`,
+  );
+  proc.stdout.write(
+    `${JSON.stringify({
+      type: 'error',
+      message: 'Reconnecting... 5/5 (stream disconnected before completion: Connection refused (os error 61))',
+    })}\n`,
+  );
+
+  const msgs = await Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('invoke did not terminate in time')), 1500)),
+  ]);
+
+  const errMsg = msgs.find((m) => m.type === 'error');
+  assert.ok(errMsg, 'should yield terminal reconnect error');
+  assert.ok(errMsg.error.includes('重连 5 次后仍失败'));
+  assert.ok(errMsg.error.includes('Reconnecting... 5/5'));
+  assert.ok(msgs.some((m) => m.type === 'done'), 'should always end with done');
+  assert.ok(proc.kill.mock.callCount() >= 1, 'should terminate hanging child process');
+});
+
 test('suppresses exit code 1 when Codex produced substantive output (item.completed)', async () => {
   const proc = createMockProcess();
   const spawnFn = createMockSpawnFn(proc);

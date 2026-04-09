@@ -241,6 +241,10 @@ class Qwen3CloneAdapter(TtsAdapter):
     """
 
     DEFAULT_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16"
+    # Auto-resolve voice ID → ref_audio for clone-based TTS.
+    # Set TTS_REF_AUDIO_DIR env var to the directory containing {voice_id}.wav files.
+    _REF_AUDIO_DIR = os.environ.get("TTS_REF_AUDIO_DIR", str(Path.home() / ".tts-ref-audio"))
+    _REF_TEXT = "大家好，欢迎来到智能语音合成平台，这是一段参考音频。"
 
     def __init__(self, model: str | None = None):
         self._model = model or self.DEFAULT_MODEL
@@ -276,6 +280,15 @@ class Qwen3CloneAdapter(TtsAdapter):
 
         if ref_audio and not Path(ref_audio).exists():
             raise RuntimeError(f"Reference audio not found: {ref_audio}")
+
+        # Auto-resolve: if no explicit ref_audio but we have a ref file for this voice ID,
+        # use it for clone mode so different voice IDs produce different timbres.
+        if not ref_audio and voice:
+            auto_ref = Path(self._REF_AUDIO_DIR) / f"{voice}.wav"
+            if auto_ref.exists():
+                ref_audio = str(auto_ref)
+                ref_text = ref_text or self._REF_TEXT
+                log.info("Auto-resolved ref_audio for voice '%s': %s", voice, ref_audio)
 
         output_dir = Path(tempfile.mkdtemp(prefix="cat-cafe-tts-clone-"))
         try:

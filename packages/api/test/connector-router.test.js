@@ -527,6 +527,16 @@ describe('ConnectorRouter', () => {
       const fwdTrigger = mockTrigger();
       const fwdSocket = mockSocketManager();
       const fwdStore = mockMessageStore();
+      threadStore.threads.set('thread-target-1', {
+        id: 'thread-target-1',
+        createdBy: 'owner-1',
+        title: 'target-thread',
+        participants: [],
+        lastActiveAt: Date.now(),
+        createdAt: Date.now(),
+        projectPath: 'default',
+        preferredCats: ['sonnet'],
+      });
       const fwdRouter = new ConnectorRouter({
         bindingStore,
         dedup: new InboundMessageDedup(),

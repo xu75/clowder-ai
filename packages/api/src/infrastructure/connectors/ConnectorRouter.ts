@@ -80,6 +80,7 @@ export interface ConnectorRouterOptions {
             createdAt: number;
             lastCommandAt?: number;
           };
+          preferredCats?: readonly CatId[] | undefined;
         }
       | null
       | Promise<{
@@ -91,6 +92,7 @@ export interface ConnectorRouterOptions {
             createdAt: number;
             lastCommandAt?: number;
           };
+          preferredCats?: readonly CatId[] | undefined;
         } | null>;
     updateProjectPath?(threadId: string, projectPath: string): void | Promise<void>;
     getParticipantsWithActivity?(
@@ -158,6 +160,20 @@ export class ConnectorRouter {
       }
     }
     return patterns;
+  }
+
+  /**
+   * For connector inbound routing, prefer thread-scoped preferredCats as fallback
+   * when text has no explicit @mention. This keeps per-group default cat effective.
+   */
+  private async resolveThreadFallbackCat(threadId: string): Promise<CatId> {
+    if (!this.opts.threadStore.get) return this.opts.defaultCatId;
+    const thread = await this.opts.threadStore.get(threadId);
+    const preferred = Array.isArray(thread?.preferredCats) ? thread.preferredCats : [];
+    for (const catId of preferred) {
+      if (typeof catId === 'string' && catId.length > 0) return catId as CatId;
+    }
+    return this.opts.defaultCatId;
   }
 
   async route(
