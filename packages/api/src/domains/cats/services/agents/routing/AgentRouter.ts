@@ -21,8 +21,14 @@
 import type { CatId, MessageContent } from '@cat-cafe/shared';
 import { catRegistry, escapeRegExp } from '@cat-cafe/shared';
 import type { SessionStore } from '@cat-cafe/shared/utils';
+import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { getDefaultCatId, isCatAvailable } from '../../../../../config/cat-config-loader.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
+import {
+  ROUTING_INTENT,
+  ROUTING_STRATEGY,
+  ROUTING_TARGET_CATS,
+} from '../../../../../infrastructure/telemetry/genai-semconv.js';
 import type { IntentResult } from '../../context/IntentParser.js';
 import { parseIntent, stripIntentTags } from '../../context/IntentParser.js';
 import { SessionManager } from '../../session/SessionManager.js';
@@ -46,6 +52,7 @@ import { routeParallel } from '../routing/route-parallel.js';
 import { routeSerial } from '../routing/route-serial.js';
 
 const log = createModuleLogger('agent-router');
+const routeTracer = trace.getTracer('cat-cafe-api', '0.1.0');
 
 /** Parsed mention with position for ordering */
 interface ParsedMention {
@@ -168,6 +175,10 @@ export interface AgentRouterOptions {
   evidenceStore?: import('../../../../memory/interfaces.js').IEvidenceStore;
   /** F150: Tool usage counter */
   toolUsageCounter?: import('../../tool-usage/ToolUsageCounter.js').ToolUsageCounter;
+  /** F155 B-4: Independent guide session store */
+  guideSessionStore?: import('../../../../guides/GuideSessionRepository.js').IGuideSessionStore;
+  /** F155 B-6: Dismiss tracker for guide offer suppression */
+  dismissTracker?: import('../../../../guides/GuideDismissTracker.js').IGuideDismissTracker;
 }
 
 /**
@@ -210,6 +221,10 @@ export class AgentRouter {
   private evidenceStore?: import('../../../../memory/interfaces.js').IEvidenceStore;
   /** F150 */
   private toolUsageCounter?: import('../../tool-usage/ToolUsageCounter.js').ToolUsageCounter;
+  /** F155 B-4 */
+  private guideSessionStore?: import('../../../../guides/GuideSessionRepository.js').IGuideSessionStore;
+  /** F155 B-6 */
+  private dismissTracker?: import('../../../../guides/GuideDismissTracker.js').IGuideDismissTracker;
   private speechMentionRe: RegExp;
 
   private rebuildRuntimeCaches(agentRegistry: AgentRegistry): void {
@@ -248,6 +263,8 @@ export class AgentRouter {
     this.packStore = options.packStore;
     this.evidenceStore = options.evidenceStore;
     this.toolUsageCounter = options.toolUsageCounter;
+    this.guideSessionStore = options.guideSessionStore;
+    this.dismissTracker = options.dismissTracker;
   }
 
   refreshFromRegistry(agentRegistry: AgentRegistry): void {
@@ -558,28 +575,28 @@ export class AgentRouter {
         return this.applyThreadRoutingPolicy(thread, message, validPreferred);
       }
 
-      // F078 + #58: last-replier takes priority, scoped to preferred cats when set
-      // #267: two-tier fallback — (1) prefer cats with successful response history,
-      //   (2) then any non-errored participant. This prevents never-responded cats
-      //   from short-circuiting the search for the next healthy responder.
+      // F078: last-replier takes absolute priority over preferredCats.
+      // User mental model: "no @ = continue with whoever I was talking to".
+      // preferredCats only kicks in when there's no conversation history at all.
+      // #267: three-tier fallback — (1) any healthy replier (unscoped),
+      //   (2) preferred non-errored participant, (3) any non-errored participant.
       const participantsWithActivity = await this.threadStore.getParticipantsWithActivity(threadId);
-      const matchScope = (p: { catId: CatId }) =>
-        this.isRoutableCat(p.catId) && (preferredSet.size === 0 || preferredSet.has(p.catId as string));
-      const healthyReplier = participantsWithActivity.find(
-        (p) => p.messageCount > 0 && p.lastResponseHealthy !== false && matchScope(p),
-      );
+      const isRoutable = (p: { catId: CatId }) => this.isRoutableCat(p.catId);
+      const isHealthy = (p: { lastResponseHealthy?: boolean }) => p.lastResponseHealthy !== false;
+      const healthyReplier = participantsWithActivity.find((p) => p.messageCount > 0 && isHealthy(p) && isRoutable(p));
       if (healthyReplier) {
         return this.applyThreadRoutingPolicy(thread, message, [healthyReplier.catId]);
       }
-      // No cat with successful response — fall back to any non-errored participant
-      const fallbackParticipant = participantsWithActivity.find(
-        (p) => p.lastResponseHealthy !== false && matchScope(p),
+      const preferredFallback = participantsWithActivity.find(
+        (p) => isHealthy(p) && isRoutable(p) && preferredSet.has(p.catId as string),
       );
+      const anyFallback = participantsWithActivity.find((p) => isHealthy(p) && isRoutable(p));
+      const fallbackParticipant = preferredFallback ?? anyFallback;
       if (fallbackParticipant) {
         return this.applyThreadRoutingPolicy(thread, message, [fallbackParticipant.catId]);
       }
 
-      // No last-replier (or last-replier not in preferred set): use first preferred cat
+      // No healthy participant at all: use first preferred cat
       if (validPreferred.length > 0) {
         return this.applyThreadRoutingPolicy(thread, message, [validPreferred[0]]);
       }
@@ -616,25 +633,25 @@ export class AgentRouter {
         return this.applyThreadRoutingPolicy(thread, message, validPreferred);
       }
 
-      // F078 + #58: last-replier takes priority, scoped to preferred cats when set
-      // #267: two-tier fallback (same as peekTargets)
+      // F078 + #58: last-replier takes priority over preferred cats (user mental model)
+      // #267: three-tier fallback (same as peekTargets)
       const participantsWithActivity = await this.threadStore.getParticipantsWithActivity(threadId);
-      const matchScope = (p: { catId: CatId }) =>
-        this.isRoutableCat(p.catId) && (preferredSet.size === 0 || preferredSet.has(p.catId as string));
-      const healthyReplier = participantsWithActivity.find(
-        (p) => p.messageCount > 0 && p.lastResponseHealthy !== false && matchScope(p),
-      );
+      const isRoutable = (p: { catId: CatId }) => this.isRoutableCat(p.catId);
+      const isHealthy = (p: { lastResponseHealthy?: boolean }) => p.lastResponseHealthy !== false;
+      const healthyReplier = participantsWithActivity.find((p) => p.messageCount > 0 && isHealthy(p) && isRoutable(p));
       if (healthyReplier) {
         return this.applyThreadRoutingPolicy(thread, message, [healthyReplier.catId]);
       }
-      const fallbackParticipant = participantsWithActivity.find(
-        (p) => p.lastResponseHealthy !== false && matchScope(p),
+      const preferredFallback = participantsWithActivity.find(
+        (p) => isHealthy(p) && isRoutable(p) && preferredSet.has(p.catId as string),
       );
+      const anyFallback = participantsWithActivity.find((p) => isHealthy(p) && isRoutable(p));
+      const fallbackParticipant = preferredFallback ?? anyFallback;
       if (fallbackParticipant) {
         return this.applyThreadRoutingPolicy(thread, message, [fallbackParticipant.catId]);
       }
 
-      // No last-replier (or last-replier not in preferred set): use first preferred cat
+      // No healthy participant at all: use first preferred cat
       if (validPreferred.length > 0) {
         return this.applyThreadRoutingPolicy(thread, message, [validPreferred[0]]);
       }
@@ -666,6 +683,8 @@ export class AgentRouter {
         ...(this.tmuxGateway ? { tmuxGateway: this.tmuxGateway } : {}),
         ...(this.agentPaneRegistry ? { agentPaneRegistry: this.agentPaneRegistry } : {}),
         ...(this.signalArticleLookup ? { signalArticleLookup: this.signalArticleLookup } : {}),
+        ...(this.guideSessionStore ? { guideSessionStore: this.guideSessionStore } : {}),
+        ...(this.dismissTracker ? { dismissTracker: this.dismissTracker } : {}),
       },
       messageStore: this.messageStore,
       deliveryCursorStore: this.deliveryCursorStore,
@@ -712,7 +731,16 @@ export class AgentRouter {
     const resolvedThreadId = threadId ?? DEFAULT_THREAD_ID;
     const targetCats = await this.resolveTargets(message, resolvedThreadId);
     const intent = parseIntent(message, targetCats.length);
+    const strategy = intent.intent === 'ideate' && targetCats.length > 1 ? 'parallel' : 'serial';
     const cleanMessage = stripIntentTags(message);
+
+    const routeSpan = routeTracer.startSpan('cat_cafe.route', {
+      attributes: {
+        [ROUTING_TARGET_CATS]: (targetCats as string[]).join(','),
+        [ROUTING_INTENT]: intent.intent,
+        [ROUTING_STRATEGY]: strategy,
+      },
+    });
 
     // Fetch thread for thinkingMode + update lastActive
     // Default to play mode when no threadStore is available: stream thinking stays isolated.
@@ -743,12 +771,21 @@ export class AgentRouter {
       promptTags: intent.promptTags,
       currentUserMessageId: storedUserMessage.id,
       thinkingMode: legacyThinkingMode,
+      routeSpan,
     };
 
-    if (intent.intent === 'ideate' && targetCats.length > 1) {
-      yield* routeParallel(strategyDeps, targetCats, cleanMessage, userId, resolvedThreadId, routeOptions);
-    } else {
-      yield* routeSerial(strategyDeps, targetCats, cleanMessage, userId, resolvedThreadId, routeOptions);
+    try {
+      if (strategy === 'parallel') {
+        yield* routeParallel(strategyDeps, targetCats, cleanMessage, userId, resolvedThreadId, routeOptions);
+      } else {
+        yield* routeSerial(strategyDeps, targetCats, cleanMessage, userId, resolvedThreadId, routeOptions);
+      }
+      routeSpan.setStatus({ code: SpanStatusCode.OK });
+    } catch (err) {
+      routeSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+      throw err;
+    } finally {
+      routeSpan.end();
     }
   }
 
@@ -773,6 +810,9 @@ export class AgentRouter {
       signal?: AbortSignal;
       queueHasQueuedMessages?: (threadId: string) => boolean;
       hasQueuedOrActiveAgentForCat?: (threadId: string, catId: string) => boolean;
+      invocationController?: AbortController;
+      trackA2ASlot?: (threadId: string, catId: CatId, userId: string, controller: AbortController) => void;
+      completeA2ASlots?: (threadId: string, catIds: readonly CatId[], controller: AbortController) => void;
       /** ADR-008 S3: pass a Map to collect cursor boundaries; caller acks after succeeded */
       cursorBoundaries?: Map<string, string>;
       /** P1-2: pass to track persistence failures across generator boundary */
@@ -782,6 +822,16 @@ export class AgentRouter {
     },
   ): AsyncIterable<AgentMessage> {
     const cleanMessage = stripIntentTags(message);
+    const strategy = intent.intent === 'ideate' && targetCats.length > 1 ? 'parallel' : 'serial';
+
+    const routeSpan = routeTracer.startSpan('cat_cafe.route', {
+      attributes: {
+        [ROUTING_TARGET_CATS]: (targetCats as string[]).join(','),
+        [ROUTING_INTENT]: intent.intent,
+        [ROUTING_STRATEGY]: strategy,
+        ...(options?.parentInvocationId ? { invocationId: options.parentInvocationId } : {}),
+      },
+    });
 
     // Fetch thread for thinkingMode + update lastActive
     // Default to play mode when no threadStore is available: stream thinking stays isolated.
@@ -801,24 +851,48 @@ export class AgentRouter {
       signal: options?.signal,
       queueHasQueuedMessages: options?.queueHasQueuedMessages,
       hasQueuedOrActiveAgentForCat: options?.hasQueuedOrActiveAgentForCat,
+      invocationController: options?.invocationController,
+      trackA2ASlot: options?.trackA2ASlot,
+      completeA2ASlots: options?.completeA2ASlots,
       promptTags: intent.promptTags,
       currentUserMessageId: userMessageId,
       thinkingMode,
       ...(options?.cursorBoundaries ? { cursorBoundaries: options.cursorBoundaries } : {}),
       ...(options?.persistenceContext ? { persistenceContext: options.persistenceContext } : {}),
       ...(options?.parentInvocationId ? { parentInvocationId: options.parentInvocationId } : {}),
+      routeSpan,
     };
 
-    if (intent.intent === 'ideate' && targetCats.length > 1) {
-      yield* routeParallel(strategyDeps, targetCats, cleanMessage, userId, threadId, routeOptions);
-    } else {
-      yield* routeSerial(strategyDeps, targetCats, cleanMessage, userId, threadId, routeOptions);
+    try {
+      if (strategy === 'parallel') {
+        yield* routeParallel(strategyDeps, targetCats, cleanMessage, userId, threadId, routeOptions);
+      } else {
+        yield* routeSerial(strategyDeps, targetCats, cleanMessage, userId, threadId, routeOptions);
+      }
+      routeSpan.setStatus({ code: SpanStatusCode.OK });
+    } catch (err) {
+      routeSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+      throw err;
+    } finally {
+      // F153 Phase F KD-22: Write route span tracing to user message for cold start recovery.
+      // Runs in finally so both success and error paths persist the route root pointer.
+      if (userMessageId) {
+        const sc = routeSpan.spanContext();
+        try {
+          await Promise.resolve(
+            this.messageStore.updateExtra(userMessageId, { tracing: { traceId: sc.traceId, spanId: sc.spanId } }),
+          );
+        } catch (backfillErr) {
+          log.warn({ userMessageId, err: backfillErr }, 'Failed to write route tracing to user message');
+        }
+      }
+      routeSpan.end();
     }
   }
 
   /**
    * ADR-008 S3: Ack all cursor boundaries collected during execution.
-   * Call ONLY after InvocationRecord.status = 'succeeded'.
+   * Called after succeeded, and also on abort/exception for already-completed cats.
    */
   async ackCollectedCursors(userId: string, threadId: string, boundaries: Map<string, string>): Promise<void> {
     for (const [catId, boundaryId] of boundaries) {

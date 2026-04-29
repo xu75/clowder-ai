@@ -9,6 +9,50 @@ vi.mock('@/utils/api-client', () => ({
   apiFetch: (...args: unknown[]) => mockApiFetch(...args),
 }));
 
+const TEST_CATS = [
+  {
+    id: 'opus',
+    displayName: '布偶猫',
+    nickname: '宪宪',
+    breedId: 'ragdoll',
+    breedDisplayName: '布偶猫',
+    color: { primary: '#9B7EBD', secondary: '#E8D5F5' },
+    mentionPatterns: ['@opus'],
+    clientId: 'anthropic',
+    defaultModel: 'claude-opus-4-6',
+    avatar: '',
+    roleDescription: '',
+    personality: '',
+  },
+  {
+    id: 'codex',
+    displayName: '缅因猫',
+    nickname: '砚砚',
+    breedId: 'maine-coon',
+    breedDisplayName: '缅因猫',
+    color: { primary: '#5B8C5A', secondary: '#D5E8D4' },
+    mentionPatterns: ['@codex'],
+    clientId: 'openai',
+    defaultModel: 'gpt-5.5',
+    avatar: '',
+    roleDescription: '',
+    personality: '',
+  },
+];
+
+vi.mock('@/hooks/useCatData', () => ({
+  formatCatName: (cat: { displayName: string; variantLabel?: string }) =>
+    cat.variantLabel ? `${cat.displayName}（${cat.variantLabel}）` : cat.displayName,
+  useCatData: () => ({
+    cats: TEST_CATS,
+    isLoading: false,
+    hasFetched: true,
+    getCatById: (id: string) => TEST_CATS.find((cat) => cat.id === id),
+    getCatsByBreed: () => new Map(TEST_CATS.map((cat) => [cat.breedId, [cat]])),
+    refresh: async () => TEST_CATS,
+  }),
+}));
+
 // ── Helpers ────────────────────────────────────────────────────
 function jsonOk(data: unknown) {
   return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(data) });
@@ -151,7 +195,22 @@ describe('DirectoryPickerModal', () => {
     expect(fns.onSelect).toHaveBeenCalledWith(expect.objectContaining({ projectPath: undefined }));
   });
 
-  it('confirm button is disabled when no project is selected', async () => {
+  it('confirm button is disabled when no project available at all', async () => {
+    mockApiFetch.mockImplementation((path: string) => {
+      if (path === '/api/projects/cwd') return jsonFail();
+      if (path === '/api/backlog/items') return jsonOk({ items: [] });
+      return jsonFail();
+    });
+    render({ existingProjects: [] });
+    await flush();
+    const confirmBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('创建对话'),
+    ) as HTMLButtonElement;
+    expect(confirmBtn).toBeTruthy();
+    expect(confirmBtn.disabled).toBe(true);
+  });
+
+  it('auto-selects cwdPath on mount so confirm button is enabled', async () => {
     setupCwdSuccess();
     render();
     await flush();
@@ -159,7 +218,29 @@ describe('DirectoryPickerModal', () => {
       b.textContent?.includes('创建对话'),
     ) as HTMLButtonElement;
     expect(confirmBtn).toBeTruthy();
-    expect(confirmBtn.disabled).toBe(true);
+    expect(confirmBtn.disabled).toBe(false);
+  });
+
+  it('auto-selects first existing project when cwdPath unavailable', async () => {
+    const existingPath = '/home/user/other';
+    mockApiFetch.mockImplementation((path: string) => {
+      if (path === '/api/projects/cwd') return jsonFail();
+      if (path === '/api/backlog/items') return jsonOk({ items: [] });
+      return jsonFail();
+    });
+    const fns = render({ existingProjects: [existingPath] });
+    await flush();
+    clickConfirm();
+    expect(fns.onSelect).toHaveBeenCalledWith(expect.objectContaining({ projectPath: existingPath }));
+  });
+
+  it('auto-selects cwdPath over existingProjects when both available', async () => {
+    const existingPath = '/home/user/other';
+    setupCwdSuccess();
+    const fns = render({ existingProjects: [existingPath] });
+    await flush();
+    clickConfirm();
+    expect(fns.onSelect).toHaveBeenCalledWith(expect.objectContaining({ projectPath: CWD_PATH }));
   });
 
   // ── F113: Browse directory button (replaces F068 osascript picker) ──

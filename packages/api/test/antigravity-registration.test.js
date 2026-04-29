@@ -8,7 +8,7 @@ describe('Antigravity provider registration', () => {
     const bengal = config.breeds.find((b) => b.id === 'bengal');
     assert.ok(bengal, 'bengal breed should exist in config');
     assert.ok(bengal.variants.length > 0, 'bengal should have variants');
-    assert.equal(bengal.variants[0].provider, 'antigravity');
+    assert.equal(bengal.variants[0].clientId, 'antigravity');
   });
 
   test('AntigravityAgentService is importable', async () => {
@@ -16,9 +16,15 @@ describe('Antigravity provider registration', () => {
     assert.ok(mod.AntigravityAgentService, 'should export AntigravityAgentService');
   });
 
-  test('AntigravityCdpClient is importable', async () => {
-    const mod = await import('../dist/domains/cats/services/agents/providers/antigravity/AntigravityCdpClient.js');
-    assert.ok(mod.AntigravityCdpClient, 'should export AntigravityCdpClient');
-    assert.ok(mod.findEditorTarget, 'should export findEditorTarget');
+  test('AntigravityBridge is importable', async () => {
+    const mod = await import('../dist/domains/cats/services/agents/providers/antigravity/AntigravityBridge.js');
+    assert.ok(mod.AntigravityBridge, 'should export AntigravityBridge');
+  });
+
+  test('antigravity-event-transformer is importable', async () => {
+    const mod = await import(
+      '../dist/domains/cats/services/agents/providers/antigravity/antigravity-event-transformer.js'
+    );
+    assert.ok(mod.transformTrajectorySteps, 'should export transformTrajectorySteps');
   });
 });

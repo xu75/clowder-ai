@@ -2,6 +2,8 @@
  * F099: Hub accordion navigation regression tests
  * Tests entry-point routing, group lookup, and resolveRequestedHubTab.
  */
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/stores/chatStore';
 
@@ -12,6 +14,7 @@ vi.mock('@/hooks/useCatData', () => ({
 vi.mock('@/utils/api-client', () => ({ apiFetch: vi.fn() }));
 
 const { resolveRequestedHubTab, findGroupForTab } = await import('../CatCafeHub');
+const { AccordionSection, HUB_GROUPS } = await import('../cat-cafe-hub.navigation');
 
 describe('F099 Hub navigation', () => {
   beforeEach(() => {
@@ -29,12 +32,15 @@ describe('F099 Hub navigation', () => {
     it('openHub("commands") deep-links to specific tab', () => {
       useChatStore.getState().openHub('commands');
       const state = useChatStore.getState().hubState;
-      expect(state).toEqual({ open: true, tab: 'commands' });
+      // F174 D2b-3 cloud P2 #1403: openHub now also stamps subTabNonce so
+      // repeated deep-links re-fire useEffect — match shape, ignore nonce value.
+      expect(state).toMatchObject({ open: true, tab: 'commands' });
+      expect(typeof state?.subTabNonce).toBe('number');
     });
 
     it('openHub("system") deep-links to system tab', () => {
       useChatStore.getState().openHub('system');
-      expect(useChatStore.getState().hubState).toEqual({ open: true, tab: 'system' });
+      expect(useChatStore.getState().hubState).toMatchObject({ open: true, tab: 'system' });
     });
   });
 
@@ -45,8 +51,8 @@ describe('F099 Hub navigation', () => {
       expect(group?.id).toBe('cats');
     });
 
-    it('finds settings group for "provider-profiles"', () => {
-      const group = findGroupForTab('provider-profiles');
+    it('finds settings group for "accounts"', () => {
+      const group = findGroupForTab('accounts');
       expect(group).toBeDefined();
       expect(group?.id).toBe('settings');
     });
@@ -87,6 +93,26 @@ describe('F099 Hub navigation', () => {
 
     it('does not expose a standalone strategy tab after member editor unification', () => {
       expect(findGroupForTab('strategy')).toBeUndefined();
+    });
+  });
+
+  describe('guide anchors', () => {
+    it('renders a visible settings.group target on the settings accordion header even while collapsed', () => {
+      const settingsGroup = HUB_GROUPS.find((group) => group.id === 'settings');
+      expect(settingsGroup).toBeDefined();
+
+      const html = renderToStaticMarkup(
+        React.createElement(AccordionSection, {
+          group: settingsGroup!,
+          expanded: false,
+          activeTab: 'cats',
+          onToggle: () => {},
+          onSelectTab: () => {},
+        }),
+      );
+
+      expect(html).toContain('data-guide-id="settings.group"');
+      expect(html).not.toContain('data-guide-id="settings.accounts"');
     });
   });
 

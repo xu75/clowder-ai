@@ -4,29 +4,103 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { normalizeRichBlock } from '@cat-cafe/shared';
+import { readFileSync } from 'node:fs';
+import type { CallbackAuthFailureReason } from '@cat-cafe/shared';
+import { CALLBACK_AUTH_FAILURE_REASONS, isCallbackAuthFailureReason, normalizeRichBlock } from '@cat-cafe/shared';
 import { z } from 'zod';
 import { sendCallbackRequest } from './callback-outbox.js';
+import { extractReasonTag } from './callback-retry.js';
+import { withDegradation } from './degradation.js';
 import type { ToolResult } from './file-tools.js';
 import { errorResult, successResult } from './file-tools.js';
 
+/**
+ * F174 Phase A — reason taxonomy lives in @cat-cafe/shared (single source of
+ * truth shared with the API). Aliased here for local readability.
+ */
+type AuthFailureReason = CallbackAuthFailureReason;
+const KNOWN_REASONS: ReadonlySet<AuthFailureReason> = new Set(CALLBACK_AUTH_FAILURE_REASONS);
+
+/**
+ * Parse the structured reason tag added by the retry layer (or callbackGet)
+ * into a typed AuthFailureReason. Returns undefined if no tag, the tag is
+ * malformed, or the reason is unknown — callers must handle that case.
+ */
+function parseAuthFailureReason(errorText: string): AuthFailureReason | undefined {
+  const match = /\[reason=([a-z_]+)\]/.exec(errorText);
+  if (!match) return undefined;
+  const reason = match[1];
+  // Use shared type guard so an unknown reason from a future server doesn't
+  // get silently coerced into our local enum.
+  if (reason && isCallbackAuthFailureReason(reason) && KNOWN_REASONS.has(reason)) {
+    return reason;
+  }
+  return undefined;
+}
+
+// F174 Phase E: degradation policy + DEGRADABLE_AUTH_REASONS moved to
+// ./degradation.ts so other write-class tools share a single source of truth.
+
 interface CallbackConfig {
   apiUrl: string;
-  invocationId: string;
-  callbackToken: string;
+  invocationId?: string;
+  callbackToken?: string;
+  agentKeySecret?: string;
 }
 
 export function getCallbackConfig(): CallbackConfig | null {
   const apiUrl = process.env['CAT_CAFE_API_URL'];
+  if (!apiUrl) return null;
+
   const invocationId = process.env['CAT_CAFE_INVOCATION_ID'];
   const callbackToken = process.env['CAT_CAFE_CALLBACK_TOKEN'];
-  if (!apiUrl || !invocationId || !callbackToken) return null;
-  return { apiUrl, invocationId, callbackToken };
+
+  let agentKeySecret = process.env['CAT_CAFE_AGENT_KEY_SECRET'];
+  if (!agentKeySecret) {
+    const keyFile = process.env['CAT_CAFE_AGENT_KEY_FILE'];
+    if (keyFile) {
+      try {
+        agentKeySecret = readFileSync(keyFile, 'utf-8').trim();
+      } catch {
+        // sidecar missing = no agent-key (not an error)
+      }
+    }
+  }
+
+  if (!invocationId && !callbackToken && !agentKeySecret) return null;
+
+  const hasFullInvocation = invocationId && callbackToken;
+  if ((invocationId || callbackToken) && !hasFullInvocation && !agentKeySecret) return null;
+
+  return {
+    apiUrl,
+    ...(hasFullInvocation ? { invocationId, callbackToken } : {}),
+    ...(agentKeySecret ? { agentKeySecret } : {}),
+  };
 }
 
 export const NO_CONFIG_ERROR =
   'Clowder AI callback not configured. Missing CAT_CAFE_API_URL, CAT_CAFE_INVOCATION_ID, or CAT_CAFE_CALLBACK_TOKEN environment variables.';
 // ============ HTTP helpers ============
+
+export function buildAuthHeaders(config: CallbackConfig): Record<string, string> {
+  if (config.invocationId && config.callbackToken) {
+    return {
+      'x-invocation-id': config.invocationId,
+      'x-callback-token': config.callbackToken,
+    };
+  }
+  if (config.agentKeySecret) {
+    return { 'x-agent-key-secret': config.agentKeySecret };
+  }
+  return {};
+}
+
+// F174 Phase F (AC-F2): first-party MCP client stopped dual-writing creds to
+// body/query. Headers are now the only place we put credentials. Server still
+// accepts body/query as fallback for legacy MCP clients during the compat
+// window — that fallback usage is tracked via callback-auth-telemetry's
+// `recordLegacyFallbackHit` so we know when it's safe to delete the schema.
 
 export async function callbackPost(
   path: string,
@@ -36,14 +110,13 @@ export async function callbackPost(
   const config = getCallbackConfig();
   if (!config) return errorResult(NO_CONFIG_ERROR);
 
-  const requestBody = {
-    invocationId: config.invocationId,
-    callbackToken: config.callbackToken,
-    ...body,
-  };
-
   const result = await sendCallbackRequest(
-    { apiUrl: config.apiUrl, path, body: requestBody },
+    {
+      apiUrl: config.apiUrl,
+      path,
+      body, // headers-only auth (Phase F AC-F2)
+      headers: buildAuthHeaders(config),
+    },
     { enableOutbox: options?.enableOutbox === true },
   );
   if (result.ok) return successResult(JSON.stringify(result.data));
@@ -54,17 +127,18 @@ export async function callbackGet(path: string, params?: Record<string, string>)
   const config = getCallbackConfig();
   if (!config) return errorResult(NO_CONFIG_ERROR);
 
-  const query = new URLSearchParams({
-    invocationId: config.invocationId,
-    callbackToken: config.callbackToken,
-    ...params,
-  });
+  const query = new URLSearchParams(params ?? {}); // headers-only auth (Phase F AC-F2)
+  const qs = query.toString();
+  const url = qs ? `${config.apiUrl}${path}?${qs}` : `${config.apiUrl}${path}`;
 
   try {
-    const response = await fetch(`${config.apiUrl}${path}?${query.toString()}`);
+    const response = await fetch(url, { headers: buildAuthHeaders(config) });
     if (!response.ok) {
       const text = await response.text();
-      return errorResult(`Callback failed (${response.status}): ${text}`);
+      // F174 Phase A: tag structured reason from 401 callback_auth_failed body
+      // so downstream routing matches the postJsonWithRetry error format.
+      const reasonTag = response.status === 401 ? extractReasonTag(text) : '';
+      return errorResult(`Callback failed (${response.status})${reasonTag}: ${text}`);
     }
     return successResult(JSON.stringify(await response.json()));
   } catch (err) {
@@ -75,6 +149,13 @@ export async function callbackGet(path: string, params?: Record<string, string>)
 
 export const postMessageInputSchema = {
   content: z.string().min(1).describe('The message content to post'),
+  threadId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Target thread ID. Required for agent-key auth (persistent agent with no default thread). Omit for invocation auth (defaults to invocation thread).',
+    ),
   replyTo: z.string().optional().describe('Optional message ID to reply to'),
   clientMessageId: z
     .string()
@@ -86,7 +167,7 @@ export const postMessageInputSchema = {
     .array(z.string().min(1))
     .optional()
     .describe(
-      'Optional explicit target cat IDs (e.g. ["codex","gpt52"]). Merged with @mentions parsed from content. Used for direction rendering in frontend.',
+      'Optional explicit target cat IDs. Merged with @mentions parsed from content. Used for direction rendering in frontend. Use get_thread_cats to discover valid catIds.',
     ),
 };
 
@@ -164,6 +245,12 @@ export const featIndexInputSchema = {
     .describe('Optional fuzzy substring search over featId/name/status (case-insensitive).'),
 };
 
+export const createTaskInputSchema = {
+  title: z.string().min(1).max(200).describe('Task title — what needs to be done'),
+  why: z.string().max(1000).optional().describe('Why this task matters (context for whoever picks it up)'),
+  ownerCatId: z.string().min(1).optional().describe('Cat ID to assign the task to (optional, defaults to unassigned)'),
+};
+
 export const updateTaskInputSchema = {
   taskId: z.string().min(1).describe('The ID of the task to update'),
   status: z.enum(['todo', 'doing', 'blocked', 'done']).optional().describe('New task status'),
@@ -199,17 +286,26 @@ export async function handlePostMessage(input: {
   clientMessageId?: string | undefined;
   targetCats?: string[] | undefined;
 }): Promise<ToolResult> {
-  const result = await callbackPost(
-    '/api/callbacks/post-message',
-    {
-      content: input.content,
-      ...(input.threadId ? { threadId: input.threadId } : {}),
-      ...(input.replyTo ? { replyTo: input.replyTo } : {}),
-      clientMessageId: input.clientMessageId ?? randomUUID(),
-      ...(input.targetCats?.length ? { targetCats: input.targetCats } : {}),
-    },
-    { enableOutbox: true },
-  );
+  // F174 Phase E (AC-E2/E5): explicit kind:'none' policy. There's no useful
+  // local fallback for post_message — losing the message is preferable to
+  // re-creating server state on a stale invocation. Cats see the structured
+  // `[degrade] reason=...` hint and the existing @mention-textual workaround.
+  const result = await withDegradation({
+    toolName: 'post_message',
+    primary: () =>
+      callbackPost(
+        '/api/callbacks/post-message',
+        {
+          content: input.content,
+          ...(input.threadId ? { threadId: input.threadId } : {}),
+          ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+          clientMessageId: input.clientMessageId ?? randomUUID(),
+          ...(input.targetCats?.length ? { targetCats: input.targetCats } : {}),
+        },
+        { enableOutbox: true },
+      ),
+    policy: { kind: 'none' },
+  });
 
   // Detect stale_ignored: server returned 200 but message was NOT delivered
   // because a newer invocation for the same thread+cat has superseded this one.
@@ -231,17 +327,24 @@ export async function handlePostMessage(input: {
 
   // If post-message failed and content contains @mentions,
   // hint that text-based @mention is always available.
-  // Only mention credential issues when the error actually looks like auth failure.
+  // F174 Phase A: route on the structured reason tag (added by callback-retry)
+  // instead of regex-matching prose. Falls back to "generic failure" hint when
+  // no reason tag is present (e.g. network error, non-auth 4xx).
   if (result.isError && /[@＠]/.test(input.content)) {
     const original = (result.content[0] as { text: string }).text;
-    const lower = original.toLowerCase();
-    const looksLikeCredentialFailure =
-      lower.includes('callback failed (401)') ||
-      lower.includes('invalid or expired callback credentials') ||
-      lower.includes('callback token');
-    const reasonHint = looksLikeCredentialFailure
-      ? '这次 callback 凭证校验失败（可能是 token 过期，也可能 invocation/token 不匹配）。'
-      : '这次 post-message 调用失败。';
+    const reason = parseAuthFailureReason(original);
+    const reasonHint = ((): string => {
+      if (reason === 'expired' || reason === 'unknown_invocation') {
+        return '这次 callback 凭证已过期或对应的 invocation 已不在 registry（可能 API 重启过）。';
+      }
+      if (reason === 'invalid_token') {
+        return '这次 callback token 与 invocation 不匹配（客户端可能传错了凭证）。';
+      }
+      if (reason === 'missing_creds') {
+        return '这次 callback 缺少凭证 header（MCP 客户端环境变量可能没注入）。';
+      }
+      return '这次 post-message 调用失败。';
+    })();
     const hint =
       `\n\n💡 Tip: ${reasonHint}如果你想 @其他猫猫，` +
       '不需要用这个 MCP tool——直接在你的回复文本里另起一行写 @猫名 即可' +
@@ -307,10 +410,29 @@ export async function handleUpdateTask(input: {
   status?: string | undefined;
   why?: string | undefined;
 }): Promise<ToolResult> {
-  return callbackPost('/api/callbacks/update-task', {
-    taskId: input.taskId,
-    ...(input.status ? { status: input.status } : {}),
+  // F174 Phase E (AC-E2/E5): explicit kind:'none'. Task state lives in Redis;
+  // local fallback would diverge from server truth. Surface `[degrade]` hint.
+  return withDegradation({
+    toolName: 'update_task',
+    primary: () =>
+      callbackPost('/api/callbacks/update-task', {
+        taskId: input.taskId,
+        ...(input.status ? { status: input.status } : {}),
+        ...(input.why ? { why: input.why } : {}),
+      }),
+    policy: { kind: 'none' },
+  });
+}
+
+export async function handleCreateTask(input: {
+  title: string;
+  why?: string | undefined;
+  ownerCatId?: string | undefined;
+}): Promise<ToolResult> {
+  return callbackPost('/api/callbacks/create-task', {
+    title: input.title,
     ...(input.why ? { why: input.why } : {}),
+    ...(input.ownerCatId ? { ownerCatId: input.ownerCatId } : {}),
   });
 }
 
@@ -352,8 +474,12 @@ export const createRichBlockInputSchema = {
 
 /**
  * #84: Route A → Route B fallback for rich block creation.
- * Tries direct callback first; on failure, falls back to post_message with cc_rich text
- * (which is extracted server-side after #83 fix).
+ *
+ * F174 Phase E refactor: the typed-reason auth path (expired /
+ * unknown_invocation) now flows through `withDegradation` framework so
+ * other write-class tools can declare the same policy uniformly. The
+ * legacy 403 / "not configured" path predates Phase A typed reasons and
+ * stays inline (preserves pre-Phase-A behavior, marks DEGRADED:true).
  */
 export async function handleCreateRichBlock(input: { block: string }): Promise<ToolResult> {
   let parsed: unknown;
@@ -369,37 +495,45 @@ export async function handleCreateRichBlock(input: { block: string }): Promise<T
   if (!parsed || typeof parsed !== 'object' || !('id' in parsed) || !('kind' in parsed)) {
     return errorResult('Block must include id and kind fields');
   }
+  const block = parsed;
 
-  // Route A: direct rich block callback (buffers for invocation response)
-  const result = await callbackPost(
-    '/api/callbacks/create-rich-block',
-    {
-      block: parsed,
+  const ccRichText = `\`\`\`cc_rich\n${JSON.stringify({ v: 1, blocks: [block] })}\n\`\`\``;
+  const runRouteB = async (): Promise<ToolResult> => {
+    const fallback = await handlePostMessage({
+      content: ccRichText,
+      clientMessageId: randomUUID(),
+    });
+    if (!fallback.isError) {
+      // Cloud Codex P2 (PR #1384): legacy 403/not-configured branch returns
+      // runRouteB() from primary, where the framework treats it as primary
+      // success and skips DEGRADED:true tagging. Mark inline so both paths
+      // (legacy + framework custom degrade) get consistent telemetry. The
+      // framework's markDegraded is idempotent so re-tagging on the custom
+      // path is harmless.
+      return successResult(JSON.stringify({ status: 'ok', route: 'B_fallback', DEGRADED: true }));
+    }
+    return errorResult(
+      `Rich block creation failed (callback token expired or missing). As a workaround, include this in your message text:\n\n${ccRichText}`,
+    );
+  };
+
+  // Phase E: framework handles primary call + auth-degradable fallback.
+  // For the legacy 403/not-configured path (pre-Phase-A), inspect the
+  // returned error text and route to Route B explicitly — preserves the
+  // existing behavior without widening the framework's degradable set
+  // (AC-E3: framework triggers only on 401-degradable reasons).
+  return withDegradation({
+    toolName: 'create_rich_block',
+    primary: async () => {
+      const result = await callbackPost('/api/callbacks/create-rich-block', { block }, { enableOutbox: true });
+      if (!result.isError) return result;
+      const errorText = result.content[0]?.type === 'text' ? result.content[0].text : '';
+      const isLegacyConfigFailure = /\(403\)/.test(errorText) || /not configured/i.test(errorText);
+      if (isLegacyConfigFailure) return runRouteB(); // legacy compat path returns success directly
+      return result; // framework continues with auth-reason inspection
     },
-    { enableOutbox: true },
-  );
-  if (!result.isError) return result;
-
-  // P1 cloud-review: only fallback to Route B for auth/config failures.
-  // Validation errors (400/422) must surface directly, not be silently swallowed.
-  const errorText = result.content[0]?.type === 'text' ? result.content[0].text : '';
-  const isAuthOrConfigFailure = /\(40[13]\)/.test(errorText) || /not configured/i.test(errorText);
-  if (!isAuthOrConfigFailure) return result;
-
-  // Route A auth/config failed — try Route B: cc_rich text via post_message (#83 extracts it server-side)
-  const ccRichText = `\`\`\`cc_rich\n${JSON.stringify({ v: 1, blocks: [parsed] })}\n\`\`\``;
-  const fallback = await handlePostMessage({
-    content: ccRichText,
-    clientMessageId: randomUUID(),
+    policy: { kind: 'custom', degrade: async () => runRouteB() },
   });
-  if (!fallback.isError) {
-    return successResult(JSON.stringify({ status: 'ok', route: 'B_fallback' }));
-  }
-
-  // Both routes failed — return error with embeddable cc_rich hint
-  return errorResult(
-    `Rich block creation failed (callback token expired or missing). As a workaround, include this in your message text:\n\n${ccRichText}`,
-  );
 }
 
 /** F088 Phase J2: Generate a document (PDF/DOCX/MD) from Markdown content */
@@ -476,10 +610,17 @@ export async function handleRegisterPrTracking(input: {
   prNumber: number;
   catId?: string;
 }): Promise<ToolResult> {
-  return callbackPost('/api/callbacks/register-pr-tracking', {
-    repoFullName: input.repoFullName,
-    prNumber: input.prNumber,
-    ...(input.catId ? { catId: input.catId } : {}),
+  // F174 Phase E (AC-E2/E5): explicit kind:'none'. PR tracking is one-shot
+  // registration, no useful local fallback. Surface `[degrade]` hint.
+  return withDegradation({
+    toolName: 'register_pr_tracking',
+    primary: () =>
+      callbackPost('/api/callbacks/register-pr-tracking', {
+        repoFullName: input.repoFullName,
+        prNumber: input.prNumber,
+        ...(input.catId ? { catId: input.catId } : {}),
+      }),
+    policy: { kind: 'none' },
   });
 }
 
@@ -494,7 +635,7 @@ export const updateWorkflowInputSchema = {
     .string()
     .min(1)
     .optional()
-    .describe('Unique handle of the cat currently holding the baton (e.g. "opus", "codex")'),
+    .describe('Unique handle of the cat currently holding the baton (a valid registered catId)'),
   nextSkill: z
     .string()
     .nullable()
@@ -561,7 +702,7 @@ export const multiMentionInputSchema = {
     .array(z.string().min(1))
     .min(1)
     .max(3)
-    .describe('Cat IDs to invoke in parallel (max 3). Example: ["codex","gemini"]'),
+    .describe('Cat IDs to invoke in parallel (max 3). Use get_thread_cats to discover valid catIds.'),
   question: z.string().min(1).max(5000).describe('The question or request for the target cats'),
   callbackTo: z.string().min(1).describe('Cat ID to route all responses back to (required, usually yourself)'),
   context: z.string().max(5000).optional().describe('Additional context to include for the targets'),
@@ -631,7 +772,7 @@ export const startVoteInputSchema = {
     .array(z.string().min(1).max(50))
     .min(1)
     .max(20)
-    .describe('CatIds of voters (e.g. ["opus", "codex", "gemini"])'),
+    .describe('CatIds of voters. Use get_thread_cats to discover valid catIds.'),
   anonymous: z.boolean().optional().describe('Anonymous voting (default: false)'),
   timeoutSec: z.number().int().min(10).max(600).optional().describe('Timeout in seconds (default: 120)'),
 };
@@ -658,23 +799,22 @@ export const updateBootcampStateInputSchema = {
   threadId: z.string().min(1).describe('Thread ID of the bootcamp thread'),
   phase: z
     .enum([
-      'phase-0-select-cat',
       'phase-1-intro',
       'phase-2-env-check',
       'phase-3-config-help',
-      'phase-3.5-advanced',
       'phase-4-task-select',
       'phase-5-kickoff',
       'phase-6-design',
       'phase-7-dev',
-      'phase-8-review',
+      'phase-7.5-add-teammate',
+      'phase-8-collab',
       'phase-9-complete',
       'phase-10-retro',
       'phase-11-farewell',
     ])
     .optional()
     .describe('New bootcamp phase to advance to'),
-  leadCat: z.string().optional().describe('Selected lead cat ID (e.g. "opus", "codex", "gemini")'),
+  leadCat: z.string().optional().describe('Selected lead cat ID (a valid registered catId)'),
   selectedTaskId: z.string().max(50).optional().describe('Selected task ID (e.g. "Q1", "Q7")'),
   envCheck: z
     .record(z.object({ ok: z.boolean(), version: z.string().optional(), note: z.string().optional() }))
@@ -684,6 +824,13 @@ export const updateBootcampStateInputSchema = {
     .record(z.enum(['available', 'unavailable', 'skipped']))
     .optional()
     .describe('Advanced feature status: TTS, ASR, Pencil'),
+  guideStep: z
+    .enum(['open-hub', 'click-add-member', 'fill-form', 'mention-teammate', 'return-to-chat', 'done'])
+    .nullable()
+    .optional()
+    .describe(
+      'Sub-step for the add-teammate guide overlay. Set to "open-hub" when advancing to phase-7.5-add-teammate. Set to null to clear.',
+    ),
   completedAt: z.number().optional().describe('Timestamp when bootcamp was completed (Phase 11)'),
 };
 
@@ -694,6 +841,7 @@ export async function handleUpdateBootcampState(input: {
   selectedTaskId?: string | undefined;
   envCheck?: Record<string, { ok: boolean; version?: string; note?: string }> | undefined;
   advancedFeatures?: Record<string, string> | undefined;
+  guideStep?: string | null | undefined;
   completedAt?: number | undefined;
 }): Promise<ToolResult> {
   const body: Record<string, unknown> = { threadId: input.threadId };
@@ -702,6 +850,7 @@ export async function handleUpdateBootcampState(input: {
   if (input.selectedTaskId !== undefined) body['selectedTaskId'] = input.selectedTaskId;
   if (input.envCheck !== undefined) body['envCheck'] = input.envCheck;
   if (input.advancedFeatures !== undefined) body['advancedFeatures'] = input.advancedFeatures;
+  if (input.guideStep !== undefined) body['guideStep'] = input.guideStep;
   if (input.completedAt !== undefined) body['completedAt'] = input.completedAt;
   return callbackPost('/api/callbacks/update-bootcamp-state', body);
 }
@@ -714,14 +863,77 @@ export async function handleBootcampEnvCheck(input: { threadId: string }): Promi
   return callbackPost('/api/callbacks/bootcamp-env-check', { threadId: input.threadId });
 }
 
+// ============ Thread Cats Discovery ============
+
+export const getThreadCatsInputSchema = {};
+
+export async function handleGetThreadCats(): Promise<ToolResult> {
+  return callbackGet('/api/callbacks/thread-cats');
+}
+
+// F155: Guide Engine
+
+export const updateGuideStateInputSchema = {
+  threadId: z.string().min(1).describe('Thread ID where the guide is being offered/active'),
+  guideId: z.string().min(1).describe('Guide ID (e.g. "add-member")'),
+  status: z
+    .enum(['offered', 'awaiting_choice', 'completed', 'cancelled'])
+    .describe(
+      'Target guide status. Valid transitions: offered→awaiting_choice/cancelled, awaiting_choice→cancelled, active→completed/cancelled. Use cat_cafe_start_guide for →active.',
+    ),
+  currentStep: z.number().int().min(0).optional().describe('Current step index (only when status=active)'),
+};
+
+export async function handleUpdateGuideState(input: {
+  threadId: string;
+  guideId: string;
+  status: string;
+  currentStep?: number | undefined;
+}): Promise<ToolResult> {
+  const body: Record<string, unknown> = { threadId: input.threadId, guideId: input.guideId, status: input.status };
+  if (input.currentStep !== undefined) body['currentStep'] = input.currentStep;
+  return callbackPost('/api/callbacks/update-guide-state', body);
+}
+
+export async function handleStartGuide(input: { guideId: string }): Promise<ToolResult> {
+  return callbackPost('/api/callbacks/start-guide', { guideId: input.guideId });
+}
+
+export const getAvailableGuidesInputSchema = {};
+
+export async function handleGetAvailableGuides(): Promise<ToolResult> {
+  return callbackPost('/api/callbacks/get-available-guides', {});
+}
+
+export async function handleGuideResolve(input: { intent: string }): Promise<ToolResult> {
+  return callbackPost('/api/callbacks/guide-resolve', { intent: input.intent });
+}
+
+export async function handleGuideControl(input: { action: string }): Promise<ToolResult> {
+  return callbackPost('/api/callbacks/guide-control', { action: input.action });
+}
+
+export async function handleHoldBall(input: {
+  reason: string;
+  nextStep: string;
+  wakeAfterMs: number;
+}): Promise<ToolResult> {
+  return callbackPost('/api/callbacks/hold-ball', {
+    reason: input.reason,
+    nextStep: input.nextStep,
+    wakeAfterMs: input.wakeAfterMs,
+  });
+}
+
 export const callbackTools = [
   {
     name: 'cat_cafe_post_message',
     description:
       'Post a proactive async message to YOUR CURRENT thread mid-task (e.g. progress updates, sharing results). ' +
       'Always posts to the thread your invocation belongs to. To post to a DIFFERENT thread, use cat_cafe_cross_post_message instead. ' +
-      'To simply @mention another cat at the end of your response, use @猫名 in your reply text instead — it is free and never expires. ' +
-      'GOTCHA: This tool uses callback credentials that expire — if it fails with 401, fall back to inline @mention in your response text. ' +
+      'To hand off to another cat, write @猫名 on its own line at the START of the line (sentence-internal @mention does NOT route — it is treated as narrative only). ' +
+      'Output: message appears in your current thread as a new message (separate from your invocation response). ' +
+      'GOTCHA: This tool uses callback credentials that expire — if it fails with 401, fall back to line-start @mention in your response text. ' +
       'GOTCHA: Do NOT use this for routine replies — only for mid-task proactive messages when you need to share something before your response completes.',
     inputSchema: postMessageInputSchema,
     handler: handlePostMessage,
@@ -755,6 +967,15 @@ export const callbackTools = [
   },
   // D15: cat_cafe_search_messages removed — superseded by search_evidence + get_thread_context
   {
+    name: 'cat_cafe_get_thread_cats',
+    description:
+      'Discover which cats are in the current thread: participants (with activity stats), routable cats, and availability. ' +
+      'Use BEFORE multi_mention / start_vote / @mentions to find valid catIds — do NOT guess catIds from memory. ' +
+      'Returns: participants (catId, displayName, lastMessageAt, messageCount), routableNow, routableNotJoined, notRoutable.',
+    inputSchema: getThreadCatsInputSchema,
+    handler: handleGetThreadCats,
+  },
+  {
     name: 'cat_cafe_list_threads',
     description:
       'List thread summaries for discovery. Use when you need to find a thread by keyword or see recent activity. ' +
@@ -777,6 +998,8 @@ export const callbackTools = [
     description:
       'Post a message to a specific thread by threadId (cross-thread notification). ' +
       'Use when you need to notify a different thread about something relevant. ' +
+      'NOT for: posting to your own current thread (use post_message instead). ' +
+      'Output: message appears in the target thread as a new message visible to all participants. ' +
       'GOTCHA: Requires threadId — use list_threads or feat_index to find the right thread first.',
     inputSchema: crossPostMessageInputSchema,
     handler: handleCrossPostMessage,
@@ -800,12 +1023,28 @@ export const callbackTools = [
     handler: handleUpdateTask,
   },
   {
+    name: 'cat_cafe_create_task',
+    description:
+      'Create a new 🧶 毛线球 (yarn ball) task in the current thread. ' +
+      'Use when: user says "建个毛线球", "记一下任务", "track this", or you identify persistent work items across sessions — ' +
+      'e.g. "fix login timeout", "update API docs", "review F160 spec". ' +
+      'NOT for: temporary execution steps (use PlanBoard/TodoWrite), NOT for inline checklists in a message (use create_rich_block with kind:"checklist"). ' +
+      'Output: task appears in the thread 🧶 毛线球 panel, persists across sessions, visible to all cats and 铲屎官. ' +
+      'GOTCHA: 毛线球 ≠ checklist rich block. 毛线球 lives in the task panel and survives session boundaries; checklist is ephemeral inline content in one message. ' +
+      'TIP: Include a "why" to give context to whoever picks up the task.',
+    inputSchema: createTaskInputSchema,
+    handler: handleCreateTask,
+  },
+  {
     name: 'cat_cafe_create_rich_block',
     description:
       'Create a rich block (card, diff, checklist, media_gallery, audio, or interactive) attached to the current message. ' +
-      'Use card for status/decisions, diff for code changes, checklist for todos, media_gallery for images, audio for voice, interactive for user selection/confirmation. ' +
+      'Use card for status/decisions, diff for code changes, checklist for inline todos, media_gallery for images, audio for voice, interactive for user selection/confirmation. ' +
+      'NOT for: persistent task tracking across sessions (use create_task for 🧶 毛线球). NOT for: document generation/export (use generate_document). ' +
+      'Output: block rendered inline in the current message. ' +
       'GOTCHA: The block JSON must use "kind" (NOT "type") and include "v": 1 and a unique "id". ' +
       "GOTCHA: Call get_rich_block_rules first if you haven't loaded the full schema yet in this session. " +
+      'GOTCHA: checklist kind is ephemeral inline content — for persistent cross-session work items, use create_task (毛线球) instead. ' +
       'If callback auth fails, falls back to cc_rich text encoding automatically.',
     inputSchema: createRichBlockInputSchema,
     handler: handleCreateRichBlock,
@@ -878,7 +1117,7 @@ export const callbackTools = [
       'Start a voting session in the current thread for collective decision-making ' +
       '(e.g. "REST vs GraphQL?"). Voters receive notification and reply with [VOTE:option]. ' +
       'Auto-closes when all voters have voted or timeout expires (default 120s). ' +
-      'GOTCHA: voters must be valid catIds (e.g. ["opus", "codex", "gemini"]). Options need at least 2 choices.',
+      'GOTCHA: voters must be valid registered catIds (use get_thread_cats to discover them). Options need at least 2 choices.',
     inputSchema: startVoteInputSchema,
     handler: handleStartVote,
   },
@@ -901,5 +1140,87 @@ export const callbackTools = [
       'Returns the full check results for display to the user. Only use during bootcamp phase-2-env-check.',
     inputSchema: bootcampEnvCheckInputSchema,
     handler: handleBootcampEnvCheck,
+  },
+  // ============ F155: Guide Engine ============
+  {
+    name: 'cat_cafe_update_guide_state',
+    description:
+      'Update the guide session state for a thread after you have already decided a guided flow is appropriate. ' +
+      'This is not a raw-text trigger path: do not infer guide offers from `/guide` or keywords alone. ' +
+      'First call creates state (status must be "offered"). Subsequent calls must follow valid non-start transitions: ' +
+      'offered→awaiting_choice/cancelled, awaiting_choice→cancelled, active→completed/cancelled. ' +
+      'Do not use this tool to enter "active" — call cat_cafe_start_guide for offered/awaiting_choice→active so frontend start side effects run. ' +
+      'One active guide per thread — complete or cancel before offering a new one.',
+    inputSchema: updateGuideStateInputSchema,
+    handler: handleUpdateGuideState,
+  },
+  {
+    name: 'cat_cafe_get_available_guides',
+    description:
+      'Fetch the current catalog of guides that are actually available in this thread context. ' +
+      'Use this after you decide a user likely needs a step-by-step walkthrough instead of a plain explanation. ' +
+      'Returns guide IDs, names, descriptions, categories, priorities, and estimated times so you can recommend the best-fit guide to the user. ' +
+      'Do not guess from keywords alone — inspect the returned guide metadata first, then ask the user whether to start one. ' +
+      'On confirmation, call cat_cafe_start_guide with the chosen guideId.',
+    inputSchema: getAvailableGuidesInputSchema,
+    handler: handleGetAvailableGuides,
+  },
+  {
+    name: 'cat_cafe_guide_resolve',
+    description:
+      'Legacy alias for guide discovery by explicit intent. ' +
+      'Use only when an older prompt or caller still sends a concrete intent string and expects ranked guide matches. ' +
+      'For new code and new prompts, prefer cat_cafe_get_available_guides and let the cat choose based on catalog metadata.',
+    inputSchema: {
+      intent: z.string().min(1).describe('User intent text (e.g. "添加成员", "配置飞书")'),
+    },
+    handler: handleGuideResolve,
+  },
+  {
+    name: 'cat_cafe_start_guide',
+    description:
+      'Start an interactive guided flow on the Console frontend. ' +
+      'Requires the guide to be in "offered" or "awaiting_choice" state (call cat_cafe_update_guide_state first after you intentionally offered the guide). ' +
+      'Transitions guide to "active" and emits socket event for frontend overlay.',
+    inputSchema: {
+      guideId: z.string().min(1).describe('Guide flow ID (e.g. "add-member")'),
+    },
+    handler: handleStartGuide,
+  },
+  {
+    name: 'cat_cafe_guide_control',
+    description:
+      'Control an active guide session. Requires guide to be in "active" state. ' +
+      'Actions: "next" (advance), "skip" (skip step), "exit" (cancel guide). ' +
+      'Use this only after a guide has been explicitly started; forward-only — no back.',
+    inputSchema: {
+      action: z.enum(['next', 'skip', 'exit']).describe('Guide control action'),
+    },
+    handler: handleGuideControl,
+  },
+  {
+    name: 'cat_cafe_hold_ball',
+    description:
+      'Declare a bounded ball hold: keep the ball while waiting for a short, predictable condition, then get auto-re-invoked with your context. ' +
+      'Use when: ball is clearly yours + nobody else can advance + short predictable wait ' +
+      '(e.g. CI running, build compiling, PR checks pending) + you know exactly what to do next. ' +
+      'NOT for: need review/approval → @ reviewer or @co-creator; need another cat to act → @ that cat; ' +
+      '"let me think" / "I\'ll hold for now" → hesitation not hold, pick 接/退/升; ' +
+      'review/analysis done → MUST @ author, conclusion ≠ endpoint; status updates → use post_message. ' +
+      'Output: system schedules a one-shot wake-up after wakeAfterMs; you get re-invoked with reason + nextStep as trigger context. ' +
+      'GOTCHA: max 3 holds per (thread, cat) within a rolling ~1h window — 4th call returns 429, you MUST pass (@ another cat or @co-creator). ' +
+      'GOTCHA: the counter is process-local best-effort (in-memory on the API node); API restart or multi-instance deploys may reset it, so do not treat the 429 as a hard security boundary — treat it as a self-discipline guardrail. ' +
+      'GOTCHA: hold is an EXCEPTION state, not a default exit. Most turns should end with @ someone, not hold. ' +
+      'GOTCHA: SINGLE-SLOT per (thread, cat) — calling hold_ball again while a previous hold is pending REPLACES the prior wake (prior taskId cancelled). This is intentional (KD-23): hold = "持一个球" exception, not a queue. If you need to track multiple waiting conditions, merge them into one nextStep (e.g. "等 CI + @co-creator 确认" 合并成一句). Rolling-window counter still ticks per call.',
+    inputSchema: {
+      reason: z.string().min(1).max(500).describe('Why you need to hold the ball (e.g. "tests still running")'),
+      nextStep: z
+        .string()
+        .min(1)
+        .max(500)
+        .describe('What you will do when re-invoked (e.g. "check test results, then @ author")'),
+      wakeAfterMs: z.number().int().min(5000).max(3600000).describe('Delay in ms before system re-invokes you (5s–1h)'),
+    },
+    handler: handleHoldBall,
   },
 ] as const;

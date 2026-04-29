@@ -3,7 +3,8 @@
  * Agent 服务的共享类型定义
  */
 
-import type { CatId, MessageContent } from '@cat-cafe/shared';
+import type { CatId, MessageContent, ReplyPreview } from '@cat-cafe/shared';
+import type { Span } from '@opentelemetry/api';
 import type { CliSpawnOptions } from '../../../utils/cli-types.js';
 
 /** F8: Unified token usage type across all three cats.
@@ -78,6 +79,8 @@ export interface MessageMetadata {
   usage?: TokenUsage;
   /** F061: false when provider cannot verify which model actually ran (e.g. CDP bridge) */
   modelVerified?: boolean;
+  /** F061: diagnostic context attached when empty_response is triggered */
+  diagnostics?: Record<string, unknown>;
 }
 
 /**
@@ -115,6 +118,12 @@ export interface AgentMessage {
   catId: CatId;
   /** Text content (for 'text' and 'tool_result' types) */
   content?: string;
+  /**
+   * How the frontend should apply text content.
+   * Default append preserves streaming semantics; replace is used when the
+   * provider emits a full corrected snapshot instead of a pure suffix delta.
+   */
+  textMode?: 'append' | 'replace';
   /** Session ID (for 'session_init' type) */
   sessionId?: string;
   /** ACP transport: sessionId is per-invocation, not a persistent CLI session.
@@ -139,11 +148,13 @@ export interface AgentMessage {
   /** F121: ID of the message this message is replying to */
   replyTo?: string;
   /** F121: Hydrated preview of the replied-to message */
-  replyPreview?: { senderCatId: string | null; content: string; deleted?: true };
+  replyPreview?: ReplyPreview;
   /** F061: Whether this message mentions the co-creator (@user/@铲屎官/configured patterns) */
   mentionsUser?: boolean;
   /** F108: Invocation ID — allows frontend to distinguish messages from concurrent invocations */
   invocationId?: string;
+  /** F153-F: OTel span context for trace persistence (written to message extra.tracing) */
+  tracing?: { traceId: string; spanId: string; parentSpanId?: string };
   /** F070: Structured error code for recoverable failures (e.g. GOVERNANCE_BOOTSTRAP_REQUIRED) */
   errorCode?: string;
   /** When this message was created */
@@ -166,6 +177,9 @@ export interface AgentServiceOptions {
   workingDirectory?: string;
   /** Env vars to pass to CLI process for MCP callback auth */
   callbackEnv?: Record<string, string>;
+  /** F171: User-defined env vars from account config.
+   *  Applied LAST to subprocess env — overrides provider-injected values. */
+  accountEnv?: Record<string, string>;
   /** Rich content blocks (e.g. images) to pass to the CLI agent */
   contentBlocks?: readonly MessageContent[];
   /** Upload directory for resolving image paths */
@@ -193,6 +207,8 @@ export interface AgentServiceOptions {
   };
   /** F127: Extra --config key=value pairs to pass to the CLI. */
   cliConfigArgs?: readonly string[];
+  /** F153 Phase B: Parent OTel span for creating CLI session child span */
+  parentSpan?: Span;
 }
 
 /**

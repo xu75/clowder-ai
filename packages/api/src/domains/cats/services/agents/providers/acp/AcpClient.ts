@@ -9,12 +9,15 @@
  *   - Phase B GeminiAcpAdapter (production)
  */
 
-import type { ChildProcess } from 'node:child_process';
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { dirname, isAbsolute } from 'node:path';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 
 import { createModuleLogger } from '../../../../../../infrastructure/logger.js';
+import { resolveCliCommandOrBare } from '../../../../../../utils/cli-resolve.js';
+import { resolveWindowsSpawnPlan } from '../../../../../../utils/cli-spawn-win.js';
 import type {
   AcpAgentRequest,
   AcpContentBlock,
@@ -32,6 +35,7 @@ import { ACP_METHODS } from './types.js';
 
 const log = createModuleLogger('acp-client');
 
+const IS_WINDOWS = process.platform === 'win32';
 const KILL_GRACE_MS = 3_000;
 
 // ─── Config ──────────────────────────────────────────────���─────
@@ -118,11 +122,42 @@ export class AcpClient {
 
   async initialize(): Promise<AcpInitializeResult> {
     const doSpawn = this.config.spawnFn ?? nodeSpawn;
-    this.child = doSpawn(this.config.command, this.config.args, {
+
+    // Mirror cli-spawn.ts on Windows so ACP agents can bypass npm-global .cmd shims.
+    // On macOS GUI apps (Electron), resolve bare command names (e.g. 'gemini') to
+    // full paths via resolveCliCommandOrBare, then inject the bin directory into
+    // PATH so `#!/usr/bin/env node` shims can find the node interpreter.
+    let command = resolveCliCommandOrBare(this.config.command);
+    let args = [...this.config.args];
+    const childEnv = { ...process.env, ...this.config.env };
+    if (!IS_WINDOWS && isAbsolute(command)) {
+      const binDir = dirname(command);
+      childEnv.PATH = childEnv.PATH ? `${binDir}:${childEnv.PATH}` : binDir;
+    }
+    const spawnOpts: SpawnOptions & { stdio: ['pipe', 'pipe', 'pipe'] } = {
       cwd: this.config.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...this.config.env },
-    }) as ChildProcess;
+      env: childEnv,
+    };
+    if (IS_WINDOWS && !this.config.spawnFn) {
+      const spawnPlan = resolveWindowsSpawnPlan(command, args);
+      log.debug(
+        {
+          original: command,
+          resolved: spawnPlan.command,
+          mode: spawnPlan.mode,
+          shell: spawnPlan.shell,
+        },
+        'ACP: Windows spawn plan resolved',
+      );
+      command = spawnPlan.command;
+      args = spawnPlan.args;
+      if (spawnPlan.shell !== undefined) {
+        spawnOpts.shell = spawnPlan.shell;
+      }
+    }
+
+    this.child = doSpawn(command, args, spawnOpts) as ChildProcess;
 
     this.child.stderr?.on('data', (chunk: Buffer) => {
       const text = chunk.toString().trimEnd();
@@ -220,16 +255,17 @@ export class AcpClient {
     text: string,
     options?: { timeoutMs?: number; idleWarningMs?: number; idleStallMs?: number },
   ): AsyncGenerator<AcpSessionUpdate, AcpStopReason> {
-    // KD-12: Turn budget — resource cap, NOT health detection.
-    // Gemini CLI doesn't emit tool_call for MCP tools (upstream #21783), so
-    // long MCP chains are invisible to the event stream. Idle stall (90s) catches
-    // true hangs; this budget is the last-resort guard against runaway sessions.
-    // Upstream #24029 (MCP channel notifications) will provide proper L2 signals.
-    const timeoutMs = options?.timeoutMs ?? 600_000;
+    // KD-12: Activity-based turn budget — resets on each event.
+    // If agent produces events continuously, budget never fires. Only triggers
+    // after timeoutMs of SILENCE (no events). Idle stall (90s) catches true hangs
+    // faster; this is the wider safety net for slow-but-alive sessions.
+    // sendRequest gets a hard ceiling (1h) as absolute last-resort guard.
+    const timeoutMs = options?.timeoutMs ?? 900_000;
     const idleWarningMs = options?.idleWarningMs ?? 20_000;
     // Idle stall catches true hangs. Gemini CLI doesn't emit tool_call for MCP
     // tools, so pendingTool never activates. 90s covers most MCP calls (10-30s).
     const idleStallMs = options?.idleStallMs ?? 90_000;
+    const HARD_CEILING_MS = 3_600_000; // 1h — absolute last-resort for sendRequest promise
     const queue: AcpSessionUpdate[] = [];
     let waitResolve: (() => void) | null = null;
     let done = false;
@@ -242,6 +278,26 @@ export class AcpClient {
     let idleWarningFired = false;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let pendingTool = false; // true while Gemini is waiting for MCP tool result
+    let budgetTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /** Reset (or start) the activity-based turn budget timer.
+     *  Called once at prompt start and again on every incoming event. */
+    const resetBudget = () => {
+      if (budgetTimer) clearTimeout(budgetTimer);
+      if (done) return;
+      budgetTimer = setTimeout(() => {
+        if (done) return;
+        log.error({ sessionId, eventCount, timeoutMs }, 'Turn budget exceeded — no activity for %dms', timeoutMs);
+        this.cancelSession(sessionId);
+        promptError = new AcpTimeoutError('session/prompt', timeoutMs);
+        done = true;
+        if (waitResolve) {
+          const r = waitResolve;
+          waitResolve = null;
+          r();
+        }
+      }, timeoutMs);
+    };
 
     /** Inject a synthetic event and wake the consumer loop. */
     const injectSynthetic = (update: Record<string, unknown>) => {
@@ -262,7 +318,10 @@ export class AcpClient {
       const nextMs = idleWarningFired ? Math.max(0, idleStallMs - idleWarningMs) : idleWarningMs;
       idleTimer = setTimeout(() => {
         if (done || eventCount === 0) return;
-        const idleSinceMs = Date.now() - lastEventAt;
+        // Clamp to at least the threshold that triggered this timer — a threshold
+        // event must never report a duration smaller than its own trigger point.
+        const rawIdle = Date.now() - lastEventAt;
+        const idleSinceMs = Math.max(rawIdle, idleWarningFired ? idleStallMs : idleWarningMs);
         if (!idleWarningFired) {
           idleWarningFired = true;
           if (pendingTool) {
@@ -336,6 +395,7 @@ export class AcpClient {
         pendingTool = false; // Real output event → tool execution completed
       }
       scheduleIdleCheck();
+      resetBudget(); // Activity-based: any event resets the turn budget
       if (waitResolve) {
         const r = waitResolve;
         waitResolve = null;
@@ -356,8 +416,12 @@ export class AcpClient {
     };
     this.capacityListeners.add(capacityInjector);
 
-    // Fire prompt request — don't await, we'll drain the queue concurrently
-    this.sendRequest(ACP_METHODS.sessionPrompt, { sessionId, prompt: [{ type: 'text', text }] }, timeoutMs)
+    // Start activity-based budget timer — resets on each event from listener
+    resetBudget();
+
+    // Fire prompt request — don't await, we'll drain the queue concurrently.
+    // sendRequest uses hard ceiling (1h); actual budget is managed by resetBudget().
+    this.sendRequest(ACP_METHODS.sessionPrompt, { sessionId, prompt: [{ type: 'text', text }] }, HARD_CEILING_MS)
       .then((resp) => {
         const result = resp.result as unknown as AcpPromptResult;
         stopReason = result.stopReason;
@@ -393,6 +457,7 @@ export class AcpClient {
       return stopReason;
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
+      if (budgetTimer) clearTimeout(budgetTimer);
       this.capacityListeners.delete(capacityInjector);
       const idx = this.notificationListeners.indexOf(listener);
       if (idx >= 0) this.notificationListeners.splice(idx, 1);

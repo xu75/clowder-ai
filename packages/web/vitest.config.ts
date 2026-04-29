@@ -15,6 +15,8 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, 'src'),
       '@ricky0123/vad-web': path.resolve(__dirname, 'src/__mocks__/vad-web.ts'),
+      'next/font/google': path.resolve(__dirname, 'src/__mocks__/next-font-google.ts'),
+      'next/font/local': path.resolve(__dirname, 'src/__mocks__/next-font-local.ts'),
     },
   },
 });

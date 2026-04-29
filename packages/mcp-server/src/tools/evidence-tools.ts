@@ -81,6 +81,8 @@ export async function handleSearchEvidence(input: {
         snippet: string;
         confidence: string;
         sourceType: string;
+        authority?: string;
+        boostSource?: string[];
         passages?: Array<{
           passageId: string;
           content: string;
@@ -96,26 +98,39 @@ export async function handleSearchEvidence(input: {
       }>;
       degraded: boolean;
       degradeReason?: string;
+      effectiveMode?: 'lexical' | 'semantic' | 'hybrid';
+      variantId?: string;
     };
 
+    const degradedBanner = formatDegradedBanner(data.degraded, data.degradeReason, data.effectiveMode);
+
     if (data.results.length === 0) {
-      const prefix = data.degraded ? '[DEGRADED] ' : '';
-      return successResult(`${prefix}No results found for: ${input.query}`);
+      return successResult(
+        degradedBanner
+          ? `${degradedBanner}\n\nNo results found for: ${input.query}`
+          : `No results found for: ${input.query}`,
+      );
     }
 
     const lines: string[] = [];
-    if (data.degraded) {
-      lines.push('[DEGRADED] Evidence store error — results may be incomplete');
+    if (degradedBanner) {
+      lines.push(degradedBanner);
       lines.push('');
     }
 
-    lines.push(`Found ${data.results.length} result(s):`);
+    lines.push(`Found ${data.results.length} result(s)${data.variantId ? ` [variant=${data.variantId}]` : ''}:`);
     lines.push('');
 
     for (const r of data.results) {
       lines.push(`[${r.confidence}] ${r.title}`);
       lines.push(`  anchor: ${r.anchor}`);
       lines.push(`  type: ${r.sourceType}`);
+      if (r.authority) {
+        lines.push(`  authority: ${r.authority}`);
+      }
+      if (r.boostSource && r.boostSource.length > 0 && !r.boostSource.every((s) => s === 'legacy')) {
+        lines.push(`  boost: ${r.boostSource.join(', ')}`);
+      }
       const snippet = r.snippet.length > 200 ? `${r.snippet.slice(0, 200)}...` : r.snippet;
       lines.push(`  > ${snippet.replace(/\n/g, ' ')}`);
       // AC-I9: show passage-level detail when depth=raw
@@ -146,6 +161,19 @@ export async function handleSearchEvidence(input: {
   }
 }
 
+function formatDegradedBanner(
+  degraded: boolean,
+  degradeReason?: string,
+  effectiveMode?: 'lexical' | 'semantic' | 'hybrid',
+): string | null {
+  if (!degraded) return null;
+  if (degradeReason === 'raw_lexical_only') {
+    const modeNote = effectiveMode ? ` (effectiveMode=${effectiveMode})` : '';
+    return `[DEGRADED] depth=raw currently uses lexical retrieval only${modeNote}`;
+  }
+  return '[DEGRADED] Evidence store error — results may be incomplete';
+}
+
 export const evidenceTools = [
   {
     name: 'cat_cafe_search_evidence',
@@ -153,10 +181,21 @@ export const evidenceTools = [
       'Search project knowledge base — features, decisions, plans, lessons, session history. ' +
       'This is the PRIMARY entry point for all memory recall. Start here before drilling down. ' +
       'Supports scope (docs/threads/all), mode (lexical/semantic/hybrid), and depth (summary/raw). ' +
+      'SCOPE STRATEGY (decide first!): ' +
+      'docs = 结论/真相源 (features, ADRs, plans, lessons). ' +
+      'threads = 讨论过程 (who said what, original context). ' +
+      "all = broad scan only — docs dominate due to higher BM25 density, so don't rely on all for finding threads. " +
+      'Rule of thumb: "要结论 → docs, 要过程 → threads, 要全貌 → both separately". ' +
       'MODE SELECTION: lexical (default) = BM25 keyword match, best for Feature IDs / exact terms (F042, Redis). ' +
       'hybrid = BM25 + vector NN + RRF fusion, RECOMMENDED for most searches — finds both exact AND semantic matches. ' +
       'semantic = pure vector nearest-neighbor, best for cross-language (English query → Chinese docs) or synonym matching. ' +
-      'TIP: When unsure, use mode=hybrid. ' +
+      'TIP: When unsure, use mode=hybrid. For broad surveys, add one semantic query as blind-spot insurance (hybrid misses cross-language synonyms). ' +
+      'QUERY TIPS: Feature IDs (F102, F163) are strong anchors — use them when available. ' +
+      'Mix Chinese + English keywords for better recall (记忆 + memory). ' +
+      'Split broad topics into 2-3 targeted queries from different angles (e.g. "how it was built" vs "how it is governed"). ' +
+      'Watch for antonym gaps: searching 记忆 misses 失忆/压缩/丢失 — search the opposite angle separately if needed. ' +
+      'READING RESULTS: confidence = search match quality (rank-based), authority = document reliability (path-based) — two independent dimensions. ' +
+      'DEPTH: Start with summary (default). Use depth=raw only after narrowing scope to drill into specific passages. ' +
       'BOUNDARY: Use this tool to FIND information across the project. For READING raw messages in a specific thread, use get_thread_context instead.',
     inputSchema: searchEvidenceInputSchema,
     handler: handleSearchEvidence,

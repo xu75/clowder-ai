@@ -1,7 +1,11 @@
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
+  addWorktree,
   assert,
+  existsSync,
+  initGitRepo,
   installScript,
   join,
   mkdirSync,
@@ -33,18 +37,14 @@ printf '%s' "$resolved"
   }
 });
 
-test('install script clears stale OAuth/API env keys when switching back to OAuth', () => {
-  const envRoot = mkdtempSync(join(tmpdir(), 'clowder-install-env-oauth-'));
+test('install script generic env helpers: collect_env + clear_env + write/delete (#340 P6)', () => {
+  const envRoot = mkdtempSync(join(tmpdir(), 'clowder-install-env-helpers-'));
 
   try {
     writeFileSync(
       join(envRoot, '.env'),
-      `CODEX_AUTH_MODE='api_key'
-OPENAI_API_KEY='old-openai-key'
-OPENAI_BASE_URL='https://old.example/v1?foo=1&bar=2'
-CAT_CODEX_MODEL='gpt-old'
-GEMINI_API_KEY='old-gemini-key'
-CAT_GEMINI_MODEL='gemini-old'
+      `STALE_KEY='old-value'
+KEEP_KEY='keep-me'
 `,
       'utf8',
     );
@@ -52,58 +52,167 @@ CAT_GEMINI_MODEL='gemini-old'
     const output = runSourceOnlySnippet(`
 cd "${envRoot}"
 reset_env_changes
-set_codex_oauth_mode
-set_gemini_oauth_mode
+collect_env "NEW_KEY" "new-value"
+clear_env "STALE_KEY"
 for key in "\${ENV_DELETE_KEYS[@]}"; do delete_env_key "$key"; done
 for i in "\${!ENV_KEYS[@]}"; do write_env_key "\${ENV_KEYS[$i]}" "\${ENV_VALUES[$i]}"; done
 cat .env
 `);
 
-    assert.match(output, /^CODEX_AUTH_MODE='oauth'$/m);
-    assert.doesNotMatch(output, /^OPENAI_API_KEY=/m);
-    assert.doesNotMatch(output, /^OPENAI_BASE_URL=/m);
-    assert.doesNotMatch(output, /^CAT_CODEX_MODEL=/m);
-    assert.doesNotMatch(output, /^GEMINI_API_KEY=/m);
-    assert.doesNotMatch(output, /^CAT_GEMINI_MODEL=/m);
+    assert.match(output, /^NEW_KEY='new-value'$/m);
+    assert.match(output, /^KEEP_KEY='keep-me'$/m);
+    assert.doesNotMatch(output, /^STALE_KEY=/m);
   } finally {
     rmSync(envRoot, { recursive: true, force: true });
   }
 });
 
-test('install script clears stale Codex and Gemini overrides when default values are selected', () => {
-  const envRoot = mkdtempSync(join(tmpdir(), 'clowder-install-env-defaults-'));
+test('installer auth config root follows an existing runtime worktree', () => {
+  const parentRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-install-auth-runtime-root-'));
+  const projectRoot = join(parentRoot, 'cat-cafe');
+  const runtimeRoot = join(parentRoot, 'cat-cafe-runtime');
 
   try {
-    writeFileSync(
-      join(envRoot, '.env'),
-      `CODEX_AUTH_MODE='api_key'
-OPENAI_API_KEY='old-openai-key'
-OPENAI_BASE_URL='https://old.example/v1'
-CAT_CODEX_MODEL='gpt-old'
-GEMINI_API_KEY='old-gemini-key'
-CAT_GEMINI_MODEL='gemini-old'
-`,
-      'utf8',
-    );
+    mkdirSync(projectRoot, { recursive: true });
+    initGitRepo(projectRoot);
+    addWorktree(projectRoot, runtimeRoot, 'runtime/main-sync');
 
     const output = runSourceOnlySnippet(`
-cd "${envRoot}"
-reset_env_changes
-set_codex_api_key_mode "new-openai-key" "" ""
-set_gemini_api_key_mode "new-gemini-key" "" ""
-for key in "\${ENV_DELETE_KEYS[@]}"; do delete_env_key "$key"; done
-for i in "\${!ENV_KEYS[@]}"; do write_env_key "\${ENV_KEYS[$i]}" "\${ENV_VALUES[$i]}"; done
-cat .env
+PROJECT_DIR="${projectRoot}"
+printf '%s' "$(resolve_installer_auth_config_root)"
 `);
 
-    assert.match(output, /^CODEX_AUTH_MODE='api_key'$/m);
-    assert.match(output, /^OPENAI_API_KEY='new-openai-key'$/m);
-    assert.match(output, /^GEMINI_API_KEY='new-gemini-key'$/m);
-    assert.doesNotMatch(output, /^OPENAI_BASE_URL=/m);
-    assert.doesNotMatch(output, /^CAT_CODEX_MODEL=/m);
-    assert.doesNotMatch(output, /^CAT_GEMINI_MODEL=/m);
+    assert.equal(output, runtimeRoot);
   } finally {
-    rmSync(envRoot, { recursive: true, force: true });
+    rmSync(parentRoot, { recursive: true, force: true });
+  }
+});
+
+test('installer auth config root falls back to project root when runtime dir is not an initialized worktree', () => {
+  const parentRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-install-auth-uninit-runtime-root-'));
+  const projectRoot = join(parentRoot, 'cat-cafe');
+  const runtimeRoot = join(parentRoot, 'cat-cafe-runtime');
+
+  try {
+    mkdirSync(projectRoot, { recursive: true });
+    mkdirSync(runtimeRoot, { recursive: true });
+
+    const output = runSourceOnlySnippet(`
+PROJECT_DIR="${projectRoot}"
+printf '%s' "$(resolve_installer_auth_config_root)"
+`);
+
+    assert.equal(output, projectRoot);
+  } finally {
+    rmSync(parentRoot, { recursive: true, force: true });
+  }
+});
+
+test('installer auth config root ignores initialized sibling repos that are not this project worktrees', () => {
+  const parentRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-install-auth-foreign-runtime-root-'));
+  const projectRoot = join(parentRoot, 'cat-cafe');
+  const runtimeRoot = join(parentRoot, 'cat-cafe-runtime');
+
+  try {
+    mkdirSync(projectRoot, { recursive: true });
+    mkdirSync(runtimeRoot, { recursive: true });
+    initGitRepo(projectRoot);
+    initGitRepo(runtimeRoot, 'foreign runtime\n');
+
+    const output = runSourceOnlySnippet(`
+PROJECT_DIR="${projectRoot}"
+printf '%s' "$(resolve_installer_auth_config_root)"
+`);
+
+    assert.equal(output, projectRoot);
+  } finally {
+    rmSync(parentRoot, { recursive: true, force: true });
+  }
+});
+
+test('installer auth config root ignores parent repo worktrees when project dir has no local git metadata', () => {
+  const parentRepoRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-install-auth-parent-repo-'));
+  const projectRoot = join(parentRepoRoot, 'deployments', 'cat-cafe');
+  const runtimeRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-parent-runtime-'));
+
+  try {
+    mkdirSync(projectRoot, { recursive: true });
+    mkdirSync(join(projectRoot, 'scripts'), { recursive: true });
+    mkdirSync(join(projectRoot, 'packages', 'api'), { recursive: true });
+    writeFileSync(join(projectRoot, 'package.json'), '{"name":"cat-cafe"}\n', 'utf8');
+
+    initGitRepo(parentRepoRoot);
+    addWorktree(parentRepoRoot, runtimeRoot, 'runtime/main-sync');
+
+    const output = runSourceOnlySnippet(`
+PROJECT_DIR="${projectRoot}"
+CAT_CAFE_RUNTIME_DIR="${runtimeRoot}"
+printf '%s' "$(resolve_installer_auth_config_root)"
+`);
+
+    assert.equal(output, projectRoot);
+  } finally {
+    rmSync(parentRepoRoot, { recursive: true, force: true });
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('installer auth config root falls back to project root before runtime exists', () => {
+  const parentRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-install-auth-project-root-'));
+  const projectRoot = join(parentRoot, 'cat-cafe');
+
+  try {
+    mkdirSync(projectRoot, { recursive: true });
+
+    const output = runSourceOnlySnippet(`
+PROJECT_DIR="${projectRoot}"
+printf '%s' "$(resolve_installer_auth_config_root)"
+`);
+
+    assert.equal(output, projectRoot);
+  } finally {
+    rmSync(parentRoot, { recursive: true, force: true });
+  }
+});
+
+test('installer auth setup calls install-auth-config through runtime-aware wrapper', () => {
+  const installScriptText = readFileSync(installScript, 'utf8');
+  const configureAuthBody = installScriptText.match(/configure_agent_auth\(\) \{([\s\S]*?)^}\n/m)?.[1] ?? '';
+
+  assert.notEqual(configureAuthBody, '', 'expected configure_agent_auth body');
+  assert.match(configureAuthBody, /run_install_auth_config client-auth set/, 'auth writes should use wrapper');
+  assert.doesNotMatch(
+    configureAuthBody,
+    /node scripts\/install-auth-config\.mjs/,
+    'auth writes must not bypass runtime-aware config root resolution',
+  );
+});
+
+test('runtime-aware auth wrapper also updates project-local state for direct start modes', () => {
+  const parentRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-install-auth-direct-mode-'));
+  const projectRoot = join(parentRoot, 'cat-cafe');
+  const runtimeRoot = join(parentRoot, 'cat-cafe-runtime');
+  const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
+
+  try {
+    mkdirSync(projectRoot, { recursive: true });
+    initGitRepo(projectRoot);
+    addWorktree(projectRoot, runtimeRoot, 'runtime/main-sync');
+
+    runSourceOnlySnippet(`
+cd "${repoRoot}"
+PROJECT_DIR="${projectRoot}"
+CAT_CAFE_RUNTIME_DIR="${runtimeRoot}"
+run_install_auth_config client-auth set --project-dir "${projectRoot}" --client codex --mode oauth
+`);
+
+    const runtimeAccounts = JSON.parse(readFileSync(join(runtimeRoot, '.cat-cafe', 'accounts.json'), 'utf8'));
+    const projectAccounts = JSON.parse(readFileSync(join(projectRoot, '.cat-cafe', 'accounts.json'), 'utf8'));
+
+    assert.equal(runtimeAccounts.codex?.authType, 'oauth');
+    assert.equal(projectAccounts.codex?.authType, 'oauth');
+  } finally {
+    rmSync(parentRoot, { recursive: true, force: true });
   }
 });
 
@@ -135,20 +244,78 @@ test('Claude empty API key removes stale installer-managed profile', () => {
 
     runSourceOnlySnippet(`
 PROJECT_DIR="${envRoot}"
-remove_claude_installer_profile
+export CAT_CAFE_GLOBAL_CONFIG_ROOT="${envRoot}"
+node scripts/install-auth-config.mjs claude-profile remove --project-dir "${envRoot}" --force true 2>/dev/null || true
 `);
 
-    const profiles = JSON.parse(readFileSync(join(catCafeDir, 'provider-profiles.json'), 'utf8'));
-    const secrets = JSON.parse(readFileSync(join(catCafeDir, 'provider-profiles.secrets.local.json'), 'utf8'));
-    const anthropic = profiles.providers?.anthropic;
-    assert.ok(anthropic, 'anthropic provider entry should still exist');
-    const installerProfile = (anthropic.profiles ?? []).find((profile) => profile.id === 'installer-managed');
-    assert.equal(installerProfile, undefined, 'installer-managed profile must be removed');
-    assert.notEqual(anthropic.activeProfileId, 'installer-managed', 'active profile must not be stale');
-    assert.equal(secrets.providers?.anthropic?.['installer-managed'], undefined, 'secret must be removed');
+    // After migration + remove, accounts.json should not contain installer-managed
+    const accountsPath = join(catCafeDir, 'accounts.json');
+    const accounts = existsSync(accountsPath) ? JSON.parse(readFileSync(accountsPath, 'utf8')) : {};
+    assert.equal(accounts['installer-managed'], undefined, 'installer-managed account must be removed');
+    const credPath = join(catCafeDir, 'credentials.json');
+    const creds = existsSync(credPath) ? JSON.parse(readFileSync(credPath, 'utf8')) : {};
+    assert.equal(creds['installer-managed'], undefined, 'installer-managed credential must be removed');
   } finally {
     rmSync(envRoot, { recursive: true, force: true });
   }
+});
+
+test('OAuth selection does not force-remove global installer accounts before set', () => {
+  const installScriptText = readFileSync(installScript, 'utf8');
+  const configureAuthBody = installScriptText.match(/configure_agent_auth\(\) \{([\s\S]*?)^}\n/m)?.[1] ?? '';
+
+  assert.notEqual(configureAuthBody, '', 'expected configure_agent_auth body');
+  assert.match(configureAuthBody, /client-auth set \\/);
+  assert.match(configureAuthBody, /--mode oauth/);
+  assert.doesNotMatch(configureAuthBody, /client-auth remove/);
+  assert.doesNotMatch(configureAuthBody, /--force true/);
+});
+
+test('empty API key fallback to OAuth does not force-remove global installer accounts', () => {
+  const installScriptText = readFileSync(installScript, 'utf8');
+  const emptyKeyBranch =
+    installScriptText.match(
+      /# No key provided — set OAuth mode via unified path([\s\S]*?)warn "\$name: no key provided, keeping OAuth"/m,
+    )?.[1] ?? '';
+
+  assert.notEqual(emptyKeyBranch, '', 'expected empty API key OAuth fallback branch');
+  assert.match(emptyKeyBranch, /client-auth set \\/);
+  assert.match(emptyKeyBranch, /--mode oauth/);
+  assert.doesNotMatch(emptyKeyBranch, /client-auth remove/);
+  assert.doesNotMatch(emptyKeyBranch, /--force true/);
+});
+
+test('Kimi auth setup offers an explicit skip option instead of forcing OAuth', () => {
+  const installScriptText = readFileSync(installScript, 'utf8');
+  const configureAuthBody = installScriptText.match(/configure_agent_auth\(\) \{([\s\S]*?)^}\n/m)?.[1] ?? '';
+
+  assert.notEqual(configureAuthBody, '', 'expected configure_agent_auth body');
+  assert.match(configureAuthBody, /allow_skip/, 'configure_agent_auth should accept a skip flag');
+  assert.match(configureAuthBody, /Skip auth setup/, 'skip-enabled auth menus should include Skip');
+  assert.match(configureAuthBody, /auth setup skipped/, 'skip branch should return without writing OAuth');
+  assert.match(
+    installScriptText,
+    /configure_agent_auth "Kimi \(月之暗面\)" "kimi" true/,
+    'Kimi should opt into the skip-enabled auth menu',
+  );
+});
+
+test('Kimi auth setup defaults to skip so Enter does not choose OAuth when arrows fail', () => {
+  const installScriptText = readFileSync(installScript, 'utf8');
+  const configureAuthBody = installScriptText.match(/configure_agent_auth\(\) \{([\s\S]*?)^}\n/m)?.[1] ?? '';
+
+  assert.notEqual(configureAuthBody, '', 'expected configure_agent_auth body');
+  assert.match(configureAuthBody, /local skip_index=2/, 'skip option should remain the third menu entry');
+  assert.match(
+    configureAuthBody,
+    /\[\[ "\$allow_skip" == true \]\] && default_auth_sel="\$skip_index"/,
+    'skip-enabled auth menus should select Skip by default',
+  );
+  assert.match(
+    configureAuthBody,
+    /TTY_SELECT_DEFAULT_INDEX="\$default_auth_sel"\s+tty_select auth_sel/,
+    'auth selector should pass the computed default index into tty_select',
+  );
 });
 
 test('npm_global_install succeeds when a custom registry is configured', () => {
@@ -233,6 +400,9 @@ cat .env
     rmSync(envRoot, { recursive: true, force: true });
   }
 });
+
+// CAT_CAFE_BOOTSTRAP_EMPTY_MEMBERS removed — empty catalog is now the default.
+// CAT_CAFE_BOOTSTRAP_SEED_TEMPLATE=1 is dev-only opt-in, not managed by installer.
 
 test('use_registry sets only env vars without writing to user npmrc', () => {
   const tmpHome = mkdtempSync(join(tmpdir(), 'clowder-install-registry-'));
@@ -368,4 +538,21 @@ printf '%s' "$(default_frontend_url)"
   } finally {
     rmSync(envRoot, { recursive: true, force: true });
   }
+});
+
+test('install script retries with PUPPETEER_SKIP_DOWNLOAD only for Puppeteer browser download failures', () => {
+  const installScriptText = readFileSync(installScript, 'utf8');
+
+  assert.match(installScriptText, /run_pnpm_install_capture\(\)/);
+  assert.match(installScriptText, /pnpm_install_needs_puppeteer_skip\(\)/);
+  assert.match(
+    installScriptText,
+    /grep -Eqi 'puppeteer' "\$log_file"\s+\\\s*\n\s*&& grep -Eqi 'Failed to set up chrome\|PUPPETEER_SKIP_DOWNLOAD' "\$log_file"/,
+  );
+  assert.match(installScriptText, /warn "Bundled Chrome download failed — skipped"/);
+  assert.match(
+    installScriptText,
+    /warn "Thread export \/ screenshot may be unavailable\. To install later: npx puppeteer browsers install chrome"/,
+  );
+  assert.match(installScriptText, /env PUPPETEER_SKIP_DOWNLOAD=1 pnpm install --frozen-lockfile/);
 });

@@ -6,7 +6,7 @@
  * 安全：Redis URL 不暴露，只显示连接状态。
  */
 
-import { CAT_CONFIGS, catRegistry } from '@cat-cafe/shared';
+import { catRegistry } from '@cat-cafe/shared';
 import { DEFAULT_CLI_TIMEOUT_MS, readCliTimeoutMsFromEnv } from '../utils/cli-timeout.js';
 import { configStore } from './ConfigStore.js';
 import { getAllCatBudgets } from './cat-budgets.js';
@@ -40,7 +40,7 @@ function formatTtl(raw: string | undefined, defaultSeconds: number): string {
 
 /**
  * Collect a snapshot of all runtime configuration values.
- * Sources: process.env + hardcoded defaults + CAT_CONFIGS.
+ * Sources: process.env + hardcoded defaults + catRegistry.
  */
 export function collectConfigSnapshot(): ConfigSnapshot {
   const env = process.env;
@@ -59,9 +59,9 @@ export function collectConfigSnapshot(): ConfigSnapshot {
   const codexApprovalPolicy = getCodexApprovalPolicy(env);
 
   // Storage (from Redis/memory store defaults)
-  const messageTTL = formatTtl(env.MESSAGE_TTL_SECONDS, 7 * 24 * 60 * 60);
-  const threadTTL = formatTtl(env.THREAD_TTL_SECONDS, 30 * 24 * 60 * 60);
-  const taskTTL = formatTtl(env.TASK_TTL_SECONDS, 30 * 24 * 60 * 60);
+  const messageTTL = formatTtl(env.MESSAGE_TTL_SECONDS, 0);
+  const threadTTL = formatTtl(env.THREAD_TTL_SECONDS, 0);
+  const taskTTL = formatTtl(env.TASK_TTL_SECONDS, 0);
   const maxMessagesStore = 2000;
   const maxThreads = 100;
 
@@ -74,13 +74,13 @@ export function collectConfigSnapshot(): ConfigSnapshot {
   const host = env.API_SERVER_HOST ?? '127.0.0.1';
   const redis: 'connected' | 'memory' = env.REDIS_URL ? 'connected' : 'memory';
 
-  // Cats (with env override support) — prefer registry, fallback to CAT_CONFIGS
+  // Cats (with env override support) — from catRegistry (.cat-cafe/cat-catalog.json)
   const cats: ConfigSnapshot['cats'] = {};
-  const allConfigs = catRegistry.getAllIds().length > 0 ? catRegistry.getAllConfigs() : CAT_CONFIGS;
+  const allConfigs = catRegistry.getAllConfigs();
   for (const [id, config] of Object.entries(allConfigs)) {
     cats[id] = {
       displayName: config.displayName,
-      provider: config.provider,
+      clientId: config.clientId,
       model: getCatModel(id),
       mcpSupport: config.mcpSupport,
     };
@@ -88,7 +88,7 @@ export function collectConfigSnapshot(): ConfigSnapshot {
 
   // A2A
   const a2aMaxDepth = Number(env.MAX_A2A_DEPTH) || 15;
-  const defaultCodexModel = getCatModel('codex');
+  const defaultCodexModel = catRegistry.has('codex') ? getCatModel('codex') : 'codex';
   const codexExecutionModel = env.CAT_CODEX_EXEC_MODEL?.trim() || defaultCodexModel;
   const codexExecutionAuthMode = parseEnum<CodexAuthMode>(env.CODEX_AUTH_MODE, ['oauth', 'api_key', 'auto'], 'oauth');
   const codexExecutionPassModelArg = parseBoolean(env.CAT_CODEX_PASS_MODEL_ARG, true);

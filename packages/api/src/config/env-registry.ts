@@ -24,6 +24,7 @@ export type EnvCategory =
   | 'codex'
   | 'dare'
   | 'gemini'
+  | 'kimi'
   | 'tts'
   | 'stt'
   | 'frontend'
@@ -31,7 +32,9 @@ export type EnvCategory =
   | 'signal'
   | 'github_review'
   | 'evidence'
-  | 'quota';
+  | 'quota'
+  | 'telemetry'
+  | 'antigravity';
 
 export interface EnvDefinition {
   /** The env var name, e.g. 'REDIS_URL' */
@@ -64,6 +67,7 @@ export const ENV_CATEGORIES: Record<EnvCategory, string> = {
   codex: '缅因猫 (Codex)',
   dare: '狸花猫 (Dare)',
   gemini: '暹罗猫 (Gemini)',
+  kimi: 'Kimi',
   tts: '语音合成 (TTS)',
   stt: '语音识别 (STT)',
   frontend: '前端',
@@ -72,6 +76,8 @@ export const ENV_CATEGORIES: Record<EnvCategory, string> = {
   github_review: 'GitHub Review 监控',
   evidence: 'F102 记忆系统',
   quota: '额度监控',
+  telemetry: '可观测性 (OTel)',
+  antigravity: '孟加拉猫 (Antigravity)',
 };
 
 export const ENV_VARS: EnvDefinition[] = [
@@ -96,9 +102,19 @@ export const ENV_VARS: EnvDefinition[] = [
   {
     name: 'API_SERVER_HOST',
     defaultValue: '127.0.0.1',
-    description: 'API 监听地址',
+    description: 'API 监听地址（改为 0.0.0.0 可让手机/平板通过局域网或 Tailscale 访问）',
     category: 'server',
     sensitive: false,
+  },
+  {
+    name: 'CORS_ALLOW_PRIVATE_NETWORK',
+    defaultValue: 'false',
+    description:
+      '允许局域网/Tailscale 设备访问（手机、平板等）。开启后，来自 192.168.x.x / 10.x.x.x / Tailscale 100.x.x.x 的浏览器可以正常连接。注意：会信任整个私网内的所有设备。修改后需重启服务生效',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+    exampleRecommended: true,
   },
   { name: 'UPLOAD_DIR', defaultValue: './uploads', description: '文件上传目录', category: 'server', sensitive: false },
   {
@@ -127,14 +143,15 @@ export const ENV_VARS: EnvDefinition[] = [
   {
     name: 'FRONTEND_URL',
     defaultValue: '(自动检测)',
-    description: '前端 URL（导出长图用）',
+    description:
+      '前端固定地址（有反向代理或固定域名时设置，如 https://cafe.example.com）。本机和局域网直连通常不需要改',
     category: 'server',
     sensitive: false,
   },
   {
     name: 'FRONTEND_PORT',
     defaultValue: '3003',
-    description: '前端端口（导出长图用）',
+    description: '前端端口',
     category: 'server',
     sensitive: false,
   },
@@ -154,11 +171,62 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: false,
   },
   {
+    name: 'CAT_CAFE_INVOCATION_REGISTRY',
+    defaultValue: '(自动：有 Redis 用 redis，否则 memory)',
+    description: 'F174-B InvocationRegistry 后端选择：redis（重启不丢 callback 鉴权）/ memory（fallback / 测试）',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_AGENT_KEY_SECRET',
+    defaultValue: '(空)',
+    description: 'F178 Persistent MCP Agent-Key Auth — 共享密钥（直接环境变量提供）',
+    category: 'server',
+    sensitive: true,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_AGENT_KEY_FILE',
+    defaultValue: '(空)',
+    description: 'F178 Persistent MCP Agent-Key Auth — 密钥文件路径（CAT_CAFE_AGENT_KEY_SECRET 的备选）',
+    category: 'server',
+    sensitive: true,
+    runtimeEditable: false,
+  },
+  {
     name: 'CAT_CAFE_HOOK_TOKEN',
     defaultValue: '(空)',
     description: 'Hook 回调鉴权 token',
     category: 'server',
     sensitive: true,
+  },
+  {
+    name: 'CAT_CAFE_TEST_SANDBOX',
+    defaultValue: '(未设置)',
+    description: '测试沙盒写保护开关（仅测试/门禁使用）',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_TEST_SANDBOX_ALLOW_UNSAFE_ROOT',
+    defaultValue: '(未设置)',
+    description: '测试沙盒临时允许写入非隔离根目录（仅测试调试使用）',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_TEST_REAL_HOME',
+    defaultValue: '(未设置)',
+    description: '测试真实 HOME 路径快照（用于阻止测试写回宿主 HOME）',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
   },
   {
     name: 'RUNTIME_REPO_PATH',
@@ -183,12 +251,11 @@ export const ENV_VARS: EnvDefinition[] = [
   },
   {
     name: 'ANTHROPIC_API_KEY',
-    defaultValue: '(未设置 → 使用 proxy profile)',
-    description: 'Anthropic API Key（直连模式；proxy 模式由 provider profile 注入）',
+    defaultValue: '(未设置 → 由 accounts/credentials 系统注入)',
+    description: 'Anthropic API Key（#340 P6: 由统一账户系统管理，不再从 .env 读取）',
     category: 'server',
     sensitive: true,
     hubVisible: false,
-    exampleRecommended: true,
   },
   {
     name: 'LOG_LEVEL',
@@ -256,10 +323,19 @@ export const ENV_VARS: EnvDefinition[] = [
   {
     name: 'CAT_CAFE_GLOBAL_CONFIG_ROOT',
     defaultValue: '(未设置 → homedir())',
-    description: '全局配置根目录（cat catalog / credentials / provider profiles 查找路径）',
+    description: '全局配置根目录（accounts / credentials 查找路径的父目录，实际路径为 ${ROOT}/.cat-cafe/）',
     category: 'server',
     sensitive: false,
     hubVisible: false,
+  },
+  {
+    name: 'CAT_CAFE_SKIP_HOMEDIR_MIGRATION',
+    defaultValue: '0',
+    description: '跳过 homedir credentials / legacy provider profiles 迁移（新安装或 opensource profile 可显式关闭）',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
   },
   {
     name: 'ALLOWED_WORKSPACE_DIRS',
@@ -268,6 +344,24 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'server',
     sensitive: false,
     exampleRecommended: true,
+  },
+  {
+    name: 'CAT_CAFE_RUNTIME_ROOT',
+    defaultValue: '(未设置 → process.cwd())',
+    description:
+      'F061: Clowder AI runtime 二进制根目录（runtime startup 自动 export 为 $RUNTIME_DIR），优先级高于 capability orchestrator 的 auto-detection，用于 Antigravity MCP config args 路径',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_WORKSPACE_ROOT',
+    defaultValue: '(未设置 → process.cwd())',
+    description:
+      'F061: Bengal MCP 工具的 workspace 根目录（runtime startup 自动 export 为 $PROJECT_DIR），用于 Antigravity MCP config 的 ALLOWED_WORKSPACE_DIRS env 注入',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
   },
 
   // --- storage ---
@@ -435,6 +529,14 @@ export const ENV_VARS: EnvDefinition[] = [
     runtimeEditable: false,
   },
   {
+    name: 'DEFAULT_CAT_ID',
+    defaultValue: '(cat-config 第一个 breed)',
+    description: '默认猫猫 ID（覆盖 cat-config 里的顺序）',
+    category: 'cli',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
     name: 'CAT_CAFE_MCP_SERVER_PATH',
     defaultValue: '(自动检测)',
     description: 'MCP Server 路径',
@@ -550,6 +652,13 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'CODEX_HOME',
     defaultValue: '~/.codex',
     description: 'Codex CLI home 目录',
+    category: 'cli',
+    sensitive: false,
+  },
+  {
+    name: 'ANTIGRAVITY_BRAIN_HOME',
+    defaultValue: '~/.gemini/antigravity/brain',
+    description: 'Antigravity built-in generate_image brain dir (F172 Phase G scanner)',
     category: 'cli',
     sensitive: false,
   },
@@ -854,7 +963,15 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'GITHUB_AUTHORITATIVE_REVIEW_LOGINS',
     defaultValue: 'chatgpt-codex-connector[bot]',
     description:
-      'Comma-separated GitHub logins whose review feedback is handled by the email channel (authoritative source). F140 API polling skips these to avoid double-delivery.',
+      '[DEPRECATED] F140 Phase E.2 cutover (2026-04-24): Rule B authoritative-source skip removed; this var now only serves as backward-compat fallback for GITHUB_SETUP_NOISE_BOT_LOGINS. Will be removed in a follow-up release.',
+    category: 'connector',
+    sensitive: false,
+  },
+  {
+    name: 'GITHUB_SETUP_NOISE_BOT_LOGINS',
+    defaultValue: 'chatgpt-codex-connector[bot]',
+    description:
+      'Comma-separated GitHub bot logins whose conversation comments may contain Codex setup-only guidance. F140 polling-side setup-noise filter skips those (bot + conversation + setup-only body, no codex review content). Falls back to GITHUB_AUTHORITATIVE_REVIEW_LOGINS for backward compat.',
     category: 'connector',
     sensitive: false,
   },
@@ -890,11 +1007,10 @@ export const ENV_VARS: EnvDefinition[] = [
   },
   {
     name: 'OPENAI_API_KEY',
-    defaultValue: '(未设置)',
-    description: 'OpenAI API Key (api_key 模式用；env-owning，不走 accounts/credentials)',
+    defaultValue: '(未设置 → 由 accounts/credentials 系统注入)',
+    description: 'OpenAI API Key（#340 P6: 由统一账户系统管理，子进程通过 callbackEnv 注入）',
     category: 'codex',
     sensitive: true,
-    runtimeEditable: true,
   },
 
   // --- dare ---
@@ -904,12 +1020,11 @@ export const ENV_VARS: EnvDefinition[] = [
   // --- gemini ---
   {
     name: 'GOOGLE_API_KEY',
-    defaultValue: '(未设置)',
-    description: 'Google API Key（暹罗猫 Gemini 直连用）',
+    defaultValue: '(未设置 → 由 accounts/credentials 系统注入)',
+    description: 'Google API Key（#340 P6: 由统一账户系统管理，子进程通过 callbackEnv 注入）',
     category: 'gemini',
     sensitive: true,
     hubVisible: false,
-    exampleRecommended: true,
   },
   {
     name: 'GEMINI_ADAPTER',
@@ -917,6 +1032,50 @@ export const ENV_VARS: EnvDefinition[] = [
     description: '暹罗猫适配器 (gemini-cli/antigravity)',
     category: 'gemini',
     sensitive: false,
+  },
+
+  // --- kimi ---
+  {
+    name: 'MOONSHOT_API_KEY',
+    defaultValue: '(未设置)',
+    description: 'Kimi / Moonshot API Key（官方 kimi-cli API Key 模式用）',
+    category: 'kimi',
+    sensitive: true,
+    hubVisible: false,
+  },
+  {
+    name: 'KIMI_SHARE_DIR',
+    defaultValue: '~/.kimi',
+    description: '官方 kimi-cli 共享目录（session / mcp / logs）',
+    category: 'kimi',
+    sensitive: false,
+    hubVisible: false,
+  },
+  {
+    name: 'KIMI_CONFIG_FILE',
+    defaultValue: '~/.kimi/config.toml',
+    description: '官方 kimi-cli 配置文件路径（覆盖默认 ~/.kimi/config.toml）',
+    category: 'kimi',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'KIMI_AUTH_TOKEN',
+    defaultValue: '(未设置)',
+    description: 'Kimi 官方额度抓取用的 kimi-auth token（来自 kimi.com）',
+    category: 'quota',
+    sensitive: true,
+    hubVisible: false,
+  },
+  {
+    name: 'KIMI_QUOTA_API_FALLBACK_ENABLED',
+    defaultValue: '0（默认关闭）',
+    description: '设为 1 允许 Kimi 额度在 CLI /usage 失败时降级到 API（仍需 KIMI_AUTH_TOKEN）',
+    category: 'quota',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
   },
 
   // --- tts ---
@@ -1129,6 +1288,63 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
   },
+  // --- F163 记忆熵减实验框架 ---
+  {
+    name: 'F163_AUTHORITY_BOOST',
+    defaultValue: 'off',
+    description: 'F163 authority 加权 rerank (off/shadow/on)',
+    category: 'evidence',
+    sensitive: false,
+    runtimeEditable: true,
+  },
+  {
+    name: 'F163_ALWAYS_ON_INJECTION',
+    defaultValue: 'off',
+    description: 'F163 constitutional 物理注入 (off/shadow/on)',
+    category: 'evidence',
+    sensitive: false,
+    runtimeEditable: true,
+  },
+  {
+    name: 'F163_RETRIEVAL_RERANK',
+    defaultValue: 'off',
+    description: 'F163 多轴元数据 rerank (off/shadow/on)',
+    category: 'evidence',
+    sensitive: false,
+    runtimeEditable: true,
+  },
+  {
+    name: 'F163_COMPRESSION',
+    defaultValue: 'off',
+    description: 'F163 非替代式压缩 (off/suggest/apply)',
+    category: 'evidence',
+    sensitive: false,
+    runtimeEditable: true,
+  },
+  {
+    name: 'F163_PROMOTION_GATE',
+    defaultValue: 'off',
+    description: 'F163 晋升门禁 (off/suggest/apply)',
+    category: 'evidence',
+    sensitive: false,
+    runtimeEditable: true,
+  },
+  {
+    name: 'F163_CONTRADICTION_DETECTION',
+    defaultValue: 'off',
+    description: 'F163 矛盾检测 (off/suggest/apply)',
+    category: 'evidence',
+    sensitive: false,
+    runtimeEditable: true,
+  },
+  {
+    name: 'F163_REVIEW_QUEUE',
+    defaultValue: 'off',
+    description: 'F163 审计 review queue (off/suggest/apply)',
+    category: 'evidence',
+    sensitive: false,
+    runtimeEditable: true,
+  },
   {
     name: 'EMBED_URL',
     defaultValue: 'http://127.0.0.1:9880',
@@ -1177,7 +1393,7 @@ export const ENV_VARS: EnvDefinition[] = [
   {
     name: 'QUOTA_OFFICIAL_REFRESH_ENABLED',
     defaultValue: '0（默认关闭）',
-    description: '设为 1 允许官方额度抓取（需要 Chrome OAuth cookie）',
+    description: '设为 1 允许官方额度抓取（Claude/Codex OAuth + Kimi auth token）',
     category: 'quota',
     sensitive: false,
   },
@@ -1196,6 +1412,133 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'quota',
     sensitive: false,
     hubVisible: false,
+  },
+
+  // --- telemetry (F153) ---
+  {
+    name: 'TELEMETRY_DEBUG',
+    defaultValue: '(未设置 → 关闭)',
+    description:
+      '设为 true 启用 ConsoleSpanExporter（UNREDACTED）。仅 NODE_ENV=development/test 生效，其他环境需额外设 TELEMETRY_DEBUG_FORCE=true',
+    category: 'telemetry',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'TELEMETRY_DEBUG_FORCE',
+    defaultValue: '(未设置 → 关闭)',
+    description: '生产环境强制启用 TELEMETRY_DEBUG 的安全覆写开关。仅限紧急排障',
+    category: 'telemetry',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'TELEMETRY_HMAC_SALT',
+    defaultValue: '(dev/test 自动 fallback)',
+    description: 'HMAC salt — 遥测系统 ID 伪名化用。生产环境必设，缺失则禁用 OTel',
+    category: 'telemetry',
+    sensitive: true,
+  },
+  {
+    name: 'TELEMETRY_EXPORT_RAW_SYSTEM_IDS',
+    defaultValue: '(未设置 → HMAC 伪名化)',
+    description: '设为 1 跳过 HMAC，导出原始系统 ID（仅限自托管受控环境）',
+    category: 'telemetry',
+    sensitive: false,
+  },
+  {
+    name: 'PROMETHEUS_PORT',
+    defaultValue: '9464',
+    description: 'Prometheus /metrics 抓取端口',
+    category: 'telemetry',
+    sensitive: false,
+  },
+  {
+    name: 'OTEL_EXPORTER_OTLP_ENDPOINT',
+    defaultValue: '(未设置 → 仅 Prometheus)',
+    description: 'OTLP 导出端点（设置后同时推送 traces/metrics/logs 到该端点）',
+    category: 'telemetry',
+    sensitive: false,
+  },
+  {
+    name: 'OTEL_SDK_DISABLED',
+    defaultValue: '(未设置 → 启用)',
+    description: '设为 true 完全禁用 OTel SDK',
+    category: 'telemetry',
+    sensitive: false,
+  },
+  {
+    name: 'TELEMETRY_ALERT_ERROR_RATE',
+    defaultValue: '0.3',
+    description: 'Burn-rate 告警：错误率阈值（0-1）',
+    category: 'telemetry',
+    sensitive: false,
+  },
+  {
+    name: 'TELEMETRY_ALERT_P95_LATENCY_S',
+    defaultValue: '120',
+    description: 'Burn-rate 告警：P95 延迟阈值（秒）',
+    category: 'telemetry',
+    sensitive: false,
+  },
+  {
+    name: 'TELEMETRY_ALERT_ACTIVE_INVOCATIONS',
+    defaultValue: '50',
+    description: 'Burn-rate 告警：活跃 invocation 数阈值',
+    category: 'telemetry',
+    sensitive: false,
+  },
+  // --- antigravity (F061 Bridge) ---
+  {
+    name: 'ANTIGRAVITY_PORT',
+    defaultValue: '(未设置 → 自动发现)',
+    description: 'Antigravity Language Server ConnectRPC 端口（覆盖自动发现）',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'ANTIGRAVITY_CSRF_TOKEN',
+    defaultValue: '(未设置 → 自动发现)',
+    description: 'Antigravity Language Server CSRF Token（覆盖自动发现）',
+    category: 'antigravity',
+    sensitive: true,
+  },
+  {
+    name: 'ANTIGRAVITY_TLS',
+    defaultValue: 'true',
+    description: 'Antigravity ConnectRPC 是否使用 TLS（默认 true）',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'ANTIGRAVITY_AUTO_APPROVE',
+    defaultValue: 'true',
+    description: 'YOLO 模式：自动批准 Antigravity 待审批交互（设 false 关闭）',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'ANTIGRAVITY_TRACE_RAW',
+    defaultValue: '(未设置 → 关闭)',
+    description: '设为 1 启用 Antigravity 原始轨迹 dump（rpc raw response + step shape snapshot）',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'ANTIGRAVITY_NATIVE_EXECUTOR',
+    defaultValue: '(未设置 → 开启)',
+    description: '设为 0 关闭 Antigravity 原生 executeAndPush（回落到通用 submit 路径）',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'CAT_CAFE_READONLY',
+    defaultValue: '(未设置 → 全量注册)',
+    description: 'MCP Server 只读模式：跳过 post_message 等写操作工具注册（Antigravity 持久 MCP 用）',
+    category: 'antigravity',
+    sensitive: false,
   },
 ];
 

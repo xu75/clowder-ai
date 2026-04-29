@@ -4,8 +4,14 @@
  */
 
 import { spawn as nodeSpawn } from 'node:child_process';
+import { dirname, isAbsolute } from 'node:path';
+import type { Span } from '@opentelemetry/api';
+import { context, SpanStatusCode, trace } from '@opentelemetry/api';
 import { createModuleLogger } from '../infrastructure/logger.js';
-import { escapeBashArg, escapeCmdArg, findGitBashPath, resolveWindowsShimSpawn } from './cli-spawn-win.js';
+import { registerLivenessProbe, unregisterLivenessProbe } from '../infrastructure/telemetry/instruments.js';
+import { emitOtelLog } from '../infrastructure/telemetry/otel-logger.js';
+import { invalidateCliCommand } from './cli-resolve.js';
+import { resolveWindowsSpawnPlan } from './cli-spawn-win.js';
 import { resolveCliTimeoutMs } from './cli-timeout.js';
 import type { ChildProcessLike, CliSpawnOptions, SpawnFn } from './cli-types.js';
 import { isParseError, parseNDJSON } from './ndjson-parser.js';
@@ -78,9 +84,20 @@ export async function* spawnCli(
   // Default timeout is configurable via CLI_TIMEOUT_MS env var; 0 disables timeout.
   const timeoutMs = resolveCliTimeoutMs(options.timeoutMs);
 
+  // Log only flag names (--foo) and arg count — never raw values.
+  // Multiple providers pass prompt text via different shapes (positional,
+  // --prompt, -p, after --) so pattern-based redaction is unreliable.
+  const flagNames = options.args.filter((a) => a.startsWith('-'));
   log.debug(
-    { command: options.command, argCount: options.args.length, cwd: options.cwd, timeoutMs },
-    'Spawning CLI process',
+    {
+      command: options.command,
+      flagNames,
+      argCount: options.args.length,
+      cwd: options.cwd,
+      timeoutMs,
+      invocationId: options.invocationId,
+    },
+    '[cli-spawn] Spawning CLI process',
   );
 
   const child = doSpawn(options.command, options.args, {
@@ -90,6 +107,26 @@ export async function* spawnCli(
   });
 
   log.debug({ pid: child.pid, command: options.command }, 'CLI process spawned');
+
+  // F153 Phase B: Create CLI session child span under invocation span
+  let cliSpan: Span | undefined;
+  if (options.parentSpan) {
+    const tracer = trace.getTracer('cat-cafe-api');
+    const parentCtx = trace.setSpan(context.active(), options.parentSpan);
+    cliSpan = tracer.startSpan(
+      'cat_cafe.cli_session',
+      {
+        attributes: {
+          'cli.command': options.command,
+          'cli.arg_count': options.args.length,
+          ...(child.pid ? { 'cli.pid': child.pid } : {}),
+          ...(options.invocationId ? { invocationId: options.invocationId } : {}),
+          ...(options.cliSessionId ? { sessionId: options.cliSessionId } : {}),
+        },
+      },
+      parentCtx,
+    );
+  }
 
   // Buffer stderr for error reporting (handler attached after resetTimeout is defined)
   let stderrBuffer = '';
@@ -113,6 +150,13 @@ export async function* spawnCli(
   let spawnError: Error | undefined;
   child.once('error', (err: Error) => {
     spawnError = err;
+    // F173 Phase D AC-D1: ENOENT means cached path is stale (binary uninstalled,
+    // symlink rebuild moved target, etc.). Drop the cache entry so the next
+    // resolveCliCommand call re-probes; otherwise we ENOENT-loop forever
+    // until process restart.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      invalidateCliCommand(options.command);
+    }
   });
 
   let killed = false;
@@ -199,6 +243,11 @@ export async function* spawnCli(
   if (options.livenessProbe && child.pid !== undefined) {
     probe = new ProcessLivenessProbe(child.pid, options.livenessProbe);
     probe.start();
+    // F152: Register probe for OTel agentLiveness gauge
+    if (options.invocationId) {
+      const catId = options.env?.CAT_CAFE_CAT_ID ?? 'unknown';
+      registerLivenessProbe(options.invocationId, catId, () => probe!.getState());
+    }
   }
 
   try {
@@ -296,6 +345,23 @@ export async function* spawnCli(
       pendingNext = ndjson.next();
     }
 
+    if (probe) {
+      await probe.flushPendingWarnings();
+      for (const warning of probe.drainWarnings()) {
+        yield warning;
+        if (
+          options.livenessProbe?.stallAutoKill &&
+          warning.level === 'suspected_stall' &&
+          warning.state === 'idle-silent'
+        ) {
+          stallKilled = true;
+          timedOut = true;
+          processAliveAtTimeout = !childExited;
+          killChild();
+        }
+      }
+    }
+
     // Check for spawn error that arrived during/after iteration
     if (spawnError) throw spawnError;
 
@@ -385,7 +451,28 @@ export async function* spawnCli(
     }
     process.off('exit', exitHandler);
     probe?.stop();
+    // F152: Unregister probe from OTel gauge
+    if (options.invocationId) unregisterLivenessProbe(options.invocationId);
     killChild();
+
+    // F153 Phase B: End CLI session span with appropriate status
+    if (cliSpan) {
+      if (timedOut) {
+        cliSpan.setStatus({ code: SpanStatusCode.ERROR, message: 'CLI timeout' });
+        emitOtelLog('ERROR', 'cli_session_timeout', { 'cli.timeout_ms': timeoutMs }, cliSpan);
+      } else if (exitCode !== null && exitCode !== 0) {
+        cliSpan.setStatus({ code: SpanStatusCode.ERROR, message: `CLI exit code ${exitCode}` });
+        emitOtelLog('ERROR', 'cli_session_error', { 'cli.exit_code': exitCode }, cliSpan);
+      } else if (exitSignal) {
+        cliSpan.setStatus({ code: SpanStatusCode.ERROR, message: `CLI killed by ${exitSignal}` });
+        emitOtelLog('WARN', 'cli_session_killed', { 'cli.signal': exitSignal }, cliSpan);
+      } else {
+        cliSpan.setStatus({ code: SpanStatusCode.OK });
+      }
+      cliSpan.setAttribute('cli.exit_code', exitCode ?? -1);
+      if (exitSignal) cliSpan.setAttribute('cli.exit_signal', exitSignal);
+      cliSpan.end();
+    }
   }
 }
 
@@ -465,38 +552,52 @@ function defaultSpawn(
   },
 ): ChildProcessLike {
   if (IS_WINDOWS) {
-    const shimSpawn = resolveWindowsShimSpawn(command, args);
-    if (shimSpawn) {
-      log.debug({ original: command, resolved: shimSpawn.command, args: shimSpawn.args }, 'Windows shim resolved');
-      return nodeSpawn(shimSpawn.command, shimSpawn.args, {
-        cwd: options.cwd,
-        env: options.env,
-        stdio: options.stdio,
-      });
+    const spawnPlan = resolveWindowsSpawnPlan(command, args);
+    if (spawnPlan.mode === 'shim') {
+      log.debug(
+        {
+          original: command,
+          resolved: spawnPlan.command,
+          argCount: spawnPlan.args.length,
+          mode: spawnPlan.mode,
+          shell: spawnPlan.shell,
+        },
+        'Windows shim resolved',
+      );
+    } else {
+      log.debug(
+        {
+          original: command,
+          resolved: spawnPlan.command,
+          argCount: spawnPlan.args.length,
+          mode: spawnPlan.mode,
+          shell: spawnPlan.shell,
+        },
+        'Windows spawn plan resolved',
+      );
     }
-    // Prefer Git Bash (UTF-8 native) over cmd.exe (GBK codepage corrupts CJK args)
-    const gitBash = findGitBashPath();
-    if (gitBash) {
-      log.debug({ command, shell: gitBash }, 'Windows shim unresolved, falling back to Git Bash');
-      return nodeSpawn(escapeBashArg(command), args.map(escapeBashArg), {
-        cwd: options.cwd,
-        env: options.env,
-        stdio: options.stdio,
-        shell: gitBash,
-      });
-    }
-    log.debug({ command, shell: true }, 'Windows shim unresolved, falling back to cmd.exe');
-    return nodeSpawn(escapeCmdArg(command), args.map(escapeCmdArg), {
+    return nodeSpawn(spawnPlan.command, spawnPlan.args, {
       cwd: options.cwd,
       env: options.env,
       stdio: options.stdio,
-      shell: true,
+      ...(spawnPlan.shell !== undefined ? { shell: spawnPlan.shell } : {}),
     });
+  }
+
+  // macOS GUI apps (Electron) have a minimal PATH that excludes version
+  // managers (nvm/fnm/Volta). CLI shims use `#!/usr/bin/env node`, so the
+  // child process must be able to find `node` in its PATH. Prepend the
+  // directory containing the resolved CLI binary — it typically sits next
+  // to the `node` binary that installed it (e.g. ~/.nvm/versions/node/v20/bin/).
+  const env = { ...options.env };
+  if (isAbsolute(command)) {
+    const binDir = dirname(command);
+    env.PATH = env.PATH ? `${binDir}:${env.PATH}` : binDir;
   }
 
   return nodeSpawn(command, [...args], {
     cwd: options.cwd,
-    env: options.env,
+    env,
     stdio: options.stdio,
   });
 }

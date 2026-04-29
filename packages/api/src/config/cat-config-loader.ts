@@ -1,7 +1,7 @@
 /**
  * Cat Config Loader
  * 从 cat-template.json / .cat-cafe/cat-catalog.json 加载 Breed+Variant 配置。
- * Node-only — 前端继续用 shared 包的 CAT_CONFIGS 常量。
+ * Node-only — 前端通过 /api/cats 获取猫数据。
  */
 
 import { readFileSync } from 'node:fs';
@@ -13,7 +13,6 @@ import type {
   CatConfig,
   CatFeatures,
   CatId,
-  CatProvider,
   CatVariant,
   CoCreatorConfig,
   ContextBudget,
@@ -21,7 +20,7 @@ import type {
   ReviewPolicy,
   Roster,
 } from '@cat-cafe/shared';
-import { createCatId, normalizeCliEffortForProvider } from '@cat-cafe/shared';
+import { type ClientId, catRegistry, createCatId, normalizeCliEffortForProvider } from '@cat-cafe/shared';
 import { z } from 'zod';
 import { createModuleLogger } from '../infrastructure/logger.js';
 import { bootstrapCatCatalog, readCatCatalogRaw, resolveCatCatalogPath } from './cat-catalog-store.js';
@@ -42,6 +41,8 @@ const cliConfigSchema = z.object({
   outputFormat: z.string().min(1),
   defaultArgs: z.array(z.string()).optional(),
   effort: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
+  contextWindow: z.number().positive().int().optional(),
+  autoCompactTokenLimit: z.number().positive().int().optional(),
 });
 
 const contextBudgetSchema = z.object({
@@ -62,20 +63,22 @@ const catVariantSchema = z.object({
   displayName: z.string().min(1).optional(), // F32-b: variant-level displayName
   variantLabel: z.string().min(1).optional(), // F32-b P4: disambiguation label
   mentionPatterns: z.array(mentionPatternSchema).optional(), // F32-b: variant-level mentions
+  source: z.string().optional(), // #441: legacy field, ignored — kept in schema for old catalog read compat
   accountRef: z.string().min(1).optional(), // F127: concrete account binding
-  providerProfileId: z.string().min(1).optional(), // Legacy migration path
-  provider: z.enum(['anthropic', 'openai', 'google', 'dare', 'antigravity', 'opencode', 'a2a']),
-  defaultModel: z.string().min(1),
+  clientId: z.string().min(1), // #252: accept unknown providers to avoid full config crash
+
+  defaultModel: z.string(), // OAuth/subscription CLIs have built-in defaults; api_key validated at route level
   mcpSupport: z.boolean(),
-  cli: cliConfigSchema,
+  cli: cliConfigSchema.optional(),
   commandArgs: z.array(z.string().min(1)).optional(), // F127: explicit bridge args (e.g. Antigravity)
   cliConfigArgs: z.array(z.string().min(1)).optional(), // F127: extra CLI args per member
-  ocProviderName: z
+  /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
+  provider: z
     .string()
     .trim()
-    .min(1, 'ocProviderName must not be blank')
-    .refine((v) => !v.includes('/'), 'ocProviderName must not contain "/"')
-    .optional(), // F189: opencode custom provider name (e.g. "maas")
+    .min(1, 'provider must not be blank')
+    .refine((v) => !v.includes('/'), 'provider must not contain "/"')
+    .optional(),
   roleDescription: z.string().min(1).optional(), // F127 review fix: allow variant-scoped roleDescription override
   sessionChain: z.boolean().optional(), // F127 review fix: allow variant-scoped sessionChain override
   personality: z.string().optional(),
@@ -96,11 +99,8 @@ const catVariantSchema = z.object({
     .optional(),
   teamStrengths: z.string().optional(), // F-Ground-3: human-readable strengths
   caution: z.string().nullable().optional(), // F-Ground-3: null = explicit no-caution (R1 fix)
+  restrictions: z.array(z.string().min(1)).optional(), // F167 Phase E: hard task bans
 });
-
-type LegacyAwareCatVariant = CatVariant & {
-  providerProfileId?: string;
-};
 
 /** F33 Phase 2: session strategy config (matches SessionStrategyConfig from shared).
  *  Exported for reuse by Phase 3 API route validation. */
@@ -163,6 +163,7 @@ const catBreedSchema = z.object({
   features: catFeaturesSchema,
   teamStrengths: z.string().optional(), // F-Ground-3: breed-level default
   caution: z.string().nullable().optional(), // F-Ground-3: null = explicit no-caution (R1 fix)
+  restrictions: z.array(z.string().min(1)).optional(), // F167 Phase E: breed-level hard task bans
 });
 
 // ── F032: Roster schema for collaboration rules ──────────────────────
@@ -198,14 +199,14 @@ const coCreatorConfigSchema = z.object({
 /** Version 1: breeds only (legacy) */
 const catCafeConfigSchemaV1 = z.object({
   version: z.literal(1),
-  breeds: z.array(catBreedSchema).min(1),
+  breeds: z.array(catBreedSchema),
 });
 
 /** Version 2: breeds + roster + reviewPolicy (F032) + coCreator (F067) */
 const catCafeConfigSchemaV2 = z
   .object({
     version: z.literal(2),
-    breeds: z.array(catBreedSchema).min(1),
+    breeds: z.array(catBreedSchema),
     roster: z.record(z.string(), rosterEntrySchema),
     reviewPolicy: reviewPolicySchema,
     coCreator: coCreatorConfigSchema.optional(),
@@ -224,28 +225,28 @@ const catCafeConfigSchemaV2 = z
 /** Union of all versions — loader handles migration */
 const catCafeConfigSchema = z.union([catCafeConfigSchemaV1, catCafeConfigSchemaV2]);
 
-/**
- * Try cat-config.json (real runtime config with coCreator data) first,
- * then fall back to cat-template.json (generic template for new projects).
- */
-function readConfigWithFallback(projectRoot: string, templatePath: string): string {
-  const legacyPath = resolve(projectRoot, 'cat-config.json');
-  try {
-    return readFileSync(legacyPath, 'utf-8');
-  } catch {
-    // not found — fall through to template
-  }
+/** clowder-ai#340: Read cat-template.json directly — cat-config.json is no longer a runtime source. */
+function readTemplate(templatePath: string): string {
   try {
     return readFileSync(templatePath, 'utf-8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    throw new Error(`Failed to read cat config at ${legacyPath} or ${templatePath}: ${code ?? 'unknown error'}`);
+    throw new Error(`Failed to read cat-template.json at ${templatePath}: ${code ?? 'unknown error'}`);
   }
 }
 
 /**
+ * Keys that represent atomic config units — overlay replaces base entirely,
+ * even though they are plain objects. Prevents stale sub-fields from leaking
+ * across provider switches (e.g. template cli.defaultArgs surviving into a
+ * catalog variant that switched to a different client).
+ */
+const ATOMIC_OBJECT_KEYS = new Set(['cli', 'color', 'contextBudget', 'voiceConfig']);
+
+/**
  * Deep merge two plain objects. `overlay` fields override `base` fields.
- * - Objects: recursively merged (base fields preserved if absent from overlay).
+ * - Atomic keys (cli, color, etc.): overlay replaces base entirely.
+ * - Other objects: recursively merged (base fields preserved if absent from overlay).
  * - Arrays of objects with `id`: key-based merge (matched by id, then deep-merged).
  *   Overlay-only items appended; base-only items preserved.
  * - Other arrays / primitives: overlay replaces base.
@@ -255,13 +256,10 @@ function deepMergeConfig(base: Record<string, unknown>, overlay: Record<string, 
   for (const key of Object.keys(overlay)) {
     const bVal = base[key];
     const oVal = overlay[key];
-    if (Array.isArray(oVal) && Array.isArray(bVal) && oVal.length > 0 && isIdArray(oVal) && isIdArray(bVal)) {
-      merged[key] = mergeById(bVal as HasId[], oVal as HasId[]);
-    } else if (key === 'cli' && isPlainObject(oVal)) {
-      // CLI config is provider-specific. When the runtime catalog switches a cat
-      // from Claude ↔ Codex, preserving nested base fields like defaultArgs/effort
-      // revives the old provider's flags during default loads.
+    if (ATOMIC_OBJECT_KEYS.has(key)) {
       merged[key] = oVal;
+    } else if (Array.isArray(oVal) && Array.isArray(bVal) && oVal.length > 0 && isIdArray(oVal) && isIdArray(bVal)) {
+      merged[key] = mergeById(bVal as HasId[], oVal as HasId[]);
     } else if (isPlainObject(oVal) && isPlainObject(bVal)) {
       merged[key] = deepMergeConfig(bVal as Record<string, unknown>, oVal as Record<string, unknown>);
     } else {
@@ -293,7 +291,7 @@ function mergeById(base: HasId[], overlay: HasId[]): HasId[] {
     const bItem = baseMap.get(oItem.id);
     result.push(bItem ? (deepMergeConfig(bItem, oItem) as HasId) : oItem);
   }
-  // Preserve base-only items (new items added to cat-config.json but not yet in catalog)
+  // Preserve base-only items (new items added to cat-template.json but not yet in catalog)
   for (const bItem of base) {
     if (!seen.has(bItem.id)) result.push(bItem);
   }
@@ -303,7 +301,7 @@ function mergeById(base: HasId[], overlay: HasId[]): HasId[] {
 /**
  * Load and validate the resolved cat config source.
  * Explicit filePath reads that file directly.
- * Default resolution: cat-config.json is the base, .cat-cafe/cat-catalog.json is a delta overlay.
+ * Default resolution: cat-template.json is the base, .cat-cafe/cat-catalog.json is a delta overlay.
  * Catalog fields override config fields (deep merge); config fields absent from catalog are preserved.
  */
 export function loadCatConfig(filePath?: string): CatCafeConfig {
@@ -321,14 +319,14 @@ export function loadCatConfig(filePath?: string): CatCafeConfig {
     const projectRoot = dirname(templatePath);
     const catalogRaw = readCatCatalogRaw(projectRoot);
     if (catalogRaw !== null) {
-      // Catalog exists — use cat-config.json as base, catalog as overlay
-      const baseRaw = readConfigWithFallback(projectRoot, templatePath);
+      // Catalog exists — use template as base, catalog as overlay
+      const baseRaw = readTemplate(templatePath);
       const baseJson = JSON.parse(baseRaw) as Record<string, unknown>;
       const catalogJson = JSON.parse(catalogRaw) as Record<string, unknown>;
       raw = JSON.stringify(deepMergeConfig(baseJson, catalogJson));
       resolvedPath = resolveCatCatalogPath(projectRoot);
     } else {
-      raw = readConfigWithFallback(projectRoot, templatePath);
+      raw = readTemplate(templatePath);
       resolvedPath = templatePath;
     }
   }
@@ -388,7 +386,6 @@ export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig
     string,
     CatConfig & {
       contextBudget?: ContextBudget;
-      providerProfileId?: string;
     }
   > = {};
   for (const breed of config.breeds) {
@@ -416,13 +413,14 @@ export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig
       // R1 fix: null = "explicitly no caution" (don't inherit breed).
       // undefined (omitted) = inherit from breed. ?? treats null as nullish, so use !== undefined.
       const caution = variant.caution !== undefined ? variant.caution : breed.caution;
+      // F167 Phase E (KD-20): variant restrictions override breed (no merge);
+      // undefined (omitted) inherits breed-level restrictions.
+      const restrictions = variant.restrictions ?? breed.restrictions;
       const projectedCommandArgs =
         variant.commandArgs ??
-        (variant.provider === 'antigravity' && variant.cli?.defaultArgs && variant.cli.defaultArgs.length > 0
+        (variant.clientId === 'antigravity' && variant.cli?.defaultArgs && variant.cli.defaultArgs.length > 0
           ? variant.cli.defaultArgs
           : undefined);
-
-      const legacyVariant = variant as LegacyAwareCatVariant;
 
       result[catId] = {
         id: createCatId(catId),
@@ -432,21 +430,16 @@ export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig
         avatar: variant.avatar ?? breed.avatar, // F32-b P4c: variant can override
         color: variant.color ?? breed.color, // F32-b P4c: variant can override
         mentionPatterns,
-        ...(variant.accountRef != null
-          ? { accountRef: variant.accountRef }
-          : legacyVariant.providerProfileId != null
-            ? { accountRef: legacyVariant.providerProfileId }
-            : {}),
-        ...(legacyVariant.providerProfileId != null ? { providerProfileId: legacyVariant.providerProfileId } : {}),
-        provider: variant.provider,
+        ...(variant.accountRef != null ? { accountRef: variant.accountRef } : {}),
+        clientId: variant.clientId as ClientId, // #252: Zod now accepts any string; downstream switch/case has default branches
         defaultModel: variant.defaultModel,
         mcpSupport: variant.mcpSupport,
-        cli: variant.cli,
         ...(projectedCommandArgs != null ? { commandArgs: projectedCommandArgs } : {}),
         ...(variant.cliConfigArgs != null && variant.cliConfigArgs.length > 0
           ? { cliConfigArgs: [...variant.cliConfigArgs] }
           : {}),
-        ...(variant.ocProviderName != null ? { ocProviderName: variant.ocProviderName } : {}),
+        ...(variant.cli != null ? { cli: variant.cli } : {}),
+        ...(variant.provider != null ? { provider: variant.provider } : {}),
         ...(variant.contextBudget != null ? { contextBudget: variant.contextBudget } : {}),
         roleDescription: variant.roleDescription ?? breed.roleDescription,
         personality: variant.personality ?? defaultVariant?.personality ?? '',
@@ -457,6 +450,8 @@ export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig
         ...(teamStrengths != null ? { teamStrengths } : {}),
         // R1 fix: preserve null (explicit no-caution) in CatConfig; only omit if undefined
         ...(caution !== undefined ? { caution } : {}),
+        // F167 Phase E: preserve restrictions list for teammate roster + self-awareness injection
+        ...(restrictions != null && restrictions.length > 0 ? { restrictions: [...restrictions] } : {}),
         ...(variant.strengths != null ? { strengths: variant.strengths } : {}),
         ...(variant.sessionChain !== undefined
           ? { sessionChain: variant.sessionChain }
@@ -565,7 +560,7 @@ let _catIdToBreedSource: CatCafeConfig | null = null;
 
 /**
  * Check if F24 session chain is enabled for a cat.
- * Returns true by default — only false when explicitly disabled in cat-config.json.
+ * Returns true by default — only false when explicitly disabled in the resolved cat config.
  * Gracefully returns true if config file is unreadable (availability over strictness).
  *
  * F32-b: Now resolves variant catIds to their parent breed via index.
@@ -592,7 +587,7 @@ export function isSessionChainEnabled(catId: CatId | string, config?: CatCafeCon
 // ── F33 Phase 2: Session Strategy from config ─────────────────────────
 
 /**
- * Get session strategy config from cat-config.json for a cat.
+ * Get session strategy config from the resolved cat config for a cat.
  * Returns undefined if not configured (caller falls back to code defaults).
  *
  * F33 Phase 2: Same lookup pattern as isSessionChainEnabled — catId → breed → features.
@@ -617,7 +612,7 @@ export function getConfigSessionStrategy(
 }
 
 /**
- * Get Mission Hub self-claim scope from cat-config.json for a cat.
+ * Get Mission Hub self-claim scope from the resolved cat config for a cat.
  * Defaults to 'disabled' when not configured.
  */
 export function getMissionHubSelfClaimScope(catId: string, config?: CatCafeConfig): MissionHubSelfClaimScope {
@@ -638,14 +633,42 @@ export function getMissionHubSelfClaimScope(catId: string, config?: CatCafeConfi
 // ── F32-b: Default cat resolution ─────────────────────────────────────
 
 let _defaultCatId: CatId | null = null;
+/** F154 AC-A4: Runtime override for default cat (set via Hub API, owner-gated). */
+let _runtimeDefaultCatId: CatId | null = null;
+
+function isKnownAvailableDefaultCat(catId: string): boolean {
+  const config = getCachedConfig();
+  if (!config) {
+    const id = createCatId(catId);
+    return catRegistry.getAllIds().length === 0 || catRegistry.has(id);
+  }
+
+  if (!_catIdToBreed || _catIdToBreedSource !== config) {
+    _catIdToBreed = buildCatIdToBreedIndex(config);
+    _catIdToBreedSource = config;
+  }
+
+  return _catIdToBreed.has(catId) && isCatAvailable(catId, config);
+}
 
 /**
- * Get the default cat ID (= breeds[0].defaultVariantId's resolved catId).
+ * Get the default cat ID.
+ * Priority: runtime override (F154) → breeds[0].defaultVariantId (F32-b R4).
  * Used as ultimate fallback in AgentRouter when no mentions/participants/preferredCats.
- *
- * F32-b R4: Explicit derivation from defaultVariantId — NOT registry order dependent.
  */
 export function getDefaultCatId(): CatId {
+  if (_runtimeDefaultCatId) {
+    if (isKnownAvailableDefaultCat(_runtimeDefaultCatId)) return _runtimeDefaultCatId;
+    log.warn({ catId: _runtimeDefaultCatId }, 'Runtime default cat is unavailable or unknown, falling back');
+  }
+
+  const envCatId = process.env.DEFAULT_CAT_ID?.trim();
+  if (envCatId) {
+    const id = createCatId(envCatId);
+    if (isKnownAvailableDefaultCat(id)) return id;
+    log.warn({ envCatId }, 'DEFAULT_CAT_ID references unavailable or unknown cat, falling back');
+  }
+
   if (_defaultCatId) return _defaultCatId;
 
   const config = getCachedConfig();
@@ -657,8 +680,28 @@ export function getDefaultCatId(): CatId {
     return _defaultCatId;
   }
 
-  // Ultimate fallback (should not trigger — config always has at least 1 breed)
+  // Ultimate fallback for zero-member bootstrap mode.
   return createCatId('opus');
+}
+
+/** F154 AC-A4: Set runtime default cat override. Owner-gated at the API layer. */
+export function setRuntimeDefaultCatId(catId: string): void {
+  _runtimeDefaultCatId = createCatId(catId);
+}
+
+/** F154 AC-A4: Clear runtime override — falls back to breeds[0]. */
+export function clearRuntimeDefaultCatId(): void {
+  _runtimeDefaultCatId = null;
+}
+
+/** F154 AC-A4: Check whether a runtime override is active. */
+export function hasRuntimeDefaultCatOverride(): boolean {
+  return _runtimeDefaultCatId !== null && isKnownAvailableDefaultCat(_runtimeDefaultCatId);
+}
+
+/** Unified owner userId: configured env or single-user fallback. */
+export function getOwnerUserId(): string {
+  return process.env.DEFAULT_OWNER_USER_ID?.trim() || 'default-user';
 }
 
 // ── Variant CLI effort accessor ──────────────────────────────────────
@@ -682,15 +725,18 @@ function buildCatIdToVariantIndex(config: CatCafeConfig): Map<string, CatVariant
 export type CliEffortLevel = 'low' | 'medium' | 'high' | 'max' | 'xhigh';
 
 /**
- * Get CLI effort level for a cat from cat-config.json.
+ * Get CLI effort level for a cat from the resolved cat config.
  * Default when not configured:
  *   claude (anthropic): 'max'
  *   codex (openai):     'xhigh'
  *   others:             'high'
  */
-export function getCatEffort(catId: string, config?: CatCafeConfig, fallbackProvider?: CatProvider): CliEffortLevel {
+export function getCatEffort(catId: string, config?: CatCafeConfig, fallbackProvider?: ClientId): CliEffortLevel {
   const cfg = config ?? getCachedConfig();
-  if (!cfg) return normalizeCliEffortForProvider(fallbackProvider ?? 'anthropic', undefined) ?? 'high';
+  if (!cfg) {
+    const normalized = normalizeCliEffortForProvider(fallbackProvider ?? 'anthropic', undefined);
+    return normalized ?? 'high';
+  }
 
   if (!_catIdToVariant || _catIdToVariantSource !== cfg) {
     _catIdToVariant = buildCatIdToVariantIndex(cfg);
@@ -698,9 +744,49 @@ export function getCatEffort(catId: string, config?: CatCafeConfig, fallbackProv
   }
 
   const variant = _catIdToVariant.get(catId);
-  const effectiveProvider = variant?.provider ?? fallbackProvider;
-  const normalized = normalizeCliEffortForProvider(effectiveProvider ?? 'anthropic', variant?.cli.effort);
-  return normalized ?? 'high';
+  if (variant?.cli?.effort) {
+    // Defense-in-depth: validate persisted effort against current provider.
+    // Stale cross-provider values (e.g. 'max' on openai) are cleaned at write
+    // time, but historical data may still contain them.
+    const provider = variant.clientId ?? fallbackProvider;
+    if (provider) {
+      const validated = normalizeCliEffortForProvider(provider, variant.cli.effort);
+      if (validated) return validated;
+      // Invalid for this provider — fall through to provider default below
+    } else {
+      return variant.cli.effort;
+    }
+  }
+
+  // Client-aware defaults: use variant's clientId if found, otherwise fallbackProvider
+  const effectiveProvider = variant?.clientId ?? fallbackProvider;
+  if (effectiveProvider) {
+    const normalized = normalizeCliEffortForProvider(effectiveProvider, undefined);
+    if (normalized) return normalized;
+  }
+  return 'high';
+}
+
+export interface CatContextWindowConfig {
+  contextWindow: number;
+  autoCompactTokenLimit: number;
+}
+
+export function getCatContextWindowConfig(catId: string): CatContextWindowConfig | undefined {
+  const cfg = getCachedConfig();
+  if (!cfg) return undefined;
+
+  if (!_catIdToVariant || _catIdToVariantSource !== cfg) {
+    _catIdToVariant = buildCatIdToVariantIndex(cfg);
+    _catIdToVariantSource = cfg;
+  }
+
+  const variant = _catIdToVariant.get(catId);
+  if (!variant?.cli?.contextWindow) return undefined;
+  return {
+    contextWindow: variant.cli.contextWindow,
+    autoCompactTokenLimit: variant.cli.autoCompactTokenLimit ?? Math.floor(variant.cli.contextWindow * 0.88),
+  };
 }
 
 // ── F149: ACP config accessor (raw variant field, not in CatConfig type) ──────
@@ -718,7 +804,7 @@ export interface AcpVariantConfig {
 }
 
 /**
- * Get ACP config for a cat from the raw cat-config.json variant.
+ * Get ACP config for a cat from the resolved raw runtime variant.
  * Returns undefined if the variant has no `acp` section (= use legacy CLI).
  * Reads raw JSON because `acp` is not in the typed CatConfig (intentionally).
  */
@@ -729,12 +815,12 @@ export function getAcpConfig(catId: string): AcpVariantConfig | undefined {
     const catalogRaw = readCatCatalogRaw(projectRoot);
     let raw: string;
     if (catalogRaw !== null) {
-      const baseRaw = readConfigWithFallback(projectRoot, templatePath);
+      const baseRaw = readTemplate(templatePath);
       const baseJson = JSON.parse(baseRaw) as Record<string, unknown>;
       const catalogJson = JSON.parse(catalogRaw) as Record<string, unknown>;
       raw = JSON.stringify(deepMergeConfig(baseJson, catalogJson));
     } else {
-      raw = readConfigWithFallback(projectRoot, templatePath);
+      raw = readTemplate(templatePath);
     }
     const json = JSON.parse(raw) as {
       breeds?: Array<{ catId?: string; variants?: Array<{ catId?: string; acp?: AcpVariantConfig }> }>;
@@ -862,7 +948,7 @@ const DEFAULT_CO_CREATOR_MENTION_PATTERNS = ['@co-creator', '@铲屎官'];
 let _cachedCoCreator: CoCreatorConfig | null = null;
 
 /**
- * Get coCreator config from cat-config.json.
+ * Get coCreator config from the resolved cat config.
  * Returns a default config with @co-creator/@铲屎官 patterns when not configured.
  */
 export function getCoCreatorConfig(config?: CatCafeConfig): CoCreatorConfig {

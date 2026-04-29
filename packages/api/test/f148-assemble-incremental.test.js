@@ -431,13 +431,16 @@ describe('F148 review fixes', () => {
     const ctx = result.contextText;
 
     // AC-C3: primacy anchor (thread opener) must be present
-    assert.ok(ctx.includes('[Thread opener:'), `primacy anchor missing. contextText starts with: ${ctx.slice(0, 300)}`);
+    assert.ok(
+      ctx.includes('[Thread opener @'),
+      `primacy anchor missing. contextText starts with: ${ctx.slice(0, 300)}`,
+    );
     // AC-C2: should have at least one scored anchor
-    assert.ok(ctx.includes('[Thread opener:') || ctx.includes('[Anchor'), 'at least one anchor expected');
+    assert.ok(ctx.includes('[Thread opener @') || ctx.includes('[Anchor'), 'at least one anchor expected');
     // Order: tombstone < anchors < burst
     const tombstoneIdx = ctx.indexOf('[System: skipped');
     const anchorIdx = Math.min(
-      ctx.indexOf('[Thread opener:') >= 0 ? ctx.indexOf('[Thread opener:') : Infinity,
+      ctx.indexOf('[Thread opener @') >= 0 ? ctx.indexOf('[Thread opener @') : Infinity,
       ctx.indexOf('[Anchor') >= 0 ? ctx.indexOf('[Anchor') : Infinity,
     );
     assert.ok(tombstoneIdx >= 0, 'tombstone expected');
@@ -475,7 +478,7 @@ describe('F148 review fixes', () => {
     // The anchor should include msg[0] (primacy) but sanitized.
     // The legitimate smart window header contains 智能窗口 once; the poison adds a second.
     // Count occurrences: only 1 allowed (the system header), not 2 (anchor leak).
-    if (result.contextText.includes('[Thread opener:')) {
+    if (result.contextText.includes('[Thread opener @')) {
       const envelopeCount = (result.contextText.match(/智能窗口/g) || []).length;
       assert.ok(envelopeCount <= 1, `Anchor must not leak extra envelope markers (found ${envelopeCount} occurrences)`);
       assert.ok(!result.contextText.includes('50 条已摘要'), 'Fake envelope values from anchor must be sanitized');
@@ -497,6 +500,63 @@ After text`;
     assert.ok(!cleaned.includes('skipped 50'), 'tombstone inside envelope should be stripped');
     assert.ok(cleaned.includes('Some prior text'), 'text before envelope preserved');
     assert.ok(cleaned.includes('After text'), 'text after envelope preserved');
+  });
+
+  test('P2-2: sanitizeInjectedContent strips leaked tool-call payload suffix', async () => {
+    const { sanitizeInjectedContent } = await import('../dist/domains/cats/services/agents/routing/route-helpers.js');
+
+    const injected = `继续落到实现。先补链路和测试。
+
+{"tool_uses":[{"recipient_name":"functions.exec_command","parameters":{"cmd":"sed -n '1,220p' foo.ts"}}]}`;
+
+    const cleaned = sanitizeInjectedContent(injected);
+    assert.equal(cleaned, '继续落到实现。先补链路和测试。');
+  });
+
+  test('P2-3: sanitizeInjectedContent keeps legitimate tool-use JSON examples when prose continues', async () => {
+    const { sanitizeInjectedContent } = await import('../dist/domains/cats/services/agents/routing/route-helpers.js');
+
+    const legitimate = `文档示例：
+
+{"tool_uses":[{"recipient_name":"functions.exec_command","parameters":{"cmd":"pwd"}}]}
+
+上面这个 JSON 只是示例，不是泄漏。`;
+
+    const cleaned = sanitizeInjectedContent(legitimate);
+    assert.equal(cleaned, legitimate);
+  });
+
+  test('P1-4: sanitizeInjectedContent keeps legitimate tool-use JSON examples at response end', async () => {
+    const { sanitizeInjectedContent } = await import('../dist/domains/cats/services/agents/routing/route-helpers.js');
+
+    const legitimate = `文档示例：
+
+{"tool_uses":[{"recipient_name":"functions.exec_command","parameters":{"cmd":"pwd"}}]}`;
+
+    const cleaned = sanitizeInjectedContent(legitimate);
+    assert.equal(cleaned, legitimate);
+  });
+
+  test('P1-5: sanitizeInjectedContent does not treat counterexample prose as an example label', async () => {
+    const { sanitizeInjectedContent } = await import('../dist/domains/cats/services/agents/routing/route-helpers.js');
+
+    const leaked = `This is a counterexample
+
+{"tool_uses":[{"recipient_name":"functions.exec_command","parameters":{"cmd":"pwd"}}]}`;
+
+    const cleaned = sanitizeInjectedContent(leaked);
+    assert.equal(cleaned, 'This is a counterexample');
+  });
+
+  test('P1-6: sanitizeInjectedContent keeps unlabeled English example headers without colon', async () => {
+    const { sanitizeInjectedContent } = await import('../dist/domains/cats/services/agents/routing/route-helpers.js');
+
+    const legitimate = `Example
+
+{"tool_uses":[{"recipient_name":"functions.exec_command","parameters":{"cmd":"pwd"}}]}`;
+
+    const cleaned = sanitizeInjectedContent(legitimate);
+    assert.equal(cleaned, legitimate);
   });
 
   // --- Phase D: Coverage Map + Thread Memory injection ---

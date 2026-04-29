@@ -5,7 +5,11 @@
  * F108: ExecutionSlot(threadId, catId) 为并发执行的基本单元。
  * - 同一 catId 在同一 thread 仍保持单锁语义（新调用 abort 旧调用）
  * - 不同 catId 在同一 thread 可以并发执行
+ *
+ * F118 D3: TTL guard — slots exceeding maxSlotTtlMs are auto-cleaned on read.
  */
+
+import { resolveCliTimeoutMs } from '../../../../../utils/cli-timeout.js';
 
 interface ActiveInvocation {
   controller: AbortController;
@@ -40,9 +44,24 @@ export class InvocationTracker {
   /** Key: `${threadId}:${catId}` (slotKey) */
   private active = new Map<string, ActiveInvocation>();
   private deleting = new Set<string>();
+  /** F118 D3: max age before a slot is considered stale (default 2.5× CLI timeout = 75min) */
+  private maxSlotTtlMs: number;
+
+  constructor(opts?: { maxSlotTtlMs?: number }) {
+    this.maxSlotTtlMs = opts?.maxSlotTtlMs ?? 2.5 * resolveCliTimeoutMs(undefined);
+  }
 
   private slotKey(threadId: string, catId: string): string {
     return `${threadId}:${catId}`;
+  }
+
+  /** F118 D3: Check if an invocation has exceeded the TTL. Auto-deletes if expired. */
+  private isExpired(key: string, inv: ActiveInvocation): boolean {
+    if (Date.now() - inv.startedAt > this.maxSlotTtlMs) {
+      this.active.delete(key);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -122,15 +141,24 @@ export class InvocationTracker {
     return { cancelled: true, catIds };
   }
 
-  /** Cancel ALL active slots for a thread (e.g., thread deletion). */
-  cancelAll(threadId: string): void {
+  /**
+   * Cancel ALL active slots for a thread.
+   * F156: When requestUserId is provided, only cancels invocations owned by that user.
+   * Without requestUserId, cancels all (system/admin action, e.g. thread deletion).
+   * Returns the catIds that were actually cancelled (for orchestrator scoping).
+   */
+  cancelAll(threadId: string, requestUserId?: string, abortReason?: string): string[] {
     const prefix = `${threadId}:`;
+    const cancelledCatIds: string[] = [];
     for (const [key, inv] of this.active) {
       if (key.startsWith(prefix)) {
-        inv.controller.abort();
+        if (requestUserId && inv.userId !== requestUserId) continue;
+        cancelledCatIds.push(inv.catId);
+        inv.controller.abort(abortReason);
         this.active.delete(key);
       }
     }
+    return cancelledCatIds;
   }
 
   /** Get the userId who started the invocation for a specific slot. */
@@ -155,18 +183,34 @@ export class InvocationTracker {
   }
 
   /**
+   * Mark a SINGLE slot from a batch invocation as complete.
+   * Unlike complete(), this also matches batchController so a startAll()/tryStartThreadAll()
+   * caller can retire finished cats one-by-one without waiting for the whole batch.
+   */
+  completeSlot(threadId: string, catId: string, controller?: AbortController): void {
+    const key = this.slotKey(threadId, catId);
+    const inv = this.active.get(key);
+    if (!inv) return;
+    if (controller && inv.controller !== controller && inv.batchController !== controller) return;
+    this.active.delete(key);
+  }
+
+  /**
    * Whether a thread/slot has an active invocation.
    * - has(threadId, catId) — specific slot check
    * - has(threadId) — any slot active in thread?
    */
   has(threadId: string, catId?: string): boolean {
     if (catId) {
-      return this.active.has(this.slotKey(threadId, catId));
+      const key = this.slotKey(threadId, catId);
+      const inv = this.active.get(key);
+      if (!inv) return false;
+      return !this.isExpired(key, inv);
     }
-    // Thread-level: check if ANY slot is active
+    // Thread-level: check if ANY non-expired slot is active
     const prefix = `${threadId}:`;
-    for (const key of this.active.keys()) {
-      if (key.startsWith(prefix)) return true;
+    for (const [key, inv] of this.active) {
+      if (key.startsWith(prefix) && !this.isExpired(key, inv)) return true;
     }
     return false;
   }
@@ -193,6 +237,28 @@ export class InvocationTracker {
       this.active.set(key, { controller, userId, catId, catIds, startedAt: now, batchController: primaryController });
     }
     return primaryController ?? new AbortController();
+  }
+
+  /**
+   * Track an additional slot that is executed by an already-running route.
+   * Used by routeSerial A2A worklist targets so thread-level queue gates stay
+   * busy after the original cat completes and before the A2A target runs.
+   */
+  trackExternalSlot(
+    threadId: string,
+    catId: string,
+    controller: AbortController,
+    userId: string = 'unknown',
+    catIds: string[] = [catId],
+  ): boolean {
+    if (this.deleting.has(threadId)) return false;
+    const key = this.slotKey(threadId, catId);
+    const existing = this.active.get(key);
+    if (existing && !this.isExpired(key, existing)) {
+      return existing.controller === controller || existing.batchController === controller;
+    }
+    this.active.set(key, { controller, userId, catId, catIds, startedAt: Date.now(), batchController: controller });
+    return true;
   }
 
   /**
@@ -235,7 +301,7 @@ export class InvocationTracker {
     const prefix = `${threadId}:`;
     const result: ActiveSlotInfo[] = [];
     for (const [key, inv] of this.active) {
-      if (key.startsWith(prefix)) {
+      if (key.startsWith(prefix) && !this.isExpired(key, inv)) {
         result.push({ catId: inv.catId, startedAt: inv.startedAt });
       }
     }

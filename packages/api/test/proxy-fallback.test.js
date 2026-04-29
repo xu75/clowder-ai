@@ -34,12 +34,21 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
     const apiDir = join(root, 'packages', 'api');
     const catCafeDir = join(root, '.cat-cafe');
     const previousGlobalRoot = process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
+    const previousHome = process.env.HOME;
+    const previousTemplatePath = process.env.CAT_TEMPLATE_PATH;
     await mkdir(apiDir, { recursive: true });
     await mkdir(catCafeDir, { recursive: true });
     await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+    // Write a minimal cat-template.json so resolveActiveProjectRoot() picks up `root`
+    // via CAT_TEMPLATE_PATH (which takes priority over findMonorepoRoot). Without this,
+    // setup-cat-registry.js's CAT_TEMPLATE_PATH points to a tmp dir that has no accounts.
+    await writeFile(join(root, 'cat-template.json'), JSON.stringify({ version: 2, breeds: [], roster: {} }), 'utf-8');
+    process.env.CAT_TEMPLATE_PATH = join(root, 'cat-template.json');
     process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = root;
+    process.env.HOME = root;
 
-    // F136 Phase 4d: create account via cat-catalog.json + credentials.json
+    // clowder-ai#340: Use well-known 'claude' ID so resolveForClient('anthropic') discovers it.
+    // Protocol retired — derived at runtime from BUILTIN_ACCOUNT_MAP.
     await writeFile(
       join(catCafeDir, 'cat-catalog.json'),
       JSON.stringify(
@@ -47,9 +56,8 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
           version: 2,
           breeds: [],
           accounts: {
-            'test-gateway': {
+            claude: {
               authType: 'api_key',
-              protocol: 'anthropic',
               baseUrl: 'https://api.test-gateway.example',
               displayName: 'test-gateway',
             },
@@ -64,7 +72,7 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
       join(catCafeDir, 'credentials.json'),
       JSON.stringify(
         {
-          'test-gateway': { apiKey: 'sk-test-fallback' },
+          claude: { apiKey: 'sk-test-fallback' },
         },
         null,
         2,
@@ -83,7 +91,7 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
     const deps = {
       registry: {
         create: () => ({ invocationId: 'inv-fallback', callbackToken: 'tok-fallback' }),
-        verify: () => null,
+        verify: async () => ({ ok: false, reason: 'unknown_invocation' }),
       },
       sessionManager: {
         get: async () => undefined,
@@ -118,6 +126,10 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
       process.chdir(previousCwd);
       if (previousGlobalRoot === undefined) delete process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
       else process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = previousGlobalRoot;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousTemplatePath === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = previousTemplatePath;
       if (previousProxyEnabled === undefined) delete process.env.ANTHROPIC_PROXY_ENABLED;
       else process.env.ANTHROPIC_PROXY_ENABLED = previousProxyEnabled;
       if (previousProxyPort === undefined) delete process.env.ANTHROPIC_PROXY_PORT;
@@ -141,12 +153,20 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
     const apiDir = join(root, 'packages', 'api');
     const catCafeDir = join(root, '.cat-cafe');
     const previousGlobalRoot = process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
+    const previousHome2 = process.env.HOME;
+    const previousTemplatePath2 = process.env.CAT_TEMPLATE_PATH;
     await mkdir(apiDir, { recursive: true });
     await mkdir(catCafeDir, { recursive: true });
     await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+    // Write a minimal cat-template.json so resolveActiveProjectRoot() picks up `root`
+    // via CAT_TEMPLATE_PATH (which takes priority over findMonorepoRoot). Without this,
+    // setup-cat-registry.js's CAT_TEMPLATE_PATH points to a tmp dir that has no accounts.
+    await writeFile(join(root, 'cat-template.json'), JSON.stringify({ version: 2, breeds: [], roster: {} }), 'utf-8');
+    process.env.CAT_TEMPLATE_PATH = join(root, 'cat-template.json');
     process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = root;
+    process.env.HOME = root;
 
-    // F136 Phase 4d: create account via cat-catalog.json + credentials.json
+    // clowder-ai#340: Use well-known 'claude' ID so resolveForClient('anthropic') discovers it.
     await writeFile(
       join(catCafeDir, 'cat-catalog.json'),
       JSON.stringify(
@@ -154,9 +174,8 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
           version: 2,
           breeds: [],
           accounts: {
-            'nan-port-gateway': {
+            claude: {
               authType: 'api_key',
-              protocol: 'anthropic',
               baseUrl: 'https://api.nan-port.example',
               displayName: 'nan-port-gateway',
             },
@@ -171,7 +190,7 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
       join(catCafeDir, 'credentials.json'),
       JSON.stringify(
         {
-          'nan-port-gateway': { apiKey: 'sk-nan-port' },
+          claude: { apiKey: 'sk-nan-port' },
         },
         null,
         2,
@@ -190,7 +209,7 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
     const deps = {
       registry: {
         create: () => ({ invocationId: 'inv-nan', callbackToken: 'tok-nan' }),
-        verify: () => null,
+        verify: async () => ({ ok: false, reason: 'unknown_invocation' }),
       },
       sessionManager: {
         get: async () => undefined,
@@ -224,6 +243,10 @@ describe('F115 AC-C3: proxy fallback to direct upstream', () => {
       process.chdir(previousCwd);
       if (previousGlobalRoot === undefined) delete process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
       else process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = previousGlobalRoot;
+      if (previousHome2 === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome2;
+      if (previousTemplatePath2 === undefined) delete process.env.CAT_TEMPLATE_PATH;
+      else process.env.CAT_TEMPLATE_PATH = previousTemplatePath2;
       if (previousProxyEnabled === undefined) delete process.env.ANTHROPIC_PROXY_ENABLED;
       else process.env.ANTHROPIC_PROXY_ENABLED = previousProxyEnabled;
       if (previousProxyPort === undefined) delete process.env.ANTHROPIC_PROXY_PORT;

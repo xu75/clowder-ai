@@ -2,7 +2,7 @@
  * Connector Gateway Bootstrap
  * Wires all connector gateway components together.
  *
- * Follows github-review-bootstrap.ts pattern:
+ * Bootstrap pattern:
  * - Takes options with dependencies
  * - Checks env config before starting
  * - Returns lifecycle handle { stop }
@@ -12,12 +12,13 @@
 
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { CAT_CONFIGS, type CatId, type ConnectorSource } from '@cat-cafe/shared';
+import { type CatId, type ConnectorSource, catRegistry } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { FastifyBaseLogger } from 'fastify';
 import { isCatAvailable } from '../../config/cat-config-loader.js';
 import type { ConnectorWebhookHandler, WebhookHandleResult } from '../../routes/connector-webhooks.js';
+import { getDefaultUploadDir } from '../../utils/upload-paths.js';
 import { deliverConnectorMessage } from '../email/deliver-connector-message.js';
 import { DingTalkAdapter } from './adapters/DingTalkAdapter.js';
 import { FeishuAdapter } from './adapters/FeishuAdapter.js';
@@ -47,6 +48,7 @@ import {
 } from './OutboundDeliveryHook.js';
 import { RedisConnectorThreadBindingStore } from './RedisConnectorThreadBindingStore.js';
 import { StreamingOutboundHook } from './StreamingOutboundHook.js';
+import { normalizeTelegramBotToken } from './telegram-token.js';
 
 export interface ConnectorGatewayConfig {
   telegramBotToken?: string | undefined;
@@ -149,7 +151,7 @@ export interface ConnectorGatewayDeps {
       message: string,
       messageId: string,
       ...args: unknown[]
-    ): 'dispatched' | 'enqueued' | 'merged' | 'full';
+    ): 'dispatched' | 'enqueued' | 'full';
   };
   readonly socketManager?:
     | {
@@ -183,6 +185,12 @@ export interface ConnectorGatewayHandle {
   readonly weixinAdapter: InstanceType<typeof WeixinAdapter> | null;
   readonly permissionStore: IConnectorPermissionStore;
   readonly startWeixinPolling: () => void;
+  /** F132 Phase E: dynamically start WeCom Bot adapter after credential validation */
+  readonly startWeComBotStream: (botId: string, secret: string) => Promise<void>;
+  /** F132 Phase E: stop running WeCom Bot adapter (for disconnect) */
+  readonly stopWeComBot: () => Promise<void>;
+  /** F132 bugfix: live adapter getter for health reporting (instance changes on restart) */
+  readonly getWeComBotAdapter: () => WeComBotAdapter | null;
   stop(): Promise<void>;
 }
 
@@ -220,7 +228,9 @@ export async function startConnectorGateway(
 ): Promise<ConnectorGatewayHandle | null> {
   const { log } = deps;
 
-  const hasTelegram = Boolean(config.telegramBotToken);
+  const telegramBotToken = normalizeTelegramBotToken(config.telegramBotToken);
+  const hasInvalidTelegramToken = Boolean(config.telegramBotToken?.trim()) && !telegramBotToken;
+  const hasTelegram = telegramBotToken != null;
   const feishuWsMode = config.feishuConnectionMode === 'websocket';
   const hasFeishu = Boolean(
     config.feishuAppId && config.feishuAppSecret && (feishuWsMode || config.feishuVerificationToken),
@@ -239,6 +249,9 @@ export async function startConnectorGateway(
 
   if (!hasTelegram && !hasFeishu && !hasDingTalk && !hasWeComBot && !hasWeComAgent && !hasWeixin && !hasXiaoyi) {
     log.info('[ConnectorGateway] No pre-configured connectors — gateway created for WeChat QR login support');
+  }
+  if (hasInvalidTelegramToken) {
+    log.warn('[ConnectorGateway] Invalid TELEGRAM_BOT_TOKEN format — Telegram connector disabled');
   }
 
   const bindingStore =
@@ -279,10 +292,9 @@ export async function startConnectorGateway(
     }
   }
 
-  // F142: build catRoster from config for /cats and /status display names + availability
-  // F142: build catRoster from CAT_CONFIGS (displayName) + roster (available)
+  // F142: build catRoster from catRegistry (.cat-cafe/cat-catalog.json)
   const catRoster = Object.fromEntries(
-    Object.entries(CAT_CONFIGS).map(([id, config]) => [
+    Object.entries(catRegistry.getAllConfigs()).map(([id, config]) => [
       id,
       { displayName: config.displayName, available: isCatAvailable(id) },
     ]),
@@ -335,8 +347,8 @@ export async function startConnectorGateway(
   });
 
   // ── Telegram (long polling) ──
-  if (hasTelegram) {
-    const telegram = new TelegramAdapter(config.telegramBotToken!, log);
+  if (telegramBotToken) {
+    const telegram = new TelegramAdapter(telegramBotToken, log);
     adapters.set('telegram', telegram);
 
     telegram.startPolling(async (msg) => {
@@ -672,12 +684,21 @@ export async function startConnectorGateway(
   }
 
   // ── WeCom Bot (WebSocket mode via @wecom/aibot-node-sdk) ──
-  if (hasWeComBot) {
-    const wecomBot = new WeComBotAdapter(log, {
-      botId: config.wecomBotId!,
-      secret: config.wecomBotSecret!,
-      redis: deps.redis,
-    });
+  // F132 Phase E: extracted into a function for dynamic start/stop (Hub guided setup)
+
+  let wecomBotStopFn: (() => Promise<void>) | null = null;
+
+  // P2 fix: register once — closure delegates to whatever wecomBotStopFn currently points to
+  stopFns.push(async () => wecomBotStopFn?.());
+
+  const startWeComBotStream = async (botId: string, secret: string) => {
+    // Stop existing adapter if running
+    if (wecomBotStopFn) {
+      await wecomBotStopFn();
+      wecomBotStopFn = null;
+    }
+
+    const wecomBot = new WeComBotAdapter(log, { botId, secret, redis: deps.redis });
     adapters.set('wecom-bot', wecomBot);
 
     await wecomBot.hydrateGroupChatIds();
@@ -696,7 +717,6 @@ export async function startConnectorGateway(
           ...(a.fileName ? { fileName: a.fileName } : {}),
         }));
 
-      // F132 B.2: Register group chatId so outbound dispatch survives cold restarts
       if (msg.chatType === 'group') {
         wecomBot.registerGroupChatId(msg.chatId);
       }
@@ -712,9 +732,24 @@ export async function startConnectorGateway(
       );
     });
 
-    stopFns.push(async () => wecomBot.stopStream());
+    wecomBotStopFn = async () => {
+      await wecomBot.stopStream();
+      adapters.delete('wecom-bot');
+    };
 
     log.info('[ConnectorGateway] WeCom Bot adapter started (WebSocket mode)');
+  };
+
+  const stopWeComBot = async () => {
+    if (wecomBotStopFn) {
+      await wecomBotStopFn();
+      wecomBotStopFn = null;
+      log.info('[ConnectorGateway] WeCom Bot adapter stopped');
+    }
+  };
+
+  if (hasWeComBot) {
+    await startWeComBotStream(config.wecomBotId!, config.wecomBotSecret!);
   }
 
   // ── WeCom Agent (HTTP callback via webhook) ──
@@ -838,7 +873,7 @@ export async function startConnectorGateway(
   stopFns.push(async () => weixin.stopPolling());
 
   // R3-P1: Resolve route URLs to local file paths for real media delivery
-  const uploadDir = resolve(process.env.UPLOAD_DIR ?? './uploads');
+  const uploadDir = getDefaultUploadDir(process.env.UPLOAD_DIR);
   const ttsCacheDir = resolve(process.env.TTS_CACHE_DIR ?? './data/tts-cache');
   const resolvedMediaDir = resolve(mediaDir);
   const webPublicDir = resolve(process.env.WEB_PUBLIC_DIR ?? '../web/public');
@@ -867,6 +902,12 @@ export async function startConnectorGateway(
     log,
     mediaPathResolver,
     messageLookup,
+    resolveVoiceBlocks: async (blocks, catId) => {
+      const { getVoiceBlockSynthesizer } = await import('../../domains/cats/services/tts/VoiceBlockSynthesizer.js');
+      const synth = getVoiceBlockSynthesizer();
+      if (!synth) throw new Error('VoiceBlockSynthesizer not initialized');
+      return synth.resolveVoiceBlocks(blocks, catId);
+    },
   });
 
   // Build streamable adapters map (only adapters with sendPlaceholder + editMessage)
@@ -900,6 +941,9 @@ export async function startConnectorGateway(
     weixinAdapter: weixin,
     permissionStore,
     startWeixinPolling,
+    startWeComBotStream,
+    stopWeComBot,
+    getWeComBotAdapter: () => (adapters.get('wecom-bot') as WeComBotAdapter) ?? null,
     async stop() {
       cleanupJob.stop();
       await Promise.allSettled(stopFns.map((fn) => fn()));

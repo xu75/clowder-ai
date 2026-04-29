@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useCatData } from '@/hooks/useCatData';
 import { useChatStore } from '@/stores/chatStore';
+import { useGuideStore } from '@/stores/guideStore';
 import { apiFetch } from '@/utils/api-client';
 import { BrakeSettingsPanel } from './BrakeSettingsPanel';
 import {
@@ -14,6 +15,7 @@ import {
   resolveRequestedHubTab,
 } from './cat-cafe-hub.navigation';
 import { CatOverviewTab, type ConfigData, SystemTab } from './config-viewer-tabs';
+import { HubAccountsTab } from './HubAccountsTab';
 import { HubCapabilityTab } from './HubCapabilityTab';
 import { HubCatEditor } from './HubCatEditor';
 import { HubClaudeRescueSection } from './HubClaudeRescueSection';
@@ -23,20 +25,45 @@ import { HubEnvFilesTab } from './HubEnvFilesTab';
 import { HubGovernanceTab } from './HubGovernanceTab';
 import { HubLeaderboardTab } from './HubLeaderboardTab';
 import { HubMemoryTab } from './HubMemoryTab';
-import { HubProviderProfilesTab } from './HubProviderProfilesTab';
+import { HubObservabilityTab } from './HubObservabilityTab';
 import { HubRoutingPolicyTab } from './HubRoutingPolicyTab';
 import { HubToolUsageTab } from './HubToolUsageTab';
+import { MarketplacePanel } from './marketplace/marketplace-panel';
 import { PushSettingsPanel } from './PushSettingsPanel';
+import { useConfirm } from './useConfirm';
 import { VoiceSettingsPanel } from './VoiceSettingsPanel';
 
 export type { HubTabId } from './cat-cafe-hub.navigation';
 export { findGroupForTab, resolveRequestedHubTab } from './cat-cafe-hub.navigation';
 
+/**
+ * Cloud Codex P1 #1403 (round 9 + 砚砚 P2): pure helper for the render-time
+ * state-sync key. Extracted so we can directly unit-test that the nonce
+ * participates — a top-level integration test is too heavy (CatCafeHub depends
+ * on >20 stores + tab components). Including subTabNonce makes openHub() with
+ * the same (tab, subTab) values still bump the key, forcing setTab() to fire
+ * after the user manually navigated away.
+ */
+export function computeHubSyncKey(
+  open: boolean,
+  normalizedRequestedTab: string | undefined,
+  subTabNonce: number | undefined,
+): string {
+  return open ? `open:${normalizedRequestedTab ?? ''}:${subTabNonce ?? ''}` : 'closed';
+}
+
 /* ─── Main Hub modal ─── */
 export function CatCafeHub() {
   const hubState = useChatStore((s) => s.hubState);
   const closeHub = useChatStore((s) => s.closeHub);
+  const guideActive = useGuideStore((s) => s.session !== null);
+  const activeGuideStep = useGuideStore((s) => {
+    const session = s.session;
+    if (!session || session.currentStepIndex >= session.flow.steps.length) return null;
+    return session.flow.steps[session.currentStepIndex];
+  });
   const { cats, getCatById, refresh } = useCatData();
+  const confirm = useConfirm();
 
   const open = hubState?.open ?? false;
   const rawRequestedTab = hubState?.tab as HubTabId | undefined;
@@ -55,8 +82,12 @@ export function CatCafeHub() {
 
   // P1 fix: Render-time state sync (React 18 "adjusting state on props change" pattern).
   // Avoids first-frame flash that useEffect would cause on deep-link opens.
+  // Cloud Codex P1 #1403 (round 9): include hubState.subTabNonce in syncKey so a
+  // repeated openHub('observability', 'callback-auth') after the user manually
+  // switched to another top-level tab still re-applies setTab(). Otherwise the
+  // value-only diff stayed at 'open:observability' and the click looked broken.
   const [lastSyncKey, setLastSyncKey] = useState('');
-  const syncKey = open ? `open:${normalizedRequestedTab ?? ''}` : 'closed';
+  const syncKey = computeHubSyncKey(open, normalizedRequestedTab, hubState?.subTabNonce);
   if (syncKey !== lastSyncKey) {
     setLastSyncKey(syncKey);
     if (open) {
@@ -77,9 +108,17 @@ export function CatCafeHub() {
     if (!isValid) setTab('cats');
   }, [open, tab]);
 
-  const toggleGroup = useCallback((groupId: string) => {
-    setExpandedGroup((prev) => (prev === groupId ? null : groupId));
-  }, []);
+  const toggleGroup = useCallback(
+    (groupId: string) => {
+      setExpandedGroup((prev) => {
+        const isGuideLockedToggle =
+          prev === groupId && activeGuideStep?.advance === 'click' && activeGuideStep.target === `${groupId}.group`;
+        if (isGuideLockedToggle) return prev;
+        return prev === groupId ? null : groupId;
+      });
+    },
+    [activeGuideStep],
+  );
 
   const selectTab = useCallback((tabId: HubTabId) => {
     setTab(tabId);
@@ -160,6 +199,30 @@ export function CatCafeHub() {
     [fetchData, refresh],
   );
 
+  const handleDeleteMember = useCallback(
+    async (cat: (typeof cats)[number]) => {
+      const ok = await confirm({
+        title: '删除确认',
+        message: `确认删除成员「${cat.displayName}」吗？此操作不可撤销。`,
+        variant: 'danger',
+        confirmLabel: '删除',
+      });
+      if (!ok) return;
+      try {
+        const res = await apiFetch(`/api/cats/${cat.id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const payload = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+          setFetchError((payload.error as string) ?? `删除失败 (${res.status})`);
+          return;
+        }
+        await Promise.all([fetchData(), refresh()]);
+      } catch {
+        setFetchError('删除失败');
+      }
+    },
+    [confirm, fetchData, refresh],
+  );
+
   useEffect(() => {
     if (open) fetchData();
   }, [open, fetchData]);
@@ -167,16 +230,21 @@ export function CatCafeHub() {
   useEffect(() => {
     if (!open) return;
     const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeHub();
+      // Skip Escape when guide overlay is active to prevent accidental exit (KD-14)
+      if (e.key === 'Escape' && !guideActive) closeHub();
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [open, closeHub]);
+  }, [open, closeHub, guideActive]);
 
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={closeHub}>
+    <div
+      className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
+      onClick={closeHub}
+      data-bootcamp-host="hub-modal"
+    >
       <div
         className="rounded-2xl shadow-xl max-w-4xl w-full mx-4 h-[85vh] flex flex-col"
         style={{ backgroundColor: '#FDF8F3' }}
@@ -186,10 +254,12 @@ export function CatCafeHub() {
         <div className="flex items-center justify-between px-5 pt-4 pb-3" style={{ flexShrink: 0 }}>
           <h2 className="text-base font-bold text-cafe">Cat Caf&eacute; Hub</h2>
           <button
+            type="button"
             onClick={closeHub}
             className="text-cafe-muted hover:text-cafe-secondary text-lg"
             title="关闭"
             aria-label="关闭"
+            data-guide-id="hub.close"
           >
             &times;
           </button>
@@ -227,6 +297,7 @@ export function CatCafeHub() {
                   onAddMember={openAddMember}
                   onEditCoCreator={openCoCreatorEditor}
                   onEditMember={openEditMember}
+                  onDeleteMember={handleDeleteMember}
                   onToggleAvailability={handleToggleAvailability}
                   togglingCatId={togglingCatId}
                 />
@@ -243,20 +314,28 @@ export function CatCafeHub() {
             {tab === 'routing' && <HubRoutingPolicyTab />}
             {tab === 'tool-usage' && <HubToolUsageTab />}
             {tab === 'env' && <HubEnvFilesTab />}
-            {tab === 'provider-profiles' && <HubProviderProfilesTab />}
+            {tab === 'accounts' && <HubAccountsTab />}
             {tab === 'voice' && <VoiceSettingsPanel />}
             {tab === 'notify' && <PushSettingsPanel />}
+            {tab === 'observability' && (
+              <HubObservabilityTab
+                initialSubTab={hubState?.subTab as 'overview' | 'traces' | 'health' | 'callback-auth' | undefined}
+                subTabNonce={hubState?.subTabNonce}
+              />
+            )}
             {tab === 'governance' && <HubGovernanceTab />}
             {tab === 'health' && <BrakeSettingsPanel />}
             {tab === 'memory' && <HubMemoryTab />}
             {tab === 'rescue' && <HubClaudeRescueSection />}
             {tab === 'leaderboard' && <HubLeaderboardTab />}
+            {tab === 'marketplace' && <MarketplacePanel />}
           </div>
         </div>
         <HubCatEditor
           open={editorOpen}
           cat={editingCat}
           draft={createDraft}
+          existingCats={cats}
           onClose={closeEditor}
           onSaved={handleEditorSaved}
         />

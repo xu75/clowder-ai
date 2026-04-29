@@ -32,6 +32,7 @@ export const HUB_GROUPS: HubGroup[] = [
       { id: 'routing', label: '配额看板', icon: 'chart-pie' },
       { id: 'tool-usage', label: '工具统计', icon: 'wrench' },
       { id: 'leaderboard', label: '排行榜', icon: 'trophy' },
+      { id: 'marketplace', label: '能力市场', icon: 'store' },
     ],
   },
   {
@@ -43,7 +44,7 @@ export const HUB_GROUPS: HubGroup[] = [
     tabs: [
       { id: 'system', label: '系统配置', icon: 'settings' },
       { id: 'env', label: '环境 & 文件', icon: 'folder' },
-      { id: 'provider-profiles', label: '账号配置', icon: 'user-cog' },
+      { id: 'accounts', label: '账号配置', icon: 'user-cog' },
       { id: 'voice', label: '语音设置', icon: 'mic' },
       { id: 'notify', label: '通知', icon: 'bell' },
     ],
@@ -53,8 +54,9 @@ export const HUB_GROUPS: HubGroup[] = [
     label: '监控与治理',
     icon: 'activity',
     color: '#5B9BD5',
-    preview: '治理 · 健康 · 记忆 · 救援 · 命令速查',
+    preview: '可观测 · 治理 · 健康 · 记忆 · 救援',
     tabs: [
+      { id: 'observability', label: '可观测性', icon: 'bar-chart' },
       { id: 'governance', label: '治理看板', icon: 'shield' },
       { id: 'health', label: '健康', icon: 'heart-pulse' },
       { id: 'memory', label: '记忆状态', icon: 'brain' },
@@ -93,8 +95,10 @@ export function AccordionSection({
   return (
     <div className="rounded-xl bg-cafe-surface shadow-[0_1px_8px_rgba(0,0,0,0.03)]">
       <button
+        type="button"
         onClick={onToggle}
         className="flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors hover:bg-cafe-surface-elevated/50"
+        data-guide-id={group.id === 'settings' ? 'settings.group' : undefined}
       >
         <span className="flex-shrink-0" style={{ color: group.color }}>
           <HubIcon name={group.icon} className="h-5 w-5" />
@@ -123,6 +127,9 @@ export function AccordionSection({
                 onClick={() => onSelectTab(tab.id)}
                 className="flex w-full items-center gap-3 rounded-lg px-4 py-2.5 text-left text-sm transition-colors"
                 style={isActive ? { backgroundColor: `${group.color}10`, color: group.color } : {}}
+                data-guide-id={
+                  tab.id === 'cats' ? 'cats.overview' : tab.id === 'accounts' ? 'settings.accounts' : undefined
+                }
               >
                 <span style={isActive ? { color: group.color } : { color: '#9ca3af' }}>
                   <HubIcon name={tab.icon} className="h-4 w-4" />

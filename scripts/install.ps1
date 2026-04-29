@@ -34,6 +34,58 @@ function Refresh-Path {
 
 function Resolve-PnpmCommand { Resolve-ToolCommand -Name "pnpm" }
 function Invoke-Pnpm { param([string[]]$CommandArgs) Invoke-ToolCommand -Name "pnpm" -CommandArgs $CommandArgs }
+function Get-CommandOutputText {
+    param([object[]]$OutputLines)
+    return (@($OutputLines) | ForEach-Object { "$_" }) -join "`n"
+}
+function Test-PuppeteerBrowserDownloadFailure {
+    param([string]$OutputText)
+    return $OutputText -match "puppeteer" -and
+        ($OutputText -match "Failed to set up chrome" -or $OutputText -match "PUPPETEER_SKIP_DOWNLOAD")
+}
+function Write-PuppeteerSkipWarning {
+    Write-Warn "Bundled Chrome download failed - skipped"
+    Write-Warn "Thread export / screenshot may be unavailable. To install later: npx puppeteer browsers install chrome"
+}
+function Invoke-PnpmInstallWithCapturedOutput {
+    param(
+        [string[]]$CommandArgs,
+        [switch]$SkipPuppeteerDownload
+    )
+
+    $capturedOutput = @()
+    $hadPreviousSkip = Test-Path Env:PUPPETEER_SKIP_DOWNLOAD
+    $previousSkipValue = if ($hadPreviousSkip) { $env:PUPPETEER_SKIP_DOWNLOAD } else { $null }
+
+    try {
+        if ($SkipPuppeteerDownload) {
+            $env:PUPPETEER_SKIP_DOWNLOAD = "1"
+        } elseif (-not $hadPreviousSkip) {
+            Remove-Item Env:PUPPETEER_SKIP_DOWNLOAD -ErrorAction SilentlyContinue
+        }
+
+        try {
+            Invoke-Pnpm -CommandArgs $CommandArgs 2>&1 | Tee-Object -Variable capturedOutput
+            return [pscustomobject]@{
+                Ok = $LASTEXITCODE -eq 0
+                ErrorRecord = $null
+                OutputText = Get-CommandOutputText -OutputLines $capturedOutput
+            }
+        } catch {
+            return [pscustomobject]@{
+                Ok = $false
+                ErrorRecord = $_
+                OutputText = Get-CommandOutputText -OutputLines ($capturedOutput + @($_))
+            }
+        }
+    } finally {
+        if ($hadPreviousSkip) {
+            $env:PUPPETEER_SKIP_DOWNLOAD = $previousSkipValue
+        } else {
+            Remove-Item Env:PUPPETEER_SKIP_DOWNLOAD -ErrorAction SilentlyContinue
+        }
+    }
+}
 function Test-InstallerCancellation {
     param($ErrorRecord)
     if (-not $ErrorRecord -or -not $ErrorRecord.Exception) {
@@ -301,19 +353,24 @@ if (Test-Path $envFile) {
 Write-Step "Step 5/9 - Install dependencies and build"
 
 Write-Host "  Running pnpm install..."
-$frozenInstallOk = $false
-$frozenInstallError = $null
-try {
-    Invoke-Pnpm -CommandArgs @("install", "--frozen-lockfile") 2>$null
-    $frozenInstallOk = $LASTEXITCODE -eq 0
-} catch {
-    $frozenInstallError = $_
+$frozenInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs @("install", "--frozen-lockfile")
+if (-not $frozenInstallResult.Ok -and (Test-PuppeteerBrowserDownloadFailure -OutputText $frozenInstallResult.OutputText)) {
+    Write-PuppeteerSkipWarning
+    $frozenInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs @("install", "--frozen-lockfile") -SkipPuppeteerDownload
 }
-if (-not $frozenInstallOk) {
-    Exit-InstallerIfCancelled -ErrorRecord $frozenInstallError -Context "pnpm install"
+if (-not $frozenInstallResult.Ok) {
+    Exit-InstallerIfCancelled -ErrorRecord $frozenInstallResult.ErrorRecord -Context "pnpm install"
     Write-Warn "Frozen lockfile failed, retrying..."
-    Invoke-Pnpm -CommandArgs @("install")
-    if ($LASTEXITCODE -ne 0) { Write-Err "pnpm install failed"; exit 1 }
+    $plainInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs @("install")
+    if (-not $plainInstallResult.Ok -and (Test-PuppeteerBrowserDownloadFailure -OutputText $plainInstallResult.OutputText)) {
+        Write-PuppeteerSkipWarning
+        $plainInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs @("install") -SkipPuppeteerDownload
+    }
+    if (-not $plainInstallResult.Ok) {
+        Exit-InstallerIfCancelled -ErrorRecord $plainInstallResult.ErrorRecord -Context "pnpm install"
+        Write-Err "pnpm install failed"
+        exit 1
+    }
 }
 Write-Ok "Dependencies installed"
 
@@ -344,7 +401,8 @@ Write-Step "Step 7/9 - AI CLI tools"
 $cliTools = @(
     @{ Name = "Claude"; Label = "Claude"; Cmd = "claude"; Pkg = "@anthropic-ai/claude-code" },
     @{ Name = "Codex"; Label = "Codex"; Cmd = "codex"; Pkg = "@openai/codex" },
-    @{ Name = "Gemini"; Label = "Gemini"; Cmd = "gemini"; Pkg = "@google/gemini-cli" }
+    @{ Name = "Gemini"; Label = "Gemini"; Cmd = "gemini"; Pkg = "@google/gemini-cli" },
+    @{ Name = "Kimi"; Label = "Kimi"; Cmd = "kimi"; Pkg = "kimi-cli"; InstallKind = "python" }
 )
 
 if (-not $SkipCli) {
@@ -352,6 +410,7 @@ if (-not $SkipCli) {
     $toolsToInstall = if ($missingTools.Count -gt 0 -and [Environment]::UserInteractive -and -not $env:CI) {
         Select-InstallerMultiChoice -Title "Missing agent CLIs" -Prompt "Choose which agent CLIs to install" -Options $missingTools
     } else { $missingTools }
+    $selectedCliCommands = @($toolsToInstall | ForEach-Object { $_.Cmd })
     $npmInstallCommand = Resolve-ToolCommand -Name "npm"
     foreach ($tool in $cliTools) {
         $installed = $null -ne (Resolve-ToolCommand -Name $tool.Cmd)
@@ -362,8 +421,20 @@ if (-not $SkipCli) {
         } else {
             Write-Host "  Installing $($tool.Name) CLI..."
             try {
-                if (-not $npmInstallCommand) { throw "npm command not found" }
-                & $npmInstallCommand install -g $tool.Pkg 2>$null
+                if ($tool.InstallKind -eq "python") {
+                    $uvCommand = Resolve-ToolCommand -Name "uv"
+                    if ($uvCommand) {
+                        & $uvCommand tool install --python 3.13 $tool.Pkg 2>$null
+                    } else {
+                        $pythonCommand = Resolve-ToolCommand -Name "python"
+                        if (-not $pythonCommand) { $pythonCommand = Resolve-ToolCommand -Name "py" }
+                        if (-not $pythonCommand) { throw "python command not found" }
+                        & $pythonCommand -m pip install --user --upgrade $tool.Pkg 2>$null
+                    }
+                } else {
+                    if (-not $npmInstallCommand) { throw "npm command not found" }
+                    & $npmInstallCommand install -g $tool.Pkg 2>$null
+                }
                 if (Resolve-ToolCommandWithRetry -Name $tool.Cmd -Attempts 6) {
                     Write-Ok "$($tool.Name) CLI installed"
                 } else {
@@ -378,16 +449,18 @@ if (-not $SkipCli) {
     }
 } else {
     Write-Warn "CLI tools install skipped (-SkipCli)"
+    $selectedCliCommands = @()
 }
 
 Write-Step "Step 8/9 - Auth config"
-Configure-InstallerAuth -ProjectRoot $ProjectRoot -State $authState
+Configure-InstallerAuth -ProjectRoot $ProjectRoot -State $authState -SelectedCliCommands $selectedCliCommands
 
 Apply-InstallerAuthEnv -State $authState -EnvFile $envFile
 
 $hasClaude = $null -ne (Resolve-ToolCommandWithRetry -Name "claude" -Attempts 6)
 $hasCodex = $null -ne (Resolve-ToolCommandWithRetry -Name "codex" -Attempts 6)
 $hasGemini = $null -ne (Resolve-ToolCommandWithRetry -Name "gemini" -Attempts 6)
+$hasKimi = $null -ne (Resolve-ToolCommandWithRetry -Name "kimi" -Attempts 6)
 
 Write-Step "Step 9/9 - Verify and launch"
 
@@ -414,6 +487,7 @@ Write-Host "  Redis:   $(if ($hasRedis) { 'available' } else { 'not configured' 
 Write-Host "  Claude:  $(if ($hasClaude) { 'ready' } else { 'not installed' })"
 Write-Host "  Codex:   $(if ($hasCodex) { 'ready' } else { 'not installed' })"
 Write-Host "  Gemini:  $(if ($hasGemini) { 'ready' } else { 'not installed' })"
+Write-Host "  Kimi:    $(if ($hasKimi) { 'ready' } else { 'not installed' })"
 Write-Host ""
 Write-Host "  Start the app:" -ForegroundColor Cyan
 $startCmd = ".\scripts\start-windows.ps1"

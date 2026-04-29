@@ -19,7 +19,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type CatId, createCatId } from '@cat-cafe/shared';
-import { getCatEffort } from '../../../../../config/cat-config-loader.js';
+import { getCatContextWindowConfig, getCatEffort } from '../../../../../config/cat-config-loader.js';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { getCodexApprovalPolicy, getCodexSandboxMode } from '../../../../../config/codex-cli.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
@@ -33,6 +33,7 @@ import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata, 
 import type { AuditLogSink, RawArchiveSink } from '../providers/codex-audit-hooks.js';
 import { extractCommandExecutionLifecycle, sanitizeRawEvent } from '../providers/codex-audit-hooks.js';
 import { type CodexStreamState, transformCodexEvent } from '../providers/codex-event-transform.js';
+import { scanAndPublishCodexImages } from '../providers/codex-image-scanner.js';
 import {
   type CodexSessionContextSnapshotResolver,
   createCodexSessionContextSnapshotResolver,
@@ -58,6 +59,8 @@ interface CodexAgentServiceOptions {
   rawArchive?: RawArchiveSink;
   /** Inject session context resolver (for testing) */
   contextSnapshotResolver?: CodexSessionContextSnapshotResolver;
+  /** Override executable name/path for Codex-family CLIs. */
+  cliCommand?: string;
 }
 
 type CodexAuthMode = 'oauth' | 'api_key' | 'auto';
@@ -232,6 +235,7 @@ export class CodexAgentService implements AgentService {
   private readonly auditLog: AuditLogSink;
   private readonly rawArchive: RawArchiveSink;
   private readonly contextSnapshotResolver: CodexSessionContextSnapshotResolver;
+  private readonly cliCommand: string;
 
   constructor(options?: CodexAgentServiceOptions) {
     this.catId = options?.catId ?? createCatId('codex');
@@ -240,6 +244,7 @@ export class CodexAgentService implements AgentService {
     this.auditLog = options?.auditLog ?? getEventAuditLog();
     this.rawArchive = options?.rawArchive ?? new CliRawArchive();
     this.contextSnapshotResolver = options?.contextSnapshotResolver ?? createCodexSessionContextSnapshotResolver();
+    this.cliCommand = options?.cliCommand ?? 'codex';
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
@@ -254,11 +259,32 @@ export class CodexAgentService implements AgentService {
     const effortLevel = getCatEffort(this.catId as string, undefined, 'openai');
     const reasoningArgs = ['--config', `model_reasoning_effort="${effortLevel}"`];
     const approvalArgs = ['--config', `approval_policy="${approvalPolicy}"`];
+    const ctxConfig = getCatContextWindowConfig(this.catId as string);
+    const contextWindowArgs: string[] = ctxConfig
+      ? [
+          '--config',
+          `model_context_window=${ctxConfig.contextWindow}`,
+          '--config',
+          `model_auto_compact_token_limit=${ctxConfig.autoCompactTokenLimit}`,
+        ]
+      : [];
     const catCafeMcpArgs = buildCatCafeMcpConfigArgs(options?.workingDirectory, options?.callbackEnv);
     const gitRepoArgs = buildGitRepoArgs(options?.workingDirectory);
-    // User-defined CLI args from the member editor — passed as-is, no implicit wrapping.
+    // User-defined CLI args from the member editor (#567) — passed as-is, no implicit wrapping.
     // Each entry is split by whitespace (e.g. "--config model_reasoning_effort=\"low\"").
     const userConfigArgs = (options?.cliConfigArgs ?? []).flatMap((arg) => arg.trim().split(/\s+/));
+    // Collect user --config keys so system-injected duplicates can be skipped.
+    const userConfigKeys = new Set<string>();
+    const userFlagSet = new Set<string>();
+    for (let i = 0; i < userConfigArgs.length; i++) {
+      const a = userConfigArgs[i];
+      if (a === '--config' && i + 1 < userConfigArgs.length) {
+        const key = userConfigArgs[i + 1].split('=')[0];
+        if (key) userConfigKeys.add(key);
+      } else if (a.startsWith('-')) {
+        userFlagSet.add(a);
+      }
+    }
 
     // Codex CLI deprecated OPENAI_BASE_URL env var.
     // Configure a custom model provider via --config model_providers.*
@@ -266,7 +292,13 @@ export class CodexAgentService implements AgentService {
     //   - env_key: env var name for the API key
     //   - base_url: API endpoint
     //   - wire_api: "responses" (HTTP, the only supported value)
-    const customBaseUrl = options?.callbackEnv?.OPENAI_BASE_URL ?? options?.callbackEnv?.OPENAI_API_BASE;
+    // Check both callbackEnv and accountEnv — after F171 env separation,
+    // user-configured OPENAI_BASE_URL lives in accountEnv, not callbackEnv.
+    const customBaseUrl =
+      options?.callbackEnv?.OPENAI_BASE_URL ??
+      options?.callbackEnv?.OPENAI_API_BASE ??
+      options?.accountEnv?.OPENAI_BASE_URL ??
+      options?.accountEnv?.OPENAI_API_BASE;
     const customProviderArgs: string[] = customBaseUrl
       ? [
           '--config',
@@ -288,7 +320,11 @@ export class CodexAgentService implements AgentService {
     // Use --config model=... instead of --model to bypass the CLI's built-in metadata lookup
     // for custom providers (non-builtin models trigger a cosmetic warning via --model).
     const cliModel = effectiveModel;
-    const modelArgs: string[] = customBaseUrl ? ['--config', `model=${toTomlString(cliModel)}`] : ['--model', cliModel];
+    const modelArgs: string[] = !cliModel
+      ? []
+      : customBaseUrl
+        ? ['--config', `model=${toTomlString(cliModel)}`]
+        : ['--model', cliModel];
 
     // resume 子命令不接受 --sandbox（sandbox 在创建时已锁定）
     // --add-dir .git: 允许写入 .git/ 目录（index.lock、objects、refs），解锁 git commit
@@ -296,16 +332,36 @@ export class CodexAgentService implements AgentService {
     // 这是预期行为——新建会话即可获得 .git 写入权限。
     const promptArgs = ['--', effectivePrompt];
 
+    // Dedup: skip system --config/--flag pairs that the user explicitly overrides (#567).
+    const dedup = (src: string[]): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < src.length; i++) {
+        if (src[i] === '--config' && i + 1 < src.length) {
+          const key = src[i + 1].split('=')[0];
+          if (userConfigKeys.has(key)) {
+            i++;
+            continue;
+          }
+        } else if (src[i].startsWith('-') && userFlagSet.has(src[i])) {
+          if (i + 1 < src.length && !src[i + 1].startsWith('-')) i++;
+          continue;
+        }
+        out.push(src[i]);
+      }
+      return out;
+    };
+
     const args: string[] = options?.sessionId
       ? [
           'exec',
           'resume',
           options.sessionId,
           '--json',
-          ...modelArgs,
-          ...reasoningArgs,
-          ...approvalArgs,
-          ...customProviderArgs,
+          ...dedup(modelArgs),
+          ...dedup(reasoningArgs),
+          ...dedup(contextWindowArgs),
+          ...dedup(approvalArgs),
+          ...dedup(customProviderArgs),
           ...userConfigArgs,
           ...gitRepoArgs,
           ...catCafeMcpArgs,
@@ -315,14 +371,15 @@ export class CodexAgentService implements AgentService {
       : [
           'exec',
           '--json',
-          ...modelArgs,
-          ...reasoningArgs,
+          ...dedup(modelArgs),
+          ...dedup(reasoningArgs),
+          ...dedup(contextWindowArgs),
           '--sandbox',
           sandboxMode,
           '--add-dir',
           '.git',
-          ...approvalArgs,
-          ...customProviderArgs,
+          ...dedup(approvalArgs),
+          ...dedup(customProviderArgs),
           ...userConfigArgs,
           ...gitRepoArgs,
           ...catCafeMcpArgs,
@@ -358,15 +415,24 @@ export class CodexAgentService implements AgentService {
         }
       }
       const codexEnv = applyAuthMode(rawEnv, authMode);
+      // F171: Account env vars applied LAST — user overrides provider-injected values.
+      // Strip OPENAI_BASE_URL/OPENAI_API_BASE if already consumed via --config model_providers
+      // to prevent the deprecated env var from conflicting with the CLI config.
+      if (options?.accountEnv) {
+        for (const [k, v] of Object.entries(options.accountEnv)) {
+          if (customBaseUrl && (k === 'OPENAI_BASE_URL' || k === 'OPENAI_API_BASE')) continue;
+          codexEnv[k] = v;
+        }
+      }
 
       const semanticCompletionController = new AbortController();
 
-      const codexCommand = resolveCliCommand('codex');
+      const codexCommand = resolveCliCommand(this.cliCommand);
       if (!codexCommand) {
         yield {
           type: 'error' as const,
           catId: this.catId,
-          error: formatCliNotFoundError('codex'),
+          error: formatCliNotFoundError(this.cliCommand),
           metadata,
           timestamp: Date.now(),
         };
@@ -402,6 +468,7 @@ export class CodexAgentService implements AgentService {
           ? { rawArchivePath: this.rawArchive.getPath(options.invocationId) }
           : {}),
         ...(options?.livenessProbe ? { livenessProbe: options.livenessProbe } : {}),
+        ...(options?.parentSpan ? { parentSpan: options.parentSpan } : {}),
         semanticCompletionSignal: semanticCompletionController.signal,
       };
       const events = options?.spawnCliOverride
@@ -623,6 +690,28 @@ export class CodexAgentService implements AgentService {
             },
             '[codex] failed to resolve session context snapshot',
           );
+        }
+      }
+
+      // F172 Phase B: Scan for generated images and publish to /uploads/
+      if (metadata.sessionId) {
+        try {
+          const published = await scanAndPublishCodexImages({
+            codexSessionId: metadata.sessionId,
+            uploadDir: options?.uploadDir,
+            codexHome: rawEnv.HOME ? join(rawEnv.HOME, '.codex') : undefined,
+          });
+          for (const img of published) {
+            yield {
+              type: 'system_info' as const,
+              catId: this.catId,
+              content: JSON.stringify({ type: 'rich_block', block: img.richBlock, provenance: img.provenance }),
+              metadata,
+              timestamp: Date.now(),
+            };
+          }
+        } catch (err) {
+          log.warn({ sessionId: metadata.sessionId, err }, '[F172] codex image scan failed');
         }
       }
 

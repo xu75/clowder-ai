@@ -19,12 +19,14 @@ export {
   crossPostMessageInputSchema,
   featIndexInputSchema,
   getPendingMentionsInputSchema,
+  getThreadCatsInputSchema,
   getThreadContextInputSchema,
   handleAckMentions,
   handleCheckPermissionStatus,
   handleCrossPostMessage,
   handleFeatIndex,
   handleGetPendingMentions,
+  handleGetThreadCats,
   handleGetThreadContext,
   handleListTasks,
   handleListThreads,
@@ -40,6 +42,15 @@ export {
   updateTaskInputSchema,
 } from './callback-tools.js';
 
+export {
+  distillationTools,
+  handleMarkGeneralizable,
+  handleNominateForGlobal,
+  handleReviewDistillation,
+  markGeneralizableInputSchema,
+  nominateForGlobalInputSchema,
+  reviewDistillationInputSchema,
+} from './distillation-tools.js';
 export {
   evidenceTools,
   handleSearchEvidence,
@@ -91,6 +102,13 @@ export {
   sessionChainTools,
   sessionSearchInputSchema,
 } from './session-chain-tools.js';
+export {
+  getShellExecRefusalReason,
+  handleShellExec,
+  isReadOnlyShellCommand,
+  shellExecInputSchema,
+  shellTools,
+} from './shell-tools.js';
 export { signalStudyTools } from './signal-study-tools.js';
 export {
   handleSignalGetArticle,

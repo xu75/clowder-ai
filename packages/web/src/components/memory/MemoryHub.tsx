@@ -3,19 +3,21 @@
 import React from 'react';
 import { KnowledgeFeed } from '../workspace/KnowledgeFeed';
 import { EvidenceSearch } from './EvidenceSearch';
+import { HealthReport } from './HealthReport';
 import { IndexStatus } from './IndexStatus';
 import { MemoryNav, type MemoryTab } from './MemoryNav';
 
 interface MemoryHubProps {
   readonly activeTab?: MemoryTab;
   readonly initialQuery?: string;
+  readonly initialReferrerThread?: string | null;
 }
 
-export function MemoryHub({ activeTab = 'feed', initialQuery }: MemoryHubProps) {
+export function MemoryHub({ activeTab = 'feed', initialQuery, initialReferrerThread = null }: MemoryHubProps) {
   return (
     <div className="flex h-full flex-col bg-cafe-surface" data-testid="memory-hub">
       <header className="flex items-center gap-3 border-b border-cafe px-4 py-3">
-        <MemoryNav active={activeTab} />
+        <MemoryNav active={activeTab} initialReferrerThread={initialReferrerThread} />
       </header>
 
       <main className="flex-1 overflow-y-auto p-4">
@@ -32,6 +34,11 @@ export function MemoryHub({ activeTab = 'feed', initialQuery }: MemoryHubProps) 
         {activeTab === 'status' && (
           <div data-testid="memory-tab-status">
             <IndexStatus />
+          </div>
+        )}
+        {activeTab === 'health' && (
+          <div data-testid="memory-tab-health">
+            <HealthReport />
           </div>
         )}
       </main>

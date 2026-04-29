@@ -71,6 +71,18 @@ Clowder is model-agnostic. Each agent CLI plugs in via a unified output adapter:
 
 ## Quick Start
 
+### Option A: Desktop Installer (Recommended)
+
+If a desktop release asset is available on the [Releases page](https://github.com/zts212653/clowder-ai/releases), use it first:
+
+- **Windows**: download the `.exe` installer, run it, then launch Clowder AI from the desktop shortcut or Start menu.
+- **macOS**: download the `.dmg`, drag the app to Applications, then open it. If macOS blocks the unsigned app on first launch, right-click the app and choose **Open**.
+- **Linux**: no desktop installer yet. Use the source setup below or the one-line Linux installer.
+
+The desktop installer bundles the app runtime, portable Node.js, and Redis, so regular users do **not** need to run `pnpm install` or `pnpm build`. After launch, open **Hub → System Settings → Account Configuration** to connect your model providers and CLI accounts.
+
+### Option B: Source Setup
+
 **Prerequisites:** [Node.js 20+](https://nodejs.org/) · [pnpm 9+](https://pnpm.io/) · [Redis 7+](https://redis.io/) *(optional — use `--memory` to skip)* · Git
 
 ```bash
@@ -104,9 +116,9 @@ Open `http://localhost:3003` → go to **Hub → System Settings → Account Con
 
 > **One-line alternative (Linux):** `bash scripts/install.sh` handles Node, pnpm, Redis, dependencies, `.env`, and first launch in one step. Options: `--start` (auto-start), `--memory` (skip Redis), `--registry=URL` (custom npm mirror). On **Windows**, use `scripts/install.ps1` then `scripts/start-windows.ps1`.
 
-**Full setup guide** (API keys, CLI auth, voice, Feishu/Telegram, troubleshooting): **[SETUP.opensource.md](SETUP.opensource.md)**
+**Full setup guide** (API keys, CLI auth, voice, Feishu/Telegram, troubleshooting): **[SETUP.md](SETUP.md)**
 
-> **Want to stay on a specific version?** See [Running a Specific Version](SETUP.opensource.md#running-a-specific-version-without-auto-update) in the setup guide.
+> **Want to stay on a specific version?** See [Running a Specific Version](SETUP.md#running-a-specific-version-without-auto-update) in the setup guide.
 
 > **CVO Bootcamp is live!** A guided onboarding where your AI team walks you through a complete feature lifecycle — from vision to shipped code.
 
@@ -417,7 +429,7 @@ We're not building tools. We're building homes.
 
 - **[Tutorials](https://github.com/zts212653/cat-cafe-tutorials)** — Step-by-step guides for building with Clowder AI
 - **[SETUP.md](SETUP.md)** — Full installation and configuration guide
-- **[Third-Party AI Provider Guide](docs/guides/provider-configuration.md)** — Configure Kimi, GLM, MiniMax, Qwen, OpenRouter, and other providers
+- **[Third-Party AI Provider Guide](SETUP.md#model-access-ui)** — Configure Kimi, GLM, MiniMax, Qwen, OpenRouter, and other providers
 - **[Tips](docs/TIPS.md)** — Magic words, @mentions, voice companion, and other usage tips
 - **[docs/](docs/)** — Architecture decisions, feature specs, and lessons learned
 

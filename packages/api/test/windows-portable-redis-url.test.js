@@ -34,8 +34,9 @@ test('Windows installer headless Redis planning respects existing external Redis
   assert.match(uiHelpersScript, /Mode = "external"; RedisUrl = \$defaultRedisUrl/);
   assert.match(
     uiHelpersScript,
-    /if \(Test-InstallerConsoleUi\) \{ Read-Host " {2}External Redis URL" \} else \{ \$defaultRedisUrl \}/,
+    /if \(\$mode -eq "external"\) \{\s+if \(Test-InstallerConsoleUi\) \{\s+while \(-not \$redisUrl\) \{\s+\$redisUrl = \(Read-Host " {2}External Redis URL"\)\.Trim\(\)/s,
   );
+  assert.match(uiHelpersScript, /\} else \{\s+\$redisUrl = \$defaultRedisUrl\s+\}/);
 });
 
 test('Windows installer headless rerun preserves local authenticated Redis URL via keep_local mode', () => {
@@ -71,6 +72,16 @@ test('Windows installer validates external Redis URLs before persisting them', (
   assert.match(
     uiHelpersScript,
     /if \(\$Plan\.Mode -eq "external"\) \{\s+\$redisValidationError = Get-InstallerExternalRedisValidationError -RedisUrl \$Plan\.RedisUrl\s+if \(\$redisValidationError\) \{\s+Write-Warn \$redisValidationError\s+return \$false\s+\}\s+\}/s,
+  );
+});
+
+test('Windows installer does not silently fall back to portable Redis when external URL is blank', () => {
+  assert.match(uiHelpersScript, /while \(-not \$redisUrl\) \{/);
+  assert.match(uiHelpersScript, /Write-Warn "External Redis URL is required when you choose external Redis\."/);
+  assert.doesNotMatch(uiHelpersScript, /External Redis URL empty - using local Redis setup/);
+  assert.doesNotMatch(
+    uiHelpersScript,
+    /if \(\$mode -eq "external" -and -not \$redisUrl\) \{\s+Write-Warn .*?\s+\$mode = "portable"\s+\}/s,
   );
 });
 
@@ -201,6 +212,8 @@ test('Windows startup passes localhost REDIS_URL auth into redis-server auto-sta
     startWindowsScript,
     /Get-RedisServerAuthArgs -RedisUrl \$configuredRedisUrl -AclFilePath \$redisAclFile/,
   );
+  assert.match(startWindowsScript, /Start-Job -Name "redis-bootstrap"/);
+  assert.match(startWindowsScript, /& \$launcherPath @launcherArgs 2>&1/);
 
   const pingMatches = startWindowsScript.match(
     /\$redisPing = & \$redisCliPath -p \$RedisPort @redisAuthArgs ping 2>\$null/g,

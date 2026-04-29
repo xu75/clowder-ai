@@ -17,14 +17,14 @@
 #   ./scripts/start-dev.sh --status   — 查看 daemon 状态
 #   ./scripts/start-dev.sh --profile=dev          — 家里开发默认值 (proxy ON, sidecar ON)
 #   ./scripts/start-dev.sh --profile=production   — 日常生产 (proxy OFF, sidecar OFF, TTL=永久)
-#   ./scripts/start-dev.sh --profile=opensource   — 开源演示 (proxy OFF, sidecar OFF, TTL=1天)
+#   ./scripts/start-dev.sh --profile=opensource   — 开源演示 (proxy OFF, sidecar OFF, TTL=永久)
 #   ./scripts/start-dev.sh -- --npm-registry=URL --pip-index-url=URL --hf-endpoint=URL
 #                                               — 显式指定安装/模型下载镜像（仅手动 override）
 #
 # Profile 说明:
 #   dev        — proxy ON, ASR/TTS/LLM ON, TTL=永久, redis-dev
 #   production — proxy OFF, ASR/TTS/LLM OFF, TTL=永久, redis-opensource (日常生产)
-#   opensource — proxy OFF, ASR/TTS/LLM OFF, TTL=86400s, redis-opensource (开源演示)
+#   opensource — proxy OFF, ASR/TTS/LLM OFF, TTL=永久, redis-opensource (开源演示)
 #   (无)       — 保持原有行为（各项 ENABLED 默认 0）
 #
 # .env 中的显式值覆盖 profile 默认值。启动摘要标注每个值的来源。
@@ -83,7 +83,13 @@ for arg in "$@"; do
 done
 
 # 加载环境变量 (放最前面，后续函数需要端口号)
-# 默认读取 .env；.env.local 仅用于 DARE 相关白名单键，避免全量覆盖引发配置漂移。
+# 优先级 (#603 .local convention):
+#   .env.local source 后覆盖 .env 同名键。
+#   对于 managed startup keys（端口等）：
+#     默认模式: CLI env > .env.local > .env（CLI 值在 source 后恢复）
+#     RESPECT_DOTENV_PORTS 模式: .env.local > .env（CLI 端口值不恢复）
+#   对于其他键: .env.local > .env（无 CLI 恢复机制）
+#   安全注意: .env.local 全量 source，不再限于 DARE 白名单。
 CLI_FRONTEND_PORT_OVERRIDE="${FRONTEND_PORT-}"
 CLI_API_SERVER_PORT_OVERRIDE="${API_SERVER_PORT-}"
 CLI_REDIS_PORT_OVERRIDE="${REDIS_PORT-}"
@@ -95,7 +101,6 @@ CLI_ANTHROPIC_PROXY_PORT_OVERRIDE="${ANTHROPIC_PROXY_PORT-}"
 CLI_WHISPER_PORT_OVERRIDE="${WHISPER_PORT-}"
 CLI_TTS_PORT_OVERRIDE="${TTS_PORT-}"
 CLI_LLM_POSTPROCESS_PORT_OVERRIDE="${LLM_POSTPROCESS_PORT-}"
-PREFER_DOTENV_PORTS="${CAT_CAFE_RESPECT_DOTENV_PORTS:-0}"
 
 clear_inherited_profile_env() {
     [ "${CAT_CAFE_STRICT_PROFILE_DEFAULTS:-0}" = "1" ] || return 0
@@ -115,6 +120,14 @@ if [ -f .env ]; then
     source .env
     set +a
 fi
+
+if [ -f .env.local ]; then
+    set -a
+    source .env.local
+    set +a
+fi
+
+PREFER_DOTENV_PORTS="${CAT_CAFE_RESPECT_DOTENV_PORTS:-0}"
 
 restore_cli_override() {
     local name="$1"
@@ -137,33 +150,6 @@ if [ "$PREFER_DOTENV_PORTS" != "1" ]; then
     restore_cli_override "LLM_POSTPROCESS_PORT" "$CLI_LLM_POSTPROCESS_PORT_OVERRIDE"
 fi
 
-load_dare_env_from_local() {
-    local env_file=".env.local"
-    [ -f "$env_file" ] || return 0
-
-    local key raw value
-    for key in \
-        DARE_PATH \
-        DARE_ADAPTER \
-        DARE_API_KEY \
-        DARE_ENDPOINT \
-        OPENROUTER_API_KEY \
-        OPENROUTER_BASE_URL \
-        OPENAI_API_KEY \
-        OPENAI_BASE_URL \
-        ANTHROPIC_API_KEY \
-        ANTHROPIC_BASE_URL; do
-        raw=$(grep -E "^${key}=" "$env_file" | tail -n1 || true)
-        [ -n "$raw" ] || continue
-        value="${raw#*=}"
-        # 去掉包裹引号（兼容 key="value" / key='value'）
-        value="${value%\"}"; value="${value#\"}"
-        value="${value%\'}"; value="${value#\'}"
-        export "$key=$value"
-    done
-}
-
-load_dare_env_from_local
 apply_manual_download_source_overrides
 
 default_redis_port() {
@@ -225,10 +211,10 @@ apply_profile_defaults() {
             _PROF_ASR_ENABLED=0
             _PROF_TTS_ENABLED=0
             _PROF_LLM_POSTPROCESS_ENABLED=0
-            _PROF_MESSAGE_TTL_SECONDS=86400
-            _PROF_THREAD_TTL_SECONDS=86400
-            _PROF_TASK_TTL_SECONDS=86400
-            _PROF_SUMMARY_TTL_SECONDS=86400
+            _PROF_MESSAGE_TTL_SECONDS=0
+            _PROF_THREAD_TTL_SECONDS=0
+            _PROF_TASK_TTL_SECONDS=0
+            _PROF_SUMMARY_TTL_SECONDS=0
             _PROF_REDIS_PROFILE=opensource
             ;;
         "")
@@ -265,6 +251,7 @@ print_config_summary() {
     echo "  配置来源："
     local key src_var val source
     for key in ANTHROPIC_PROXY_ENABLED ASR_ENABLED TTS_ENABLED LLM_POSTPROCESS_ENABLED \
+               EMBED_ENABLED \
                MESSAGE_TTL_SECONDS THREAD_TTL_SECONDS TASK_TTL_SECONDS SUMMARY_TTL_SECONDS \
                REDIS_PROFILE; do
         val="${!key}"
@@ -301,6 +288,27 @@ resolve_config "REDIS_PROFILE"
 : "${TASK_TTL_SECONDS:=0}"
 : "${SUMMARY_TTL_SECONDS:=0}"
 : "${REDIS_PROFILE:=dev}"
+
+derive_embed_enabled() {
+    local explicit="${EMBED_ENABLED-}"
+    local mode="${EMBED_MODE:-off}"
+    if [ -n "$explicit" ]; then
+        _SRC_EMBED_ENABLED="env/.env override"
+        return
+    fi
+
+    case "$mode" in
+        on|shadow)
+            EMBED_ENABLED=1
+            ;;
+        *)
+            EMBED_ENABLED=0
+            ;;
+    esac
+    _SRC_EMBED_ENABLED="derived from EMBED_MODE=${mode}"
+}
+
+derive_embed_enabled
 
 default_redis_storage_key() {
     local profile="${1:-$REDIS_PROFILE}"
@@ -423,6 +431,68 @@ port_listen_pids() {
     return 1
 }
 
+pid_cwd() {
+    local pid=$1
+    local cwd=""
+
+    if [ -L "/proc/$pid/cwd" ]; then
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+    fi
+
+    if [ -z "$cwd" ] && command -v lsof >/dev/null 2>&1; then
+        cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ {print substr($0, 2); exit }')
+    fi
+
+    [ -n "$cwd" ] || return 1
+    printf '%s\n' "$cwd"
+}
+
+path_is_within_project() {
+    local path="$1"
+    case "$path" in
+        "$PROJECT_DIR"|"$PROJECT_DIR"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+guard_port_kill_ownership() {
+    local port="$1"
+    local name="$2"
+    local pids="$3"
+    local pid cwd
+    local foreign=()
+    local entry
+
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        cwd=$(pid_cwd "$pid" || true)
+        if [ -n "$cwd" ] && path_is_within_project "$cwd"; then
+            continue
+        fi
+
+        if [ -n "$cwd" ]; then
+            foreign+=("${pid}:${cwd}")
+        else
+            foreign+=("${pid}:<unknown-cwd>")
+        fi
+    done <<< "$pids"
+
+    [ "${#foreign[@]}" -eq 0 ] && return 0
+
+    if [ "${CAT_CAFE_RUNTIME_RESTART_OK:-0}" = "1" ]; then
+        echo -e "${YELLOW}  ⚠ 端口 $port ($name) 存在跨 worktree 占用；CAT_CAFE_RUNTIME_RESTART_OK=1，继续强制释放。${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}  ✗ 端口 $port ($name) 被跨 worktree 进程占用，已拒绝终止：${NC}"
+    for entry in "${foreign[@]}"; do
+        echo "    - $entry"
+    done
+    echo "  为避免误杀 runtime/alpha，请改用隔离端口（例如 3201/3202）或显式授权："
+    echo "    CAT_CAFE_RUNTIME_RESTART_OK=1 pnpm dev:direct"
+    return 1
+}
+
 port_is_listening() {
     local port=$1
 
@@ -485,6 +555,7 @@ kill_port() {
     local pids
     pids=$(port_listen_pids "$port" || true)
     if [ -n "$pids" ]; then
+        guard_port_kill_ownership "$port" "$name" "$pids" || return 1
         echo -e "${YELLOW}  端口 $port ($name) 被占用，正在终止进程...${NC}"
         echo "$pids" | xargs kill 2>/dev/null || true
         sleep 1
@@ -599,15 +670,27 @@ background_eval_with_null_stdin() {
     register_managed_pid "$!"
 }
 
+api_node_env() {
+    # NODE_ENV is driven by launch mode (--prod-web), not by profile.
+    # Profile controls data isolation (Redis, TTLs, sidecar features);
+    # --prod-web controls whether the API runs in production or dev mode.
+    # dev:direct may carry --profile=opensource but is still development.
+    if [ "$PROD_WEB" = true ]; then
+        printf '%s' 'production'
+    else
+        printf '%s' 'development'
+    fi
+}
+
 api_launch_command() {
-    local env_prefix=""
+    local env_prefix="NODE_ENV=$(api_node_env) "
     if [ "$DEBUG_MODE" = true ]; then
-        env_prefix="LOG_LEVEL=debug "
+        env_prefix="${env_prefix}LOG_LEVEL=debug "
     fi
     if [ "${CAT_CAFE_DIRECT_NO_WATCH:-0}" = "1" ]; then
-        printf '%s' "cd packages/api && exec ${env_prefix}pnpm run start"
+        printf '%s' "cd packages/api && exec env ${env_prefix}pnpm run start"
     else
-        printf '%s' "cd packages/api && exec ${env_prefix}pnpm run dev"
+        printf '%s' "cd packages/api && exec env ${env_prefix}pnpm run dev"
     fi
 }
 
@@ -617,6 +700,10 @@ frontend_launch_command() {
     else
         printf 'cd packages/web && NEXT_IGNORE_INCORRECT_LOCKFILE=1 PORT=%s exec pnpm exec next dev -p %s' "$WEB_PORT" "$WEB_PORT"
     fi
+}
+
+web_production_build_ready() {
+    [ -f "$PROJECT_DIR/packages/web/.next/BUILD_ID" ]
 }
 
 # Sidecar summary: ready → 地址, failed → 报告, disabled → 静默
@@ -1226,10 +1313,10 @@ main() {
     if [ "$PROD_WEB" = true ]; then
         # Production: next start (PWA + Tailscale 友好)
         echo "  启动 Frontend (端口 $WEB_PORT, production)..."
-        if [ -d "packages/web/.next" ]; then
+        if web_production_build_ready; then
             background_eval_with_null_stdin "$(frontend_launch_command)"
         else
-            echo -e "${RED}  ✗ .next 目录不存在，无法以 production 模式启动${NC}"
+            echo -e "${RED}  ✗ 缺少完整 web production build (.next/BUILD_ID)，无法以 production 模式启动${NC}"
             echo -e "${RED}    请先不带 --quick 运行以执行 next build${NC}"
             exit 1
         fi

@@ -5,7 +5,7 @@
  * CLI 调用方式:
  *   claude -p "..." --output-format stream-json --verbose
  *     --permission-mode acceptEdits
- *     --model <model>
+ *     [--model <model>]
  *     [--resume <sessionId>]
  *
  * NDJSON 事件格式:
@@ -40,9 +40,6 @@ const ANTHROPIC_PROFILE_MODE_KEY = 'CAT_CAFE_ANTHROPIC_PROFILE_MODE';
 const ANTHROPIC_PROFILE_API_KEY = 'CAT_CAFE_ANTHROPIC_API_KEY';
 const ANTHROPIC_PROFILE_BASE_URL = 'CAT_CAFE_ANTHROPIC_BASE_URL';
 const ANTHROPIC_MODEL_OVERRIDE_KEY = 'CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE';
-
-/** Default fallback model for Claude CLI when the real model is set via env var mapping. */
-const ANTHROPIC_CLI_FALLBACK_MODEL = 'claude-opus-4-6';
 
 function isKnownAnthropicModel(model: string): boolean {
   return model.startsWith('claude-');
@@ -94,23 +91,22 @@ function buildClaudeEnvOverrides(callbackEnv?: Record<string, string>): Record<s
       env.ANTHROPIC_BASE_URL = cleanUrl;
     }
 
-    // Model mapping for third-party Anthropic-compatible APIs (e.g. BigModel, MaaS).
-    // Claude CLI rejects non-Anthropic model names via --model. Use the env var
-    // mapping mechanism (ANTHROPIC_DEFAULT_*_MODEL) to pass custom model names:
-    // Claude CLI will receive --model claude-opus-4-6 (a known name) but
-    // the env var maps it to the actual model (e.g. glm-5) at the API level.
+    // Third-party Anthropic-compatible APIs (e.g. BigModel, MaaS) may expose
+    // non-Anthropic model names such as glm-5. Claude CLI accepts those via
+    // ANTHROPIC_MODEL, but ONLY when --model is omitted. Passing --model wins
+    // over env-based aliases/defaults, so the provider layer must suppress the
+    // flag for custom provider models.
     const modelOverride = callbackEnv?.[ANTHROPIC_MODEL_OVERRIDE_KEY]?.trim();
     const effectiveModel = modelOverride || undefined;
     if (effectiveModel && !isKnownAnthropicModel(effectiveModel)) {
-      env.ANTHROPIC_DEFAULT_OPUS_MODEL = effectiveModel;
-      env.ANTHROPIC_DEFAULT_SONNET_MODEL = effectiveModel;
-      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = effectiveModel;
+      env.ANTHROPIC_MODEL = effectiveModel;
     }
   } else if (mode === 'subscription') {
     // Subscription mode must not inherit shell-level Anthropic credentials.
     // Claude CLI should read auth from ~/.claude/settings.json instead.
     env.ANTHROPIC_API_KEY = null;
     env.ANTHROPIC_BASE_URL = null;
+    env.ANTHROPIC_MODEL = null;
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = null;
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = null;
     env.ANTHROPIC_DEFAULT_HAIKU_MODEL = null;
@@ -187,12 +183,8 @@ export class ClaudeAgentService implements AgentService {
 
     // Profile-level model override (e.g. "opus[1m]") takes precedence over constructor model
     const effectiveModel = options?.callbackEnv?.[ANTHROPIC_MODEL_OVERRIDE_KEY]?.trim() || this.model;
-    // For api_key mode with non-Anthropic model names (e.g. glm-5), use a standard
-    // model for --model (env var mapping handles the actual model). This prevents
-    // Claude CLI from rejecting unknown model names.
     const isApiKeyMode = options?.callbackEnv?.[ANTHROPIC_PROFILE_MODE_KEY] === 'api_key';
-    const cliModel =
-      isApiKeyMode && !isKnownAnthropicModel(effectiveModel) ? ANTHROPIC_CLI_FALLBACK_MODEL : effectiveModel;
+    const useEnvModelOverride = isApiKeyMode && !isKnownAnthropicModel(effectiveModel);
     const args: string[] = [
       '-p',
       effectivePrompt,
@@ -200,8 +192,6 @@ export class ClaudeAgentService implements AgentService {
       'stream-json',
       '--include-partial-messages',
       '--verbose',
-      '--model',
-      cliModel,
       '--effort',
       getCatEffort(this.catId as string, undefined, 'anthropic'),
       '--permission-mode',
@@ -213,6 +203,14 @@ export class ClaudeAgentService implements AgentService {
       // Enable Chrome MCP integration (built-in, requires Chrome + extension running)
       '--chrome',
     ];
+
+    // Only pass --model for known Anthropic models. For third-party models
+    // (e.g. glm-5 via BigModel/DashScope), ANTHROPIC_MODEL env var is set in
+    // buildClaudeEnvOverrides() and --model must be omitted so the CLI honours it.
+    // Empty model (OAuth without explicit model) → let CLI use its default.
+    if (!useEnvModelOverride && effectiveModel) {
+      args.splice(6, 0, '--model', effectiveModel);
+    }
 
     // Inject static identity via --append-system-prompt (separate from -p content)
     if (options?.systemPrompt) {
@@ -257,6 +255,27 @@ export class ClaudeAgentService implements AgentService {
       }
     }
 
+    // User-defined CLI args from the member editor (#567).
+    // User flags win when they overlap with system-injected flags.
+    const userParts: string[] = [];
+    for (const arg of options?.cliConfigArgs ?? []) {
+      userParts.push(...arg.trim().split(/\s+/));
+    }
+    if (userParts.length > 0) {
+      const accumulativeFlags = new Set(['--add-dir']);
+      const userFlags = new Set(userParts.filter((p) => p.startsWith('-')));
+      const deduped: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i].startsWith('-') && userFlags.has(args[i]) && !accumulativeFlags.has(args[i])) {
+          if (i + 1 < args.length && !args[i + 1].startsWith('-')) i++;
+          continue;
+        }
+        deduped.push(args[i]);
+      }
+      args.length = 0;
+      args.push(...deduped, ...userParts);
+    }
+
     const metadata: MessageMetadata = { provider: 'anthropic', model: effectiveModel };
     const streamState = {
       partialTextMessageIds: new Set<string>(),
@@ -283,13 +302,17 @@ export class ClaudeAgentService implements AgentService {
 
       let sawResultError = false;
       const envOverrides = buildClaudeEnvOverrides(options?.callbackEnv);
+      // F171: Account env vars applied LAST — user overrides provider-injected values
+      if (options?.accountEnv) {
+        for (const [k, v] of Object.entries(options.accountEnv)) envOverrides[k] = v;
+      }
 
       // Debug: log full invocation details (env values redacted by pino redact paths)
       const safeEnvSummary: Record<string, string> = {};
       for (const [k, v] of Object.entries(envOverrides)) {
         if (v === null) {
           safeEnvSummary[k] = '(cleared)';
-        } else if (/key|secret|token|password/i.test(k)) {
+        } else if (/key|secret|token|password|cookie|auth|session|bearer|credential/i.test(k)) {
           safeEnvSummary[k] = v.slice(0, 6) + '***';
         } else {
           safeEnvSummary[k] = v;
@@ -318,6 +341,7 @@ export class ClaudeAgentService implements AgentService {
         ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
         ...(options?.cliSessionId ? { cliSessionId: options.cliSessionId } : {}),
         ...(options?.livenessProbe ? { livenessProbe: options.livenessProbe } : {}),
+        ...(options?.parentSpan ? { parentSpan: options.parentSpan } : {}),
       };
       const events = options?.spawnCliOverride
         ? options.spawnCliOverride(cliOpts)

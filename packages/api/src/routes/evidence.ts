@@ -7,8 +7,17 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { F163ExperimentLogger } from '../domains/memory/f163-experiment-logger.js';
+import {
+  applySalienceRerank,
+  computeVariantId,
+  freezeFlags,
+  getOrAssignCohort,
+  rankToConfidence,
+  type SalienceTaskContext,
+} from '../domains/memory/f163-types.js';
 import type { IEvidenceStore, IIndexBuilder, IKnowledgeResolver } from '../domains/memory/interfaces.js';
-import { type EvidenceResult, mapKindToSourceType } from './evidence-helpers.js';
+import { type BoostSource, type EvidenceResult, mapKindToSourceType } from './evidence-helpers.js';
 
 /** Accepted query parameters — Phase D: scope/mode/depth added */
 const searchSchema = z.object({
@@ -22,6 +31,9 @@ const searchSchema = z.object({
   contextWindow: z.coerce.number().int().min(1).max(5).optional(),
   threadId: z.string().optional(),
   dimension: z.enum(['project', 'global', 'all']).optional(),
+  activeFeatureIds: z.string().optional(),
+  truthSourceRef: z.string().optional(),
+  recentArtifactRefs: z.string().optional(),
 });
 
 export type { EvidenceConfidence, EvidenceSourceType } from './evidence-helpers.js';
@@ -44,8 +56,14 @@ export interface EvidenceSearchResponse {
   results: EvidenceResult[];
   degraded: boolean;
   degradeReason?: string;
+  /** AC-K1: actual retrieval mode when depth=raw forces lexical */
+  effectiveMode?: 'lexical' | 'semantic' | 'hybrid';
   freshness?: EvidenceFreshness;
   reimportTrigger?: EvidenceReimportTrigger;
+  /** F163: deterministic variant ID from frozen flag snapshot */
+  variantId: string;
+  /** F163: anchors of always_on docs injected into system prompt (not search results) */
+  injectionSources?: string[];
 }
 
 export interface EvidenceRoutesOptions {
@@ -66,9 +84,38 @@ export const evidenceRoutes: FastifyPluginAsync<EvidenceRoutesOptions> = async (
       return { error: 'Invalid query parameters', details: parseResult.error.issues };
     }
 
-    const { q, limit, scope, mode, depth, dateFrom, dateTo, contextWindow, threadId, dimension } = parseResult.data;
+    const {
+      q,
+      limit,
+      scope,
+      mode,
+      depth,
+      dateFrom,
+      dateTo,
+      contextWindow,
+      threadId,
+      dimension,
+      activeFeatureIds: rawFeatureIds,
+      truthSourceRef,
+      recentArtifactRefs: rawArtifactRefs,
+    } = parseResult.data;
 
     const effectiveLimit = limit ?? 5;
+    // AC-K1: depth=raw forces lexical-only (passage-level vectors not yet available)
+    const requestedMode = mode ?? 'lexical';
+    const isRawDegraded = depth === 'raw' && requestedMode !== 'lexical';
+    // F163: freeze flags once per request, compute variant ID
+    const f163Flags = freezeFlags();
+    const rawVariantId = computeVariantId(f163Flags);
+    const anyF163Active = Object.values(f163Flags).some((v) => v !== 'off');
+    // P1-4: cohort sticky routing — same thread keeps same variant across flag changes
+    const db = (opts.evidenceStore as { getDb?: () => import('better-sqlite3').Database }).getDb?.();
+    const variantId = db && threadId ? getOrAssignCohort(db, threadId, rawVariantId) : rawVariantId;
+    const boostSource: BoostSource[] = anyF163Active
+      ? f163Flags.authorityBoost !== 'off'
+        ? ['authority_boost']
+        : ['legacy']
+      : ['legacy'];
     try {
       const searchOpts = {
         limit: effectiveLimit,
@@ -87,21 +134,90 @@ export const evidenceRoutes: FastifyPluginAsync<EvidenceRoutesOptions> = async (
       const resolvedSources = resolveResult?.sources;
       // Tag per-result source when dimension is explicit (single-source)
       const singleSource = resolvedSources && resolvedSources.length === 1 ? resolvedSources[0] : undefined;
-      const results: EvidenceResult[] = items.map((item) => ({
+
+      // Phase F: assemble task context for salience gating (no-op when absent)
+      const salienceCtx: SalienceTaskContext = {
+        activeFeatureIds: rawFeatureIds
+          ? rawFeatureIds
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : [],
+        truthSourceRef: truthSourceRef ?? null,
+        recentArtifactRefs: rawArtifactRefs
+          ? rawArtifactRefs
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : [],
+      };
+
+      // Phase F: compute salience rerank for both shadow and on (shadow = log only)
+      const salienceResult = f163Flags.retrievalRerank !== 'off' ? applySalienceRerank(items, salienceCtx) : null;
+
+      // P1-1 fix: only apply reranked order to user-visible results when fully enabled
+      const reranked =
+        salienceResult && f163Flags.retrievalRerank === 'on' ? salienceResult : { items, scores: items.map(() => 1.0) };
+
+      const effectiveBoostSource: BoostSource[] =
+        f163Flags.retrievalRerank === 'on' ? [...boostSource, 'retrieval_rerank'] : boostSource;
+
+      const results: EvidenceResult[] = reranked.items.map((item, index) => ({
         title: item.title,
         anchor: item.anchor,
         snippet: item.summary ?? '',
-        confidence: 'mid' as const,
+        confidence: rankToConfidence(index),
         sourceType: mapKindToSourceType(item.kind),
+        boostSource: effectiveBoostSource,
+        ...(item.authority ? { authority: item.authority } : {}),
         ...(singleSource ? { source: singleSource } : {}),
         ...(item.passages ? { passages: item.passages } : {}),
       }));
-      return { results, degraded: false } satisfies Partial<EvidenceSearchResponse>;
+      // F163 AC-A3: report always_on injection sources in response envelope
+      let injectionSources: string[] | undefined;
+      if (f163Flags.alwaysOnInjection !== 'off') {
+        const queryAlwaysOn = (opts.evidenceStore as { queryAlwaysOn?: () => Array<{ anchor: string }> }).queryAlwaysOn;
+        if (queryAlwaysOn) {
+          injectionSources = queryAlwaysOn().map((d) => d.anchor);
+        }
+      }
+
+      // P1-5: log search to f163_logs for experiment evidence chain
+      if (anyF163Active && db) {
+        try {
+          const logger = new F163ExperimentLogger(db);
+          logger.logSearch(variantId, f163Flags, { query: q, resultCount: results.length });
+          // Phase F: salience rerank shadow diff (AC-F6) — logs in both shadow and on
+          if (salienceResult) {
+            logger.logSalienceRerank(variantId, f163Flags, {
+              query: q,
+              resultCount: results.length,
+              salienceRerank: {
+                taskContext: salienceCtx,
+                before: items.map((i) => i.anchor),
+                after: salienceResult.items.map((i) => i.anchor),
+                scores: salienceResult.scores,
+              },
+            });
+          }
+        } catch {
+          /* fail-open: logging failure does not block search */
+        }
+      }
+
+      return {
+        results,
+        degraded: isRawDegraded,
+        variantId,
+        ...(isRawDegraded ? { degradeReason: 'raw_lexical_only', effectiveMode: 'lexical' as const } : {}),
+        ...(injectionSources && injectionSources.length > 0 ? { injectionSources } : {}),
+      } satisfies Partial<EvidenceSearchResponse>;
     } catch {
       return {
         results: [],
         degraded: true,
         degradeReason: 'evidence_store_error',
+        variantId,
       } satisfies Partial<EvidenceSearchResponse>;
     }
   });

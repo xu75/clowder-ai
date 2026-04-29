@@ -18,7 +18,7 @@ const ragdollVariants: CatData[] = [
     color: { primary: '#9B7EBD', secondary: '#E8DFF5' },
     breedId: 'ragdoll',
     breedDisplayName: '布偶猫', // ← breed-level name
-    provider: 'anthropic',
+    clientId: 'anthropic',
     defaultModel: 'claude-sonnet-4-5-20250929',
     avatar: '/avatars/opus.png',
     mentionPatterns: ['@opus-custom'],
@@ -26,7 +26,6 @@ const ragdollVariants: CatData[] = [
     personality: '',
     variantLabel: 'Custom',
     isDefaultVariant: false,
-    source: 'seed',
   },
   {
     id: 'opus',
@@ -34,14 +33,13 @@ const ragdollVariants: CatData[] = [
     color: { primary: '#9B7EBD', secondary: '#E8DFF5' },
     breedId: 'ragdoll',
     breedDisplayName: '布偶猫',
-    provider: 'anthropic',
+    clientId: 'anthropic',
     defaultModel: 'claude-sonnet-4-5-20250929',
     avatar: '/avatars/opus.png',
     mentionPatterns: ['@opus'],
     roleDescription: '',
     personality: '',
     isDefaultVariant: true,
-    source: 'seed',
   },
 ];
 

@@ -15,11 +15,18 @@ import { resolveHeaderUserId } from '../utils/request-identity.js';
 const VALID_MODES = ['clone', 'init', 'skip'] as const;
 type SetupMode = (typeof VALID_MODES)[number];
 
+export interface ProjectSetupRouteOptions {
+  memoryBootstrapService?: { bootstrap: (projectPath: string, options?: unknown) => Promise<unknown> };
+  socketManager?: { emitToUser(userId: string, event: string, data: unknown): void };
+}
+
 /** Only allow https:// and git@ URLs */
 const SAFE_URL_PATTERN = /^(https:\/\/|git@)/;
 
 /** Clone timeout in ms */
 const CLONE_TIMEOUT_MS = 120_000;
+/** Remote existence probe timeout in ms */
+const CLONE_PROBE_TIMEOUT_MS = 15_000;
 
 interface CloneResult {
   ok: boolean;
@@ -73,6 +80,33 @@ async function gitClone(url: string, targetPath: string): Promise<CloneResult> {
   });
 }
 
+async function gitProbeRemote(url: string): Promise<CloneResult> {
+  return new Promise((resolve) => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), CLONE_PROBE_TIMEOUT_MS);
+    const child = execFile(
+      'git',
+      ['ls-remote', '--heads', url, 'HEAD'],
+      {
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        signal: ac.signal,
+        timeout: CLONE_PROBE_TIMEOUT_MS,
+      },
+      (err, _stdout, stderr) => {
+        clearTimeout(timer);
+        if (!err) return resolve({ ok: true });
+        const exitCode = (err as NodeJS.ErrnoException & { code?: number | string }).code;
+        const numericExit = typeof exitCode === 'number' ? exitCode : null;
+        const killed = (err as { killed?: boolean }).killed ?? false;
+        resolve(classifyGitError(numericExit, stderr, killed));
+      },
+    );
+    ac.signal.addEventListener('abort', () => {
+      child.kill('SIGTERM');
+    });
+  });
+}
+
 async function gitInit(targetPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile('git', ['init'], { cwd: targetPath, timeout: 10_000 }, (err) => {
@@ -91,7 +125,7 @@ async function isEmptyDir(dirPath: string): Promise<boolean> {
   }
 }
 
-export const projectSetupRoute: FastifyPluginAsync = async (app) => {
+export const projectSetupRoute: FastifyPluginAsync<ProjectSetupRouteOptions> = async (app, opts) => {
   app.post('/api/projects/setup', async (request, reply) => {
     const userId = resolveHeaderUserId(request);
     if (!userId) {
@@ -150,6 +184,11 @@ export const projectSetupRoute: FastifyPluginAsync = async (app) => {
           error: 'Directory is not empty. Clone requires an empty directory.',
         };
       }
+      const probe = await gitProbeRemote(gitCloneUrl);
+      if (!probe.ok) {
+        reply.status(502);
+        return { ok: false, errorKind: probe.errorKind, error: probe.error };
+      }
       const result = await gitClone(gitCloneUrl, validated);
       if (!result.ok) {
         reply.status(502);
@@ -173,6 +212,54 @@ export const projectSetupRoute: FastifyPluginAsync = async (app) => {
       const { GovernanceBootstrapService } = await import('../config/governance/governance-bootstrap.js');
       const service = new GovernanceBootstrapService(catCafeRoot);
       const report = await service.bootstrap(validated, { dryRun: false });
+
+      // F152 Phase B: fire-and-forget memory bootstrap after governance succeeds
+      if (opts?.memoryBootstrapService) {
+        opts.memoryBootstrapService
+          .bootstrap(validated, {
+            onProgress: (p: unknown) => {
+              if (userId && opts.socketManager) {
+                opts.socketManager.emitToUser(userId, 'index:progress', {
+                  ...(p as Record<string, unknown>),
+                  projectPath: validated,
+                });
+              }
+            },
+          })
+          .then((raw: unknown) => {
+            const result = raw as {
+              status: string;
+              docsIndexed?: number;
+              durationMs?: number;
+              summary?: unknown;
+              error?: string;
+            };
+            if (!userId || !opts.socketManager) return;
+            if (result.status === 'ready') {
+              opts.socketManager.emitToUser(userId, 'index:complete', {
+                projectPath: validated,
+                docsIndexed: result.docsIndexed,
+                durationMs: result.durationMs,
+                summary: result.summary,
+              });
+            } else if (result.status === 'failed') {
+              opts.socketManager.emitToUser(userId, 'index:failed', {
+                projectPath: validated,
+                error: result.error ?? 'Unknown error',
+              });
+            }
+          })
+          .catch((err: unknown) => {
+            app.log.warn({ err, projectPath: validated }, 'Memory bootstrap failed (non-blocking)');
+            if (userId && opts.socketManager) {
+              opts.socketManager.emitToUser(userId, 'index:failed', {
+                projectPath: validated,
+                error: err instanceof Error ? err.message : 'Bootstrap failed',
+              });
+            }
+          });
+      }
+
       return { ok: true, governanceReport: report };
     } catch (err) {
       reply.status(500);

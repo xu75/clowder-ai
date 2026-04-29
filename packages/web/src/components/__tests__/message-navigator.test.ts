@@ -76,7 +76,7 @@ describe('MessageNavigator', () => {
     const msgs = [makeMsg('m1', 'user'), makeMsg('m2', 'assistant', 'opus-45'), makeMsg('m3', 'assistant', 'spark')];
     const html = render(msgs);
 
-    // base colors come from shared fallback CAT_CONFIGS (opus/codex)
+    // base colors come from useCatData (populated by /api/cats)
     expect(html).toContain('#9B7EBD');
     expect(html).toContain('#5B8C5A');
     expect(html).toContain('跳转到 布偶猫（opus-45） 的消息');
@@ -92,7 +92,7 @@ describe('MessageNavigator', () => {
     ];
     const html = render(msgs);
 
-    // base colors come from shared fallback CAT_CONFIGS
+    // base colors come from useCatData
     expect(html).toContain('#5B8C5A'); // codex
     expect(html).toContain('#9B7EBD'); // opus
     expect(html).toContain('#5B9BD5'); // gemini
@@ -119,6 +119,13 @@ describe('MessageNavigator', () => {
     expect(html).toContain('#D4A76A');
     expect(html).toContain('跳转到 狸花猫 的消息');
     expect(html).toContain('跳转到 狸花猫（dare-agent） 的消息');
+  });
+
+  it('applies kimi fallback colors and labels before /api/cats loads', () => {
+    const msgs = [makeMsg('m1', 'user'), makeMsg('m2', 'assistant', 'kimi'), makeMsg('m3', 'assistant', 'codex')];
+    const html = render(msgs);
+
+    expect(html).toContain('跳转到 梵花猫 的消息');
   });
 
   it('includes accessibility labels', () => {

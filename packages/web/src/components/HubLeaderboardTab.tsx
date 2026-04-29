@@ -1,14 +1,19 @@
 'use client';
 
 import type { LeaderboardRange, LeaderboardStatsResponse } from '@cat-cafe/shared';
+import localFont from 'next/font/local';
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/utils/api-client';
 import { CatHeroCard, MiniRanked, SectionCard, StreakRanked, WorkMetric } from './leaderboard-cards';
 import { AchievementWall, CvoLevelCard, GameArena, SillyCatsList } from './leaderboard-phase-bc';
 
 /* -- Design tokens from designs/f075-cat-leaderboard.pen (lzNOb) -- */
-const FONTS_URL =
-  'https://fonts.googleapis.com/css2?family=Fraunces:wght@500&family=Plus+Jakarta+Sans:wght@400;500;600&display=swap';
+const fraunces = localFont({ src: '../fonts/Fraunces-Medium.woff2', weight: '500', display: 'swap' });
+const plusJakartaSans = localFont({
+  src: '../fonts/PlusJakartaSans-Variable.woff2',
+  weight: '400 600',
+  display: 'swap',
+});
 
 const RANGE_OPTIONS: { value: LeaderboardRange; label: string }[] = [
   { value: 'all', label: '全部' },
@@ -45,13 +50,11 @@ export function HubLeaderboardTab() {
   return (
     <div
       className="flex flex-col gap-6 p-6 rounded-xl overflow-y-auto"
-      style={{ background: '#F4EFE7', fontFamily: 'Plus Jakarta Sans, sans-serif' }}
+      style={{ background: '#F4EFE7', fontFamily: plusJakartaSans.style.fontFamily }}
     >
-      <link rel="stylesheet" href={FONTS_URL} />
-
       {/* Header + Range Filter */}
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-medium" style={{ fontFamily: 'Fraunces, serif', color: '#2D2D2D' }}>
+        <h2 className="text-xl font-medium" style={{ fontFamily: fraunces.style.fontFamily, color: '#2D2D2D' }}>
           Cat Leaderboard
         </h2>
         <div className="flex gap-3">
@@ -128,7 +131,7 @@ export function HubLeaderboardTab() {
             <SectionCard title="成就墙">
               <AchievementWall achievements={data.achievements ?? []} />
             </SectionCard>
-            <SectionCard title="CVO 能力等级 🐾">
+            <SectionCard title="CVO 能力等级">
               {data.cvoLevel ? (
                 <CvoLevelCard level={data.cvoLevel} />
               ) : (

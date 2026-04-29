@@ -17,15 +17,24 @@ const EXPECTED_TOOLS = [
   'cat_cafe_get_pending_mentions',
   'cat_cafe_ack_mentions',
   'cat_cafe_get_thread_context',
+  'cat_cafe_get_thread_cats',
   'cat_cafe_list_threads',
   'cat_cafe_feat_index',
   'cat_cafe_cross_post_message',
   'cat_cafe_list_tasks',
   'cat_cafe_update_task',
+  // F160 Phase A: create-task
+  'cat_cafe_create_task',
   'cat_cafe_create_rich_block',
   'cat_cafe_generate_document',
   'cat_cafe_get_rich_block_rules',
   'cat_cafe_register_pr_tracking',
+  // Guide tools
+  'cat_cafe_update_guide_state',
+  'cat_cafe_get_available_guides',
+  'cat_cafe_guide_resolve',
+  'cat_cafe_start_guide',
+  'cat_cafe_guide_control',
   // Workflow SOP tools (F073 P1)
   'cat_cafe_update_workflow',
   // Multi-mention orchestration (F086 M1)
@@ -43,6 +52,10 @@ const EXPECTED_TOOLS = [
   // Direct evidence/reflect tools
   'cat_cafe_search_evidence',
   'cat_cafe_reflect',
+  // F152 Phase C: Distillation tools
+  'cat_cafe_mark_generalizable',
+  'cat_cafe_nominate_for_global',
+  'cat_cafe_review_distillation',
   // Signal Hunter tools (F21 S5) + F091 Study tools
   'signal_list_inbox',
   'signal_get_article',
@@ -73,6 +86,9 @@ const EXPECTED_TOOLS = [
   'cat_cafe_preview_scheduled_task',
   'cat_cafe_register_scheduled_task',
   'cat_cafe_remove_scheduled_task',
+  'cat_cafe_hold_ball',
+  // F061 Bug-F workaround: MCP shell exec for read-only commands
+  'cat_cafe_shell_exec',
 ];
 
 const EXPECTED_COLLAB_TOOLS = [
@@ -80,17 +96,24 @@ const EXPECTED_COLLAB_TOOLS = [
   'cat_cafe_get_pending_mentions',
   'cat_cafe_ack_mentions',
   'cat_cafe_get_thread_context',
+  'cat_cafe_get_thread_cats',
   'cat_cafe_list_threads',
   'cat_cafe_feat_index',
   'cat_cafe_cross_post_message',
   'cat_cafe_list_tasks',
   'cat_cafe_update_task',
+  'cat_cafe_create_task',
   'cat_cafe_create_rich_block',
   'cat_cafe_generate_document',
   'cat_cafe_get_rich_block_rules',
   'cat_cafe_request_permission',
   'cat_cafe_check_permission_status',
   'cat_cafe_register_pr_tracking',
+  'cat_cafe_update_guide_state',
+  'cat_cafe_get_available_guides',
+  'cat_cafe_guide_resolve',
+  'cat_cafe_start_guide',
+  'cat_cafe_guide_control',
   'cat_cafe_update_workflow',
   'cat_cafe_multi_mention',
   'cat_cafe_start_vote',
@@ -102,10 +125,16 @@ const EXPECTED_COLLAB_TOOLS = [
   'cat_cafe_preview_scheduled_task',
   'cat_cafe_register_scheduled_task',
   'cat_cafe_remove_scheduled_task',
+  'cat_cafe_hold_ball',
+  // F061 Bug-F workaround: MCP shell exec for read-only commands
+  'cat_cafe_shell_exec',
 ];
 
 const EXPECTED_MEMORY_TOOLS = [
   'cat_cafe_retain_memory_callback',
+  'cat_cafe_mark_generalizable',
+  'cat_cafe_nominate_for_global',
+  'cat_cafe_review_distillation',
   'cat_cafe_search_evidence',
   'cat_cafe_reflect',
   'cat_cafe_list_session_chain',
@@ -129,7 +158,18 @@ const EXPECTED_SIGNAL_TOOLS = [
   'signal_link_thread',
 ];
 
+function assertUnique(values, label) {
+  assert.equal(new Set(values).size, values.length, `${label} must not contain duplicate tool names`);
+}
+
 describe('MCP Server Tool Registration', () => {
+  test('expected tool lists stay duplicate-free', () => {
+    assertUnique(EXPECTED_TOOLS, 'EXPECTED_TOOLS');
+    assertUnique(EXPECTED_COLLAB_TOOLS, 'EXPECTED_COLLAB_TOOLS');
+    assertUnique(EXPECTED_MEMORY_TOOLS, 'EXPECTED_MEMORY_TOOLS');
+    assertUnique(EXPECTED_SIGNAL_TOOLS, 'EXPECTED_SIGNAL_TOOLS');
+  });
+
   test('all expected tools are registered via createServer()', async () => {
     const { createServer } = await import('../dist/index.js');
     const server = createServer();
@@ -167,7 +207,7 @@ describe('MCP Server Tool Registration', () => {
     assert.ok(checkTool, 'check_permission_status tool should exist');
   });
 
-  test('post_message schema must NOT expose threadId (#316 regression guard)', async () => {
+  test('post_message schema exposes threadId as optional (F178 agent-key auth)', async () => {
     const { createServer } = await import('../dist/index.js');
     const server = createServer();
 
@@ -175,8 +215,12 @@ describe('MCP Server Tool Registration', () => {
     assert.ok(postTool, 'post_message tool should exist');
     const shapeKeys = Object.keys(postTool.inputSchema.shape);
     assert.ok(
-      !shapeKeys.includes('threadId'),
-      'post_message must NOT expose threadId — use cross_post_message for cross-thread posting (#316)',
+      shapeKeys.includes('threadId'),
+      'post_message must expose threadId for agent-key auth (F178 — no default invocation thread)',
+    );
+    assert.ok(
+      postTool.inputSchema._def.shape().threadId.isOptional(),
+      'post_message threadId must be optional (backward-compatible for invocation auth)',
     );
   });
 
@@ -233,5 +277,89 @@ describe('MCP Server Tool Registration', () => {
     const registered = Object.keys(server._registeredTools);
 
     assert.deepEqual([...registered].sort(), [...EXPECTED_SIGNAL_TOOLS].sort());
+  });
+});
+
+// --- F061 Phase 2: READONLY_ALLOWED_TOOLS whitelist ---
+
+const KNOWN_WRITE_TOOLS = [
+  'cat_cafe_post_message',
+  'cat_cafe_ack_mentions',
+  'cat_cafe_cross_post_message',
+  'cat_cafe_multi_mention',
+  'cat_cafe_update_task',
+  'cat_cafe_create_task',
+  'cat_cafe_create_rich_block',
+  'cat_cafe_generate_document',
+  'cat_cafe_request_permission',
+  'cat_cafe_register_pr_tracking',
+  'cat_cafe_update_workflow',
+  'cat_cafe_start_vote',
+  'cat_cafe_update_bootcamp_state',
+  'cat_cafe_bootcamp_env_check', // writes bootcampState.envCheck via callbackPost
+  'cat_cafe_update_guide_state',
+  'cat_cafe_guide_resolve',
+  'cat_cafe_start_guide',
+  'cat_cafe_guide_control',
+  'cat_cafe_retain_memory_callback',
+  'cat_cafe_mark_generalizable',
+  'cat_cafe_nominate_for_global',
+  'cat_cafe_review_distillation', // POST approve/reject → writes global knowledge
+  'cat_cafe_submit_game_action',
+  'cat_cafe_register_scheduled_task',
+  'cat_cafe_remove_scheduled_task',
+  'cat_cafe_hold_ball', // callbackPost → writes scheduled task
+  'cat_cafe_feat_index', // requires callback credentials unavailable in readonly
+  'signal_mark_read',
+  'signal_summarize',
+  'signal_start_study',
+  'signal_save_notes',
+  'signal_generate_podcast',
+  'signal_update_article',
+  'signal_delete_article',
+  'signal_link_thread',
+  'limb_invoke',
+  'limb_pair_approve',
+];
+
+const EXPECTED_READONLY_TOOLS = [
+  'cat_cafe_search_evidence',
+  'cat_cafe_reflect',
+  'cat_cafe_get_rich_block_rules',
+  'cat_cafe_list_session_chain',
+  'cat_cafe_read_session_events',
+  'cat_cafe_read_session_digest',
+  'cat_cafe_read_invocation_detail',
+  'signal_list_inbox',
+  'signal_get_article',
+  'signal_search',
+  'signal_list_studies',
+  // F061 Bug-F workaround: read-only shell exec whitelist enforced at handler level
+  'cat_cafe_shell_exec',
+];
+
+describe('F061 READONLY_ALLOWED_TOOLS whitelist', () => {
+  test('whitelist excludes all known write tools', async () => {
+    const { READONLY_ALLOWED_TOOLS } = await import('../dist/server-toolsets.js');
+    for (const name of KNOWN_WRITE_TOOLS) {
+      assert.ok(!READONLY_ALLOWED_TOOLS.has(name), `Write tool "${name}" must NOT be in readonly whitelist`);
+    }
+  });
+
+  test('whitelist includes all expected readonly tools', async () => {
+    const { READONLY_ALLOWED_TOOLS } = await import('../dist/server-toolsets.js');
+    for (const name of EXPECTED_READONLY_TOOLS) {
+      assert.ok(READONLY_ALLOWED_TOOLS.has(name), `Readonly tool "${name}" must be in whitelist`);
+    }
+  });
+
+  test('whitelist is a subset of all registered tools', async () => {
+    const { READONLY_ALLOWED_TOOLS } = await import('../dist/server-toolsets.js');
+    const { createServer } = await import('../dist/index.js');
+    const server = createServer();
+    const allRegistered = new Set(Object.keys(server._registeredTools));
+    for (const name of READONLY_ALLOWED_TOOLS) {
+      assert.ok(allRegistered.has(name), `Whitelist tool "${name}" does not exist in registered tools`);
+    }
   });
 });

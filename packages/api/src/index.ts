@@ -3,10 +3,12 @@
  * 后端 API 入口
  */
 
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { type CatConfig, type CatId, CORE_COMMANDS, catRegistry } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import { createRedisClient, SessionStore } from '@cat-cafe/shared/utils';
+import fastifyCookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify from 'fastify';
@@ -27,13 +29,21 @@ import { initRuntimeOverrides } from './config/session-strategy-overrides.js';
 import { assertStorageReady } from './config/storage-guard.js';
 import { createTaskProgressStore } from './domains/cats/services/agents/invocation/createTaskProgressStore.js';
 import { InvocationQueue } from './domains/cats/services/agents/invocation/InvocationQueue.js';
-import { InvocationRegistry } from './domains/cats/services/agents/invocation/InvocationRegistry.js';
+import {
+  InvocationRegistry,
+  selectInvocationBackendKind,
+} from './domains/cats/services/agents/invocation/InvocationRegistry.js';
 import { InvocationTracker } from './domains/cats/services/agents/invocation/InvocationTracker.js';
 import type {
   InvocationRecordStoreLike,
   RouterLike,
 } from './domains/cats/services/agents/invocation/QueueProcessor.js';
 import { QueueProcessor } from './domains/cats/services/agents/invocation/QueueProcessor.js';
+import {
+  resolveAcpBootstrapArgs,
+  resolveAcpBootstrapCommand,
+  resolveAcpBootstrapCwd,
+} from './domains/cats/services/agents/providers/acp/acp-bootstrap-cwd.js';
 import { AntigravityAgentService } from './domains/cats/services/agents/providers/antigravity/AntigravityAgentService.js';
 import { AgentRegistry } from './domains/cats/services/agents/registry/AgentRegistry.js';
 import { AuthorizationManager } from './domains/cats/services/auth/AuthorizationManager.js';
@@ -49,10 +59,10 @@ import {
   DeliveryCursorStore,
   GeminiAgentService,
   getEventAuditLog,
+  KimiAgentService,
   MemoryGovernanceStore,
   OpenCodeAgentService,
 } from './domains/cats/services/index.js';
-
 import { initPushNotificationService } from './domains/cats/services/push/PushNotificationService.js';
 import type { HandoffConfig } from './domains/cats/services/session/SessionSealer.js';
 import { SessionSealer } from './domains/cats/services/session/SessionSealer.js';
@@ -61,6 +71,7 @@ import { TranscriptWriter } from './domains/cats/services/session/TranscriptWrit
 import { createAuthorizationAuditStore } from './domains/cats/services/stores/factories/AuthorizationAuditStoreFactory.js';
 import { createAuthorizationRuleStore } from './domains/cats/services/stores/factories/AuthorizationRuleStoreFactory.js';
 import { createBacklogStore } from './domains/cats/services/stores/factories/BacklogStoreFactory.js';
+import { createCommunityIssueStore } from './domains/cats/services/stores/factories/CommunityIssueStoreFactory.js';
 import { createMemoryStore } from './domains/cats/services/stores/factories/MemoryStoreFactory.js';
 import { createMessageStore } from './domains/cats/services/stores/factories/MessageStoreFactory.js';
 import { createPendingRequestStore } from './domains/cats/services/stores/factories/PendingRequestStoreFactory.js';
@@ -97,19 +108,19 @@ import {
   CiCdRouter,
   ConflictRouter,
   ConnectorInvokeTrigger,
-  GhCliReviewContentFetcher,
-  MemoryProcessedEmailStore,
   ReviewFeedbackRouter,
-  ReviewRouter,
-  startGithubReviewWatcher,
-  stopGithubReviewWatcher,
 } from './infrastructure/email/index.js';
 import { runSchedulerReplyUserIdBackfill } from './infrastructure/scheduler/scheduler-reply-userid-backfill.js';
+import { securityHeadersPlugin } from './infrastructure/security-headers.js';
+import { sessionAuthPlugin, sessionRoute } from './infrastructure/session-auth.js';
 import { SocketManager } from './infrastructure/websocket/index.js';
+import { avatarsRoutes } from './routes/avatars.js';
+import { CallbackAuthSystemMessageNotifier } from './routes/callback-auth-system-message.js';
 import { configSecretsRoutes } from './routes/config-secrets.js';
 import { connectorWebhookRoutes } from './routes/connector-webhooks.js';
 import { gameRoutes } from './routes/games.js';
 import {
+  accountsRoutes,
   auditRoutes,
   authorizationRoutes,
   backlogRoutes,
@@ -121,15 +132,19 @@ import {
   catsRoutes,
   claudeRescueRoutes,
   commandsRoutes,
+  communityIssueRoutes,
   configRoutes,
   connectorHubRoutes,
   connectorMediaRoutes,
+  distillationRoutes,
   evidenceRoutes,
   executionDigestRoutes,
   exportRoutes,
   externalProjectRoutes,
   featureDocDetailRoutes,
+  firstRunQuestRoutes,
   governanceStatusRoute,
+  guideActionRoutes,
   intentCardRoutes,
   invocationsRoutes,
   leaderboardEventsRoutes,
@@ -141,13 +156,14 @@ import {
   mkdirRoute,
   packsRoutes,
   projectSetupRoute,
+  projectsBootstrapRoutes,
   projectsRoutes,
-  providerProfilesRoutes,
   pushRoutes,
   queueRoutes,
   quotaRoutes,
   reflectRoutes,
   refluxRoutes,
+  registerCallbackAuthDebugRoute,
   registerCallbackDocsRoutes,
   resolutionRoutes,
   sessionChainRoutes,
@@ -175,18 +191,21 @@ import {
   workspaceRoutes,
 } from './routes/index.js';
 import { knowledgeFeedRoutes } from './routes/knowledge-feed.js';
+import { marketplaceRoutes } from './routes/marketplace.js';
 import { previewRoutes } from './routes/preview.js';
 import { terminalRoutes } from './routes/terminal.js';
 import { threadExportRoutes } from './routes/thread-export.js';
 import { ApiInstanceLease, type ApiInstanceLeaseInvalidation } from './services/ApiInstanceLease.js';
 import { findMonorepoRoot } from './utils/monorepo-root.js';
 import { resolveUserId } from './utils/request-identity.js';
+import { getDefaultUploadDir } from './utils/upload-paths.js';
 
 const PORT = parseInt(process.env.API_SERVER_PORT ?? '3004', 10);
 const HOST = process.env.API_SERVER_HOST ?? '127.0.0.1';
 
 let socketManager: SocketManager | null = null;
 let redisClient: RedisClient | null = null;
+let burnRateMonitor: { start(): void; stop(): void } | null = null;
 
 /**
  * Get the SocketManager instance
@@ -203,6 +222,11 @@ const PROCESS_START_AT = Date.now();
 
 async function main(): Promise<void> {
   const { logger: customLogger, isDebugMode, LOG_DIR_PATH } = await import('./infrastructure/logger.js');
+
+  // F152: Initialize OpenTelemetry SDK (must be early, before routes)
+  const { initTelemetry } = await import('./infrastructure/telemetry/init.js');
+  const telemetryHandle = initTelemetry();
+
   const app = Fastify({ logger: customLogger as unknown as import('fastify').FastifyBaseLogger });
 
   if (isDebugMode) {
@@ -214,6 +238,14 @@ async function main(): Promise<void> {
     origin: resolveFrontendCorsOrigins(process.env, app.log),
     credentials: true,
   });
+
+  // F156 D-2: Anti-clickjacking headers (X-Frame-Options + CSP frame-ancestors)
+  await app.register(securityHeadersPlugin);
+
+  // F156 D-1: Cookie parsing + session-based identity (replaces userId self-reporting)
+  await app.register(fastifyCookie);
+  await app.register(sessionAuthPlugin);
+  await app.register(sessionRoute);
 
   // WebSocket support (F089 terminal)
   await app.register(fastifyWebsocket);
@@ -232,12 +264,79 @@ async function main(): Promise<void> {
   // Health check
   app.get('/health', async () => ({ status: 'ok', timestamp: Date.now() }));
 
+  // F152: Readiness check — verifies dependencies are reachable.
+  // evidenceStoreRef is set after memoryServices init; handler runs at request time.
+  let evidenceStoreRef: { health(): Promise<boolean> } | null = null;
+  async function checkReadiness(): Promise<{
+    status: 'ready' | 'degraded';
+    checks: Record<string, { ok: boolean; ms: number; error?: string }>;
+  }> {
+    const checks: Record<string, { ok: boolean; ms: number; error?: string }> = {};
+    if (redisClient) {
+      const t0 = Date.now();
+      try {
+        await redisClient.ping();
+        checks.redis = { ok: true, ms: Date.now() - t0 };
+      } catch (err) {
+        checks.redis = { ok: false, ms: Date.now() - t0, error: String(err) };
+      }
+    } else {
+      checks.redis = { ok: true, ms: 0 };
+    }
+    if (evidenceStoreRef) {
+      const t0 = Date.now();
+      try {
+        const ok = await evidenceStoreRef.health();
+        checks.sqlite = { ok, ms: Date.now() - t0, ...(ok ? {} : { error: 'SELECT 1 failed' }) };
+      } catch (err) {
+        checks.sqlite = { ok: false, ms: Date.now() - t0, error: String(err) };
+      }
+    }
+    const allOk = Object.values(checks).every((c) => c.ok);
+    return { status: allOk ? 'ready' : 'degraded', checks };
+  }
+  app.get('/ready', async (_request, reply) => {
+    const result = await checkReadiness();
+    if (result.status !== 'ready') reply.code(503);
+    return { ...result, timestamp: Date.now() };
+  });
+
   // Create invocation tracker for cancellation support
   const invocationTracker = new InvocationTracker();
 
   // Initialize WebSocket manager BEFORE routes (injected via opts, no circular import).
   // IMPORTANT: Socket.io must attach to the SAME server Fastify listens on.
   socketManager = new SocketManager(app.server, invocationTracker);
+
+  // F153 Phase E L3: Burn-rate alerting — push system_notice via WebSocket
+  if (telemetryHandle.getMetricsText) {
+    const { BurnRateMonitor } = await import('./infrastructure/telemetry/burn-rate-monitor.js');
+    burnRateMonitor = new BurnRateMonitor({
+      getMetricsText: telemetryHandle.getMetricsText,
+      onAlert: (alerts) => {
+        const lines = alerts.map((a) => `${a.metric}: ${a.currentValue.toFixed(2)} (threshold: ${a.threshold})`);
+        socketManager?.broadcastToRoom('workspace:global', 'connector_message', {
+          message: {
+            type: 'connector',
+            content: `[Telemetry Alert] Thresholds exceeded:\n${lines.join('\n')}`,
+            source: { presentation: 'system_notice', noticeTone: 'warning' },
+            timestamp: Date.now(),
+          },
+        });
+      },
+      onClear: () => {
+        socketManager?.broadcastToRoom('workspace:global', 'connector_message', {
+          message: {
+            type: 'connector',
+            content: '[Telemetry] All metrics recovered to normal levels.',
+            source: { presentation: 'system_notice', noticeTone: 'info' },
+            timestamp: Date.now(),
+          },
+        });
+      },
+    });
+    burnRateMonitor.start();
+  }
 
   // F085 Phase 4: Platform-level activity tracker (hyperfocus brake)
   const activityTracker = new ActivityTracker();
@@ -266,10 +365,31 @@ async function main(): Promise<void> {
   });
 
   // Create shared service instances for MCP callback flow
-  const registry = new InvocationRegistry();
   const redisUrl = process.env.REDIS_URL;
   const redis = redisUrl ? createRedisClient({ url: redisUrl }) : undefined;
   redisClient = redis ?? null;
+
+  // F174 Phase B: select InvocationRegistry backend.
+  // - 'redis' (default when Redis available): API restart no longer drops tokens
+  // - 'memory' (fallback / opt-out): pre-Phase-B in-memory behavior
+  // - if Redis unavailable, force memory regardless of env (degraded mode)
+  // F174-B P2 fix (cloud Codex review #1363): reject unsupported env values
+  // via shared helper. Silent fallback masks typos (REDUS=...) -> user thinks
+  // Redis is active but actually in-memory (defeats Phase B). Throw on unknown.
+  const registryBackendKind = selectInvocationBackendKind(process.env.CAT_CAFE_INVOCATION_REGISTRY, !!redis);
+  const registry =
+    registryBackendKind === 'redis' && redis
+      ? new InvocationRegistry({
+          backend: new (
+            await import('./domains/cats/services/agents/invocation/RedisAuthInvocationBackend.js')
+          ).RedisAuthInvocationBackend(redis),
+        })
+      : new InvocationRegistry();
+  app.log.info(`[api] InvocationRegistry backend: ${registryBackendKind === 'redis' && redis ? 'redis' : 'memory'}`);
+
+  const { AgentKeyRegistry } = await import('./domains/cats/services/agents/agent-key/AgentKeyRegistry.js');
+  const agentKeyRegistry = new AgentKeyRegistry();
+  app.log.info('[api] AgentKeyRegistry initialized (memory backend)');
 
   // Fail-closed: refuse to start without Redis unless explicitly opted into memory mode.
   // Also verify Redis is actually reachable (PING), not just configured.
@@ -300,7 +420,13 @@ async function main(): Promise<void> {
   const sessionStore = redis ? new SessionStore(redis) : undefined;
   const deliveryCursorStore = new DeliveryCursorStore(sessionStore);
   const threadStore = createThreadStore(redis);
+  // F155 B-4/B-6: Guide state is runtime-only (in-memory, resets on restart)
+  const { InMemoryGuideSessionStore } = await import('./domains/guides/GuideSessionRepository.js');
+  const guideSessionStore = new InMemoryGuideSessionStore();
+  const { InMemoryGuideDismissTracker } = await import('./domains/guides/GuideDismissTracker.js');
+  const dismissTracker = new InMemoryGuideDismissTracker();
   const taskStore = createTaskStore(redis);
+  const communityIssueStore = createCommunityIssueStore(redis);
   if (redis) {
     const { RedisPrTrackingStore } = await import('./infrastructure/email/RedisPrTrackingStore.js');
     const { backfillLegacyPrTracking } = await import('./infrastructure/email/backfill-legacy-pr-tracking.js');
@@ -310,6 +436,13 @@ async function main(): Promise<void> {
       log: app.log,
     });
   }
+
+  // F153 Phase F AC-F4: Hydrate trace store from Redis messages on cold start
+  if (telemetryHandle.traceStore && redis) {
+    const { hydrateTraceStoreFromRedis } = await import('./infrastructure/telemetry/hydrate-traces.js');
+    void hydrateTraceStoreFromRedis(telemetryHandle.traceStore, redis).catch(() => {});
+  }
+
   const backlogStore = createBacklogStore(redis);
   const workflowSopStore = createWorkflowSopStore(redis);
   const summaryStore = createSummaryStore(redis);
@@ -360,13 +493,9 @@ async function main(): Promise<void> {
           projectRoot = thread.projectPath;
         }
         const catConfig = catRegistry.tryGet(catId)?.config;
-        if (catConfig?.provider === 'anthropic' || catConfig?.provider === 'opencode') {
-          const boundAccountRef = resolveBoundAccountRefForCat(
-            projectRoot,
-            catId,
-            catConfig as CatConfig & { providerProfileId?: string },
-          );
-          const runtime = resolveForClient(projectRoot, catConfig.provider, boundAccountRef);
+        if (catConfig?.clientId === 'anthropic' || catConfig?.clientId === 'opencode') {
+          const effectiveAccountRef = resolveBoundAccountRefForCat(projectRoot, catId, catConfig);
+          const runtime = resolveForClient(projectRoot, catConfig.clientId, effectiveAccountRef);
           if (!runtime?.apiKey) return null;
           return { apiKey: runtime.apiKey, baseUrl: runtime.baseUrl || 'https://api.anthropic.com' };
         }
@@ -398,6 +527,9 @@ async function main(): Promise<void> {
     : existsSync(resolve(process.cwd(), '..', '..', 'docs', 'features'))
       ? resolve(process.cwd(), '..', '..')
       : process.cwd();
+
+  const { initRepoIdentity, isSameRepo } = await import('./utils/is-same-repo.js');
+  initRepoIdentity(repoRoot);
 
   const { createMemoryServices } = await import('./domains/memory/factory.js');
   const memoryServices = await createMemoryServices({
@@ -444,7 +576,80 @@ async function main(): Promise<void> {
       return excluded;
     },
   });
+  // F152: Wire evidence store into /ready probe
+  evidenceStoreRef = memoryServices.evidenceStore;
   app.log.info('[api] F102: SQLite memory services initialized');
+
+  // Thread index repair: rebuild ZSet indexes from thread detail hashes if sparse.
+  // Prevents "all threads disappeared" after unclean shutdown.
+  // Must run BEFORE evidence index rebuild — threadListFn reads ZSet indexes.
+  if (threadStore.repairIndex) {
+    const startMs = Date.now();
+    try {
+      const result = await threadStore.repairIndex();
+      if (result.repairedMembers > 0) {
+        app.log.info(
+          `[api] Thread index repair: ${result.repairedMembers} members rebuilt across ${result.repairedUsers} user indexes (${Date.now() - startMs}ms)`,
+        );
+      }
+    } catch (err) {
+      app.log.warn(`[api] Thread index repair failed (non-fatal): ${err}`);
+    }
+  }
+
+  // F152 Phase B: Expedition Bootstrap — state manager + service
+  const { IndexStateManager } = await import('./domains/memory/IndexStateManager.js');
+  const { ExpeditionBootstrapService } = await import('./domains/memory/ExpeditionBootstrapService.js');
+  const indexStateManager = new IndexStateManager(memoryServices.store.getDb());
+  const { execFileSync } = await import('node:child_process');
+  const getFingerprint = (projectPath: string) => {
+    try {
+      return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectPath, encoding: 'utf-8' }).trim();
+    } catch {
+      return '';
+    }
+  };
+  const expeditionBootstrapService = new ExpeditionBootstrapService(indexStateManager, {
+    rebuildIndex: async (projectPath: string) => {
+      const startMs = Date.now();
+      const { buildStructuralSummary } = await import('./domains/memory/ExpeditionBootstrapService.js');
+      const summary = buildStructuralSummary(projectPath);
+      return { docsIndexed: summary.docsList.length, durationMs: Date.now() - startMs };
+    },
+    getFingerprint,
+    getTierCoverage: async (projectPath: string) => {
+      if (!isSameRepo(projectPath, repoRoot)) return {};
+
+      const db = memoryServices.store.getDb();
+      const rows = db
+        .prepare(
+          `SELECT provenance_tier, COUNT(*) as cnt FROM evidence_docs WHERE provenance_tier IS NOT NULL AND source_path NOT LIKE 'archive/%' GROUP BY provenance_tier`,
+        )
+        .all() as Array<{ provenance_tier: string; cnt: number }>;
+      const result: Record<string, number> = {};
+      for (const row of rows) {
+        result[row.provenance_tier] = row.cnt;
+      }
+      return result;
+    },
+    getKindCoverage: async (projectPath: string) => {
+      if (!isSameRepo(projectPath, repoRoot)) return {};
+
+      const { mapKindToSourceType } = await import('./routes/evidence-helpers.js');
+      const db = memoryServices.store.getDb();
+      const rows = db
+        .prepare(
+          `SELECT kind, COUNT(*) as cnt FROM evidence_docs WHERE kind IS NOT NULL AND source_path NOT LIKE 'archive/%' GROUP BY kind`,
+        )
+        .all() as Array<{ kind: string; cnt: number }>;
+      const result: Record<string, number> = {};
+      for (const row of rows) {
+        const sourceType = mapKindToSourceType(row.kind);
+        result[sourceType] = (result[sourceType] || 0) + row.cnt;
+      }
+      return result;
+    },
+  });
 
   // F102 D-2: Auto-rebuild evidence index on startup (AC-D4)
   if (memoryServices.indexBuilder) {
@@ -518,9 +723,10 @@ async function main(): Promise<void> {
   const packTemplateStore = new PackTemplateStore(schedulerDb);
 
   // Phase 4: delivery + content fetch for template execution
-  const { createDeliverFn } = await import('./infrastructure/scheduler/delivery.js');
+  const { createDeliverFn, createLifecycleToastFn } = await import('./infrastructure/scheduler/delivery.js');
   const { createFetchContentFn } = await import('./infrastructure/scheduler/content-fetcher.js');
   const schedulerDeliver = createDeliverFn({ messageStore, socketManager });
+  const schedulerLifecycleToast = createLifecycleToastFn({ socketManager });
   const schedulerFetchContent = createFetchContentFn();
 
   const taskRunnerV2 = new TaskRunnerV2({
@@ -530,6 +736,7 @@ async function main(): Promise<void> {
     globalControlStore,
     emissionStore,
     deliver: schedulerDeliver,
+    notifyLifecycle: schedulerLifecycleToast,
     fetchContent: schedulerFetchContent,
   });
 
@@ -537,6 +744,7 @@ async function main(): Promise<void> {
   const { DynamicTaskStore } = await import('./infrastructure/scheduler/DynamicTaskStore.js');
   const { templateRegistry } = await import('./infrastructure/scheduler/templates/registry.js');
   const dynamicTaskStore = new DynamicTaskStore(schedulerDb);
+  taskRunnerV2.setDynamicTaskStore(dynamicTaskStore); // #415: wire store for once-trigger auto-retirement
 
   // ── F139 Phase 2+3A+3B: Schedule panel API routes ──
   const { scheduleRoutes } = await import('./routes/schedule.js');
@@ -547,6 +755,8 @@ async function main(): Promise<void> {
     globalControlStore,
     packTemplateStore,
     taskStore,
+    notifyLifecycle: schedulerLifecycleToast,
+    registry,
   });
 
   // ── Phase G: Summary Compaction (registers into unified scheduler) ──
@@ -557,7 +767,7 @@ async function main(): Promise<void> {
 
       // Abstractive summary API config resolution (priority order):
       // 1. F102_API_BASE + F102_API_KEY (explicit override)
-      // 2. ANTHROPIC_API_KEY + local proxy (http://127.0.0.1:{ANTHROPIC_PROXY_PORT}/{first-slug})
+      // 2. Unified accounts system (credentials.json) + local proxy
       // 3. null → skip abstractive
       const generateAbstractive = createAbstractiveClient(
         async () => {
@@ -565,8 +775,9 @@ async function main(): Promise<void> {
           if (process.env.F102_API_BASE && process.env.F102_API_KEY) {
             return { mode: 'api_key' as const, baseUrl: process.env.F102_API_BASE, apiKey: process.env.F102_API_KEY };
           }
-          // Priority 2: use existing ANTHROPIC_API_KEY + local proxy
-          const apiKey = process.env.ANTHROPIC_API_KEY;
+          // Priority 2: deterministic binding with installer-only fallback (502 regression)
+          const runtimeProfile = resolveAnthropicRuntimeProfile(process.cwd());
+          const apiKey = runtimeProfile.apiKey;
           if (!apiKey) return null;
           const proxyPort = process.env.ANTHROPIC_PROXY_PORT || '9877';
           // Read first upstream slug from proxy-upstreams.json
@@ -718,12 +929,8 @@ async function main(): Promise<void> {
     }
     app.log.info(`[api] CatRegistry initialized: ${catRegistry.getAllIds().join(', ')}`);
   } catch (err) {
-    app.log.warn(`[api] Failed to load cat template/catalog, falling back to built-in CAT_CONFIGS: ${String(err)}`);
-    // Fallback: register from static CAT_CONFIGS
-    const { CAT_CONFIGS } = await import('@cat-cafe/shared');
-    for (const [id, config] of Object.entries(CAT_CONFIGS)) {
-      if (!catRegistry.has(id)) catRegistry.register(id, config);
-    }
+    app.log.error(`[api] Failed to load cat catalog — .cat-cafe/cat-catalog.json is required: ${String(err)}`);
+    throw err;
   }
 
   // ── F149 Phase C: ACP process pool registry (variantId → AcpProcessPool) ──
@@ -742,7 +949,7 @@ async function main(): Promise<void> {
       // F32-b P1 fix: do NOT pass model here — let constructors resolve via
       // getCatModel(catId) which respects env override (CAT_*_MODEL > config > fallback)
       let service: AgentService;
-      switch (config.provider) {
+      switch (config.clientId) {
         case 'anthropic':
           service = new ClaudeAgentService({ catId });
           break;
@@ -758,6 +965,8 @@ async function main(): Promise<void> {
             const { AcpProcessPool } = await import('./domains/cats/services/agents/providers/acp/AcpProcessPool.js');
             const { AcpClient } = await import('./domains/cats/services/agents/providers/acp/AcpClient.js');
             const acpProjectRoot = findMonorepoRoot();
+            const acpCommand = resolveAcpBootstrapCommand(acpProjectRoot, acpConfig.command);
+            const acpArgs = resolveAcpBootstrapArgs(acpProjectRoot, acpConfig.startupArgs);
             const poolKey = { projectPath: acpProjectRoot, providerProfile: id };
             // Shared pool per variant — reused across cats with same variant
             if (!acpPoolRegistry.has(id)) {
@@ -770,9 +979,9 @@ async function main(): Promise<void> {
                 acpConfig,
                 () =>
                   new AcpClient({
-                    command: acpConfig.command,
-                    args: acpConfig.startupArgs,
-                    cwd: acpProjectRoot,
+                    command: acpCommand,
+                    args: acpArgs,
+                    cwd: resolveAcpBootstrapCwd(acpProjectRoot, id),
                   }),
               );
               acpPoolRegistry.set(id, pool);
@@ -793,18 +1002,27 @@ async function main(): Promise<void> {
           }
           break;
         }
+        case 'kimi':
+          service = new KimiAgentService({ catId });
+          break;
         case 'dare':
           service = new DareAgentService({ catId });
           break;
         case 'antigravity':
           service = new AntigravityAgentService({
             catId,
-            commandArgs: config.commandArgs,
           });
           break;
         case 'opencode':
           service = new OpenCodeAgentService({ catId });
           break;
+        case 'catagent': {
+          const { CatAgentService } = await import(
+            './domains/cats/services/agents/providers/catagent/CatAgentService.js'
+          );
+          service = new CatAgentService({ catId, projectRoot: findMonorepoRoot(), catConfig: config });
+          break;
+        }
         case 'a2a': {
           const { A2AAgentService } = await import('./domains/cats/services/agents/providers/A2AAgentService.js');
           const envKey = `CAT_${id.toUpperCase()}_A2A_URL`;
@@ -817,7 +1035,7 @@ async function main(): Promise<void> {
           break;
         }
         default:
-          app.log.warn(`[api] Unknown provider "${config.provider}" for cat "${id}". It will not be routable.`);
+          app.log.warn(`[api] Unknown client "${config.clientId}" for cat "${id}". It will not be routable.`);
           continue;
       }
       agentRegistry.register(id, service);
@@ -968,6 +1186,8 @@ async function main(): Promise<void> {
     packStore,
     evidenceStore: memoryServices.evidenceStore,
     ...(toolUsageCounter ? { toolUsageCounter } : {}),
+    guideSessionStore,
+    dismissTracker,
   });
 
   // F39: Message queue delivery
@@ -981,6 +1201,7 @@ async function main(): Promise<void> {
     messageStore,
     log: app.log,
   });
+  socketManager.setQueueProcessor(queueProcessor);
 
   // F101: Game engine store (created early so messages route can intercept /game commands)
   const { RedisGameStore } = await import('./domains/cats/services/stores/redis/RedisGameStore.js');
@@ -1043,6 +1264,7 @@ async function main(): Promise<void> {
     queueProcessor,
     ...(f101GameStore ? { gameStore: f101GameStore } : {}),
     ...(f101SharedDriver ? { autoPlayer: f101SharedDriver } : {}),
+    holdBallCancelDeps: { dynamicTaskStore, taskRunner: taskRunnerV2 },
   };
   await app.register(messagesRoutes, messagesOpts);
   await app.register(queueRoutes, {
@@ -1066,6 +1288,15 @@ async function main(): Promise<void> {
     socketManager,
     threadStore,
   });
+  // F155: Frontend-facing guide actions (no MCP auth, uses userId header)
+  if (threadStore) {
+    await app.register(guideActionRoutes, {
+      threadStore,
+      socketManager,
+      guideSessionStore,
+      dismissTracker,
+    });
+  }
   await app.register(catsRoutes);
 
   // F149 Phase C: ACP pool diagnostics endpoint (gated by env flag)
@@ -1087,6 +1318,15 @@ async function main(): Promise<void> {
   if (toolUsageCounter) {
     await app.register(toolUsageRoutes, { toolUsageCounter });
   }
+  // F153 Phase E: Hub embedded observability routes
+  const { telemetryRoutes } = await import('./routes/telemetry.js');
+  await app.register(telemetryRoutes, {
+    traceStore: telemetryHandle.traceStore,
+    getMetricsText: telemetryHandle.getMetricsText ?? undefined,
+    metricsSnapshotStore: telemetryHandle.metricsSnapshotStore ?? undefined,
+    checkReadiness,
+  });
+
   // F075 Phase B+C: Game + Achievement stores
   const { GameStore } = await import('./domains/leaderboard/game-store.js');
   const { AchievementStore } = await import('./domains/leaderboard/achievement-store.js');
@@ -1095,6 +1335,7 @@ async function main(): Promise<void> {
   await app.register(leaderboardRoutes, { messageStore, gameStore, achievementStore });
   await app.register(leaderboardEventsRoutes, { gameStore, achievementStore });
   await app.register(bootcampRoutes, { threadStore });
+  await app.register(firstRunQuestRoutes, { threadStore });
   const connectorHubOpts: Parameters<typeof connectorHubRoutes>[1] = { threadStore };
   await app.register(connectorHubRoutes, connectorHubOpts);
   await app.register(brakeRoutes, { activityTracker });
@@ -1165,13 +1406,21 @@ async function main(): Promise<void> {
   const limbPairingStore = new LimbPairingStore();
   registerLimbNodeRoutes(app, { limbRegistry, pairingStore: limbPairingStore });
 
+  // F174 D2b-1 — single notifier instance shared between callback auth preHandler
+  // (posts in-context surface on 401) and the hide-similar debug endpoint
+  // (lets the user 24h-suppress a (reason, tool, catId) tuple).
+  const callbackAuthNotifier = new CallbackAuthSystemMessageNotifier({ messageStore, socketManager });
+
   const callbackOpts = {
     registry,
+    agentKeyRegistry,
     messageStore,
     socketManager,
+    callbackAuthNotifier,
     taskStore,
     backlogStore,
     threadStore,
+    agentRegistry,
     router,
     invocationRecordStore,
     invocationTracker,
@@ -1185,8 +1434,22 @@ async function main(): Promise<void> {
     reflectionService: memoryServices.reflectionService,
     limbRegistry,
     limbPairingStore,
+    guideSessionStore,
+    holdBallDeps: {
+      registry,
+      taskRunner: taskRunnerV2,
+      templateRegistry,
+      dynamicTaskStore,
+      messageStore,
+      socketManager,
+      threadStore,
+    },
   } as Parameters<typeof callbacksRoutes>[1];
   await app.register(callbacksRoutes, callbackOpts);
+
+  // F174 Phase D1 — callback auth failure telemetry debug endpoint (AC-D3).
+  // D2b-1 adds POST /api/debug/callback-auth/hide-similar (24h opt-out) when notifier is wired.
+  registerCallbackAuthDebugRoute(app, { notifier: callbackAuthNotifier });
 
   // Authorization system — 猫猫动态权限 (Redis-backed when available)
   const authRuleStore = createAuthorizationRuleStore(redis);
@@ -1198,7 +1461,7 @@ async function main(): Promise<void> {
     auditStore: authAuditStore,
     io: socketManager.getIO(),
   });
-  await app.register(callbackAuthRoutes, { registry, authManager });
+  await app.register(callbackAuthRoutes, { authManager, registry });
   await app.register(authorizationRoutes, {
     authManager,
     ruleStore: authRuleStore,
@@ -1216,6 +1479,7 @@ async function main(): Promise<void> {
     taskProgressStore,
     backlogStore,
     ...(readStateStore ? { readStateStore } : {}),
+    guideSessionStore,
   });
   await app.register(threadBranchRoutes, {
     threadStore,
@@ -1245,13 +1509,104 @@ async function main(): Promise<void> {
     });
   }
   await app.register(tasksRoutes, { taskStore, socketManager });
+  const fetchIssuesForSync = async (repo: string) => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const { stdout } = await execFileAsync(
+      'gh',
+      [
+        'api',
+        `/repos/${repo}/issues`,
+        '--method',
+        'GET',
+        '--jq',
+        '.[] | select(.pull_request == null) | {number, title, state, labels: [.labels[].name], comments, user: .user.login, html_url}',
+        '--paginate',
+        '-f',
+        'state=all',
+        '-f',
+        'per_page=100',
+      ],
+      { timeout: 60_000 },
+    );
+    if (!stdout.trim()) return [];
+    return stdout
+      .trim()
+      .split('\n')
+      .map((line: string) => JSON.parse(line));
+  };
+  const fetchPrsForSync = async (repo: string) => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const { stdout } = await execFileAsync(
+      'gh',
+      [
+        'api',
+        `/repos/${repo}/pulls`,
+        '--method',
+        'GET',
+        '--jq',
+        '.[] | {number, title, state, merged_at: .merged_at, user: .user.login, head_sha: .head.sha, draft, labels: [.labels[].name], updated_at: .updated_at}',
+        '--paginate',
+        '-f',
+        'state=all',
+        '-f',
+        'per_page=100',
+      ],
+      { timeout: 60_000 },
+    );
+    if (!stdout.trim()) return [];
+    return stdout
+      .trim()
+      .split('\n')
+      .map((line: string) => JSON.parse(line));
+  };
+  const fetchPrReviewsForSync = async (_repo: string, prNumber: number) => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const { stdout } = await execFileAsync(
+      'gh',
+      [
+        'api',
+        '--paginate',
+        `/repos/${_repo}/pulls/${prNumber}/reviews`,
+        '--method',
+        'GET',
+        '--jq',
+        '.[] | {user: .user.login, state, commit_id}',
+      ],
+      { timeout: 30_000 },
+    );
+    if (!stdout.trim()) return [];
+    return stdout
+      .trim()
+      .split('\n')
+      .map((line: string) => JSON.parse(line));
+  };
+  const { InMemoryCommunityPrStore } = await import(
+    './domains/cats/services/stores/memory/InMemoryCommunityPrStore.js'
+  );
+  const communityPrStore = new InMemoryCommunityPrStore();
+  await app.register(communityIssueRoutes, {
+    communityIssueStore,
+    taskStore,
+    socketManager,
+    registry,
+    fetchIssues: fetchIssuesForSync,
+    communityPrStore,
+    fetchPrs: fetchPrsForSync,
+    fetchPrReviews: fetchPrReviewsForSync,
+  });
   await app.register(backlogRoutes, { backlogStore, threadStore, messageStore });
 
   // F076: External projects + Need Audit
   const { ExternalProjectStore } = await import('./domains/projects/external-project-store.js');
   const { IntentCardStore } = await import('./domains/projects/intent-card-store.js');
   const { NeedAuditFrameStore } = await import('./domains/projects/need-audit-frame-store.js');
-  const externalProjectStore = new ExternalProjectStore();
+  const externalProjectStore = new ExternalProjectStore(redis);
   const intentCardStore = new IntentCardStore();
   const needAuditFrameStore = new NeedAuditFrameStore();
   const { ResolutionStore } = await import('./domains/projects/resolution-store.js');
@@ -1273,15 +1628,39 @@ async function main(): Promise<void> {
   await app.register(projectsRoutes);
   await app.register(mkdirRoute);
   await app.register(governanceStatusRoute);
-  await app.register(projectSetupRoute);
+  await app.register(projectSetupRoute, {
+    memoryBootstrapService: expeditionBootstrapService as { bootstrap: (p: string, o?: unknown) => Promise<unknown> },
+    socketManager: socketManager ?? undefined,
+  });
+  await app.register(projectsBootstrapRoutes, {
+    stateManager: indexStateManager,
+    bootstrapService: expeditionBootstrapService,
+    socketManager: socketManager!,
+    getFingerprint,
+  });
   await app.register(exportRoutes, { messageStore, threadStore });
   await app.register(configRoutes);
   await app.register(configSecretsRoutes);
   await app.register(featureDocDetailRoutes);
-  await app.register(providerProfilesRoutes);
+  await app.register(accountsRoutes);
   await app.register(claudeRescueRoutes);
   await app.register(auditRoutes, { threadStore });
   await app.register(capabilitiesRoutes);
+
+  {
+    const { createAdapterRegistry } = await import('./marketplace/index.js');
+    const { loadClaudeCatalog, loadCodexCatalog, loadOpenClawCatalog, loadAntigravityCatalog } = await import(
+      './marketplace/catalog-loaders.js'
+    );
+    const registry = createAdapterRegistry({
+      claude: { catalogLoader: loadClaudeCatalog },
+      codex: { catalogLoader: loadCodexCatalog },
+      openclaw: { catalogLoader: loadOpenClawCatalog },
+      antigravity: { catalogLoader: loadAntigravityCatalog },
+    });
+    await app.register(marketplaceRoutes, { registry });
+  }
+
   await app.register(workspaceRoutes, {
     socketEmit: (event, data, room) => {
       socketManager?.broadcastToRoom(room, event, data);
@@ -1302,6 +1681,7 @@ async function main(): Promise<void> {
       socketManager?.broadcastToRoom(room, event, data);
     },
   });
+  await app.register(avatarsRoutes);
   await app.register(skillsRoutes);
   await app.register(memoryRoutes, { memoryStore, threadStore });
 
@@ -1346,6 +1726,29 @@ async function main(): Promise<void> {
     knowledgeResolver: memoryServices.knowledgeResolver,
   });
 
+  // F163: Knowledge promotion admin API (localhost-only)
+  const { f163AdminRoutes } = await import('./routes/f163-admin.js');
+  await app.register(f163AdminRoutes, {
+    evidenceStore: memoryServices.evidenceStore as unknown as Parameters<typeof f163AdminRoutes>[1]['evidenceStore'],
+  });
+
+  // F163 Phase C: Knowledge audit routes (contradiction check, flag-review, review-queue, health-report)
+  const { f163AuditRoutes } = await import('./routes/f163-audit-routes.js');
+  await app.register(f163AuditRoutes, {
+    evidenceStore: memoryServices.evidenceStore as unknown as Parameters<typeof f163AuditRoutes>[1]['evidenceStore'],
+  });
+
+  // F152 Phase C: Distillation routes (global lesson reflow)
+  if (memoryServices.globalStore) {
+    const { DistillationService } = await import('./domains/memory/distillation-service.js');
+    const distillationService = new DistillationService(memoryServices.store, memoryServices.globalStore);
+    await distillationService.initialize();
+    await app.register(distillationRoutes, {
+      evidenceStore: memoryServices.evidenceStore,
+      distillationService,
+    });
+  }
+
   // F129: Pack system routes (reuse shared packStore from above)
   {
     const { PackSecurityGuard } = await import('./domains/packs/PackSecurityGuard.js');
@@ -1355,7 +1758,7 @@ async function main(): Promise<void> {
     const root = findMonorepoRoot(process.cwd());
     await app.register(packsRoutes, {
       packLoader,
-      catConfigPath: join(root, 'cat-config.json'),
+      catTemplatePath: join(root, 'cat-template.json'),
       sharedRulesPath: join(root, 'cat-cafe-skills', 'refs', 'shared-rules.md'),
       skillsManifestPath: join(root, 'cat-cafe-skills', 'manifest.yaml'),
     });
@@ -1398,8 +1801,14 @@ async function main(): Promise<void> {
     `[api] F142-B: CommandRegistry loaded (${commandRegistry.getAll().length} commands, ${skillCommandMap.size} skills)`,
   );
 
-  // Commands route needs opus service for task extraction
-  const opusService = new ClaudeAgentService();
+  // Commands route needs opus service for task extraction.
+  // Lazy-init: empty catalog (first-run) has no opus entry yet — defer until first use.
+  let _opusService: ClaudeAgentService | undefined;
+  const opusService: AgentService = {
+    invoke(...args: Parameters<AgentService['invoke']>) {
+      return (_opusService ??= new ClaudeAgentService()).invoke(...args);
+    },
+  };
   await app.register(commandsRoutes, {
     messageStore,
     taskStore,
@@ -1420,7 +1829,7 @@ async function main(): Promise<void> {
   });
 
   // Serve uploaded files (images)
-  const uploadDir = process.env.UPLOAD_DIR ?? './uploads';
+  const uploadDir = getDefaultUploadDir(process.env.UPLOAD_DIR);
   await app.register(uploadsRoutes, { uploadDir });
 
   // F088: Serve downloaded connector media files
@@ -1460,20 +1869,6 @@ async function main(): Promise<void> {
 
   // F-BLOAT: Progressive disclosure docs endpoints (no auth, static content)
   await app.register(registerCallbackDocsRoutes);
-
-  // GitHub Review Watcher stores + routes (BACKLOG #81)
-  // Must register routes BEFORE app.listen()
-  const processedEmailStore = new MemoryProcessedEmailStore();
-  const reviewRouter = new ReviewRouter({
-    taskStore,
-    processedEmailStore,
-    threadStore,
-    messageStore,
-    socketManager,
-    log: app.log,
-    defaultUserId: 'default-user',
-    reviewContentFetcher: new GhCliReviewContentFetcher(app.log),
-  });
 
   // F088: Register connector webhook routes BEFORE listen (Fastify requires it)
   const connectorWebhookHandlers = new Map<string, import('./routes/connector-webhooks.js').ConnectorWebhookHandler>();
@@ -1538,9 +1933,12 @@ async function main(): Promise<void> {
     f101RecoveryPlayer?.stopAllLoops();
   });
 
+  // #603: Preload governance overlay (.local / .local-override)
   // Start listening
   let address: string;
   try {
+    const { initGovernanceOverlay } = await import('./domains/cats/services/context/SystemPromptBuilder.js');
+    await initGovernanceOverlay();
     address = await app.listen({ port: PORT, host: HOST });
   } catch (err) {
     await apiInstanceLease?.release().catch(() => {});
@@ -1548,6 +1946,15 @@ async function main(): Promise<void> {
   }
   app.log.info(`[api] Server running on ${address}`);
   app.log.info(`[ws] WebSocket server ready`);
+
+  // F156: Friendly hint for private network access
+  if (HOST === '0.0.0.0' && process.env.CORS_ALLOW_PRIVATE_NETWORK !== 'true') {
+    app.log.warn(
+      '[network] 检测到监听所有网络 (0.0.0.0)，但私网设备访问未开启。' +
+        '手机/平板通过局域网或 Tailscale 访问可能被拦截。' +
+        '在 .env 中添加 CORS_ALLOW_PRIVATE_NETWORK=true 并重启服务（参考 .env.example）',
+    );
+  }
 
   // F048 Phase A: Sweep orphaned invocations from previous process crash.
   // Runs only after the API has both:
@@ -1570,6 +1977,14 @@ async function main(): Promise<void> {
     } catch (err) {
       app.log.warn(`[api] Startup sweep failed (best-effort): ${String(err)}`);
     }
+  }
+
+  // F145 P0: Kill orphan agent-browser headless Chrome processes from previous sessions.
+  try {
+    const { cleanOrphanAgentBrowserChrome } = await import('./utils/orphan-chrome-cleaner.js');
+    await cleanOrphanAgentBrowserChrome(app.log);
+  } catch (err) {
+    app.log.warn(`[api] Orphan Chrome cleanup failed (best-effort): ${String(err)}`);
   }
 
   // F118 Hardening: Global session reaper — startup sweep + periodic scan.
@@ -1617,6 +2032,8 @@ async function main(): Promise<void> {
         anthropic: join(root, '.mcp.json'),
         openai: join(root, '.codex', 'config.toml'),
         google: join(root, '.gemini', 'settings.json'),
+        kimi: join(root, '.kimi', 'mcp.json'),
+        antigravity: join(homedir(), '.gemini', 'antigravity', 'mcp_config.json'),
       });
       app.log.info('[api] CLI configs regenerated at startup');
     }
@@ -1624,26 +2041,12 @@ async function main(): Promise<void> {
     app.log.warn(`[api] CLI config regeneration failed (best-effort): ${String(err)}`);
   }
 
-  // F136 Phase 4a: Migrate provider-profiles → accounts + conflict scan (HC-3/HC-5/LL-043).
-  // HC-5: conflict is a HARD error — must propagate, not swallow.
-  // LL-043: legacy source present + accounts missing is a HARD error — don't run with empty accounts.
-  // Migration filesystem errors are best-effort.
-  try {
+  // clowder-ai#340: Account startup — fail-fast (LL-043 / migration conflict / corrupt credentials).
+  // Errors propagate to main().catch → process.exit(1).
+  {
     const { accountStartupHook } = await import('./config/account-startup.js');
     const startupResult = accountStartupHook(findMonorepoRoot(process.cwd()));
-    if (startupResult.migration.migrated) {
-      app.log.info(
-        `[api] F136 account migration: ${startupResult.migration.accountsMigrated} account(s), ${startupResult.migration.credentialsMigrated} credential(s)`,
-      );
-    }
-  } catch (err) {
-    // HC-5 and LL-043 errors are HARD errors — let them crash the server.
-    if (err instanceof Error && (err.message.includes('HC-5') || err.message.includes('LL-043'))) {
-      app.log.error(`[api] ${err.message}`);
-      throw err;
-    }
-    // Other errors (migration filesystem issues) are best-effort.
-    app.log.warn(`[api] F136 account startup hook failed (best-effort): ${String(err)}`);
+    app.log.info(`[api] clowder-ai#340 accounts: ${startupResult.accountCount} account(s) loaded`);
   }
 
   // F101 Phase G: Recover auto-play loops for active games after restart.
@@ -1659,7 +2062,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // Phase 3b: connector invoke trigger (auto-invoke cat after review email routing)
+  // F140 Phase 3b: connector invoke trigger (auto-invoke cat after review feedback delivery via polling)
   const frontendBaseUrl = resolveFrontendBaseUrl(process.env, app.log);
   const invokeTrigger = new ConnectorInvokeTrigger({
     router,
@@ -1680,8 +2083,9 @@ async function main(): Promise<void> {
     log: app.log,
   });
 
-  // F140: Shared feedback filter (Rule C) — used by BOTH email watcher and API polling
+  // F140: Feedback filter (Rule A self-authored only post-E.2 cutover)
   const { createGitHubFeedbackFilter } = await import('./infrastructure/email/github-feedback-filter.js');
+  const { createSetupNoiseFilter } = await import('./infrastructure/email/setup-noise-filter.js');
   let selfGitHubLogin: string | undefined;
   try {
     const { execFile } = await import('node:child_process');
@@ -1692,23 +2096,26 @@ async function main(): Promise<void> {
   } catch {
     app.log.warn('[api] F140: could not resolve GitHub login — self-filter disabled');
   }
-  const authoritativeLogins = (process.env.GITHUB_AUTHORITATIVE_REVIEW_LOGINS || 'chatgpt-codex-connector[bot]')
+  const feedbackFilter = createGitHubFeedbackFilter({ selfGitHubLogin });
+
+  // F140 Phase E.2 cutover: setup-noise bot allowlist env name切换
+  // GITHUB_SETUP_NOISE_BOT_LOGINS (new, post-E.2 semantics) takes precedence;
+  // GITHUB_AUTHORITATIVE_REVIEW_LOGINS (legacy E.1 借壳) falls back for
+  // backward compat — will be removed in a follow-up release.
+  const setupNoiseBotLogins = (
+    process.env.GITHUB_SETUP_NOISE_BOT_LOGINS ||
+    process.env.GITHUB_AUTHORITATIVE_REVIEW_LOGINS ||
+    'chatgpt-codex-connector[bot]'
+  )
     .split(',')
     .map((s: string) => s.trim())
     .filter(Boolean);
-  const feedbackFilter = createGitHubFeedbackFilter({
-    selfGitHubLogin,
-    authoritativeReviewLogins: authoritativeLogins,
-  });
-  app.log.info(`[api] F140: authoritative review logins=${authoritativeLogins.join(', ')}`);
+  app.log.info(`[api] F140: setup-noise bot logins=${setupNoiseBotLogins.join(', ')}`);
 
-  // Start email watcher AFTER listen (non-blocking, best-effort)
-  await startGithubReviewWatcher({
-    log: app.log,
-    reviewRouter,
-    invokeTrigger,
-    feedbackFilter,
-  });
+  const setupNoiseFilter = createSetupNoiseFilter(setupNoiseBotLogins);
+
+  // F140 Phase E.3 cleanup (2026-04-25): email/IMAP watcher source files removed.
+  // Polling (ReviewFeedbackTaskSpec) is the sole truth source for review feedback.
 
   // F139 Phase 4b: late-bind invokeTrigger so templates can wake cats
   taskRunnerV2.setInvokeTrigger(invokeTrigger);
@@ -1773,7 +2180,7 @@ async function main(): Promise<void> {
     );
 
     // F140: review-feedback with ReviewFeedbackRouter (KD-11 replaces review-comments)
-    // feedbackFilter already created above (shared with email watcher — Rule C)
+    // feedbackFilter created above — Rule A only post-E.2 cutover (self-authored skip)
 
     const fetchPaginated = async (endpoint: string) => {
       const { execFile } = await import('node:child_process');
@@ -1832,9 +2239,12 @@ async function main(): Promise<void> {
         reviewFeedbackRouter,
         invokeTrigger,
         log: app.log,
-        // Unified feedback filter (Rule A: self-authored, Rule B: authoritative review bot)
+        // F140 Phase E.2 cutover: Rule A only (self-authored skip). Authoritative bot
+        // review feedback is now delivered through this polling channel — Rule B dropped.
         isEchoComment: (c) => feedbackFilter.shouldSkipComment(c),
         isEchoReview: (r) => feedbackFilter.shouldSkipReview(r),
+        // F140 Phase E.1: bot setup-only conversation noise (polling-side)
+        isNoiseComment: setupNoiseFilter,
       }),
     );
     app.log.info('[api] F139/F140: cicd-check, conflict-check, review-feedback specs registered');
@@ -1901,7 +2311,8 @@ async function main(): Promise<void> {
           .map((line: string) => JSON.parse(line));
       };
 
-      const effectiveUserId = process.env.DEFAULT_OWNER_USER_ID || 'default-user';
+      const { getOwnerUserId } = await import('./config/cat-config-loader.js');
+      const effectiveUserId = getOwnerUserId();
 
       taskRunnerV2.register(
         createRepoScanTaskSpec({
@@ -1976,6 +2387,7 @@ async function main(): Promise<void> {
     agentRegistry,
     commandRegistry,
     bindingStore: connectorBindingStore,
+    frontendBaseUrl,
   };
 
   /** Re-wire all hook consumers after gateway (re)start */
@@ -1994,6 +2406,13 @@ async function main(): Promise<void> {
     }
     (connectorHubOpts as { weixinAdapter?: unknown }).weixinAdapter = handle.weixinAdapter;
     (connectorHubOpts as { startWeixinPolling?: () => void }).startWeixinPolling = handle.startWeixinPolling;
+    // F132 Phase E: WeCom Bot dynamic start/stop
+    (
+      connectorHubOpts as { startWeComBotStream?: (botId: string, secret: string) => Promise<void> }
+    ).startWeComBotStream = handle.startWeComBotStream;
+    (connectorHubOpts as { stopWeComBot?: () => Promise<void> }).stopWeComBot = handle.stopWeComBot;
+    // F132 bugfix: live health getter for status endpoint
+    (connectorHubOpts as { getWeComBotAdapter?: () => unknown }).getWeComBotAdapter = handle.getWeComBotAdapter;
     (connectorHubOpts as { permissionStore?: unknown }).permissionStore = handle.permissionStore;
   }
 
@@ -2076,13 +2495,6 @@ async function main(): Promise<void> {
         }
       }
 
-      // Stop GitHub review watcher
-      try {
-        await stopGithubReviewWatcher();
-      } catch (err) {
-        app.log.error(`[api] GithubReviewWatcher stop failed: ${String(err)}`);
-      }
-
       taskRunnerV2.stop();
 
       // Stop event bus subscribers
@@ -2108,6 +2520,16 @@ async function main(): Promise<void> {
       } catch (err) {
         exitCode = 1;
         app.log.error(`[api] SocketManager close failed: ${String(err)}`);
+      }
+
+      // F153 Phase E L3: Stop burn-rate monitor
+      burnRateMonitor?.stop();
+
+      // F152: Flush and shutdown OTel SDK before closing server
+      try {
+        await telemetryHandle.shutdown();
+      } catch (err) {
+        app.log.error(`[api] OTel shutdown failed: ${String(err)}`);
       }
 
       // Close Fastify server

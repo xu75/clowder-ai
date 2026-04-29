@@ -110,7 +110,7 @@ Phase N merge → 碰头（不是"要不要继续"，是"方向对不对"）→ 
 
 ## Reviewer 配对规则
 
-动态匹配自 `cat-config.json`：
+动态匹配自运行时猫配置（repo 根 `cat-template.json` + `.cat-cafe/cat-catalog.json` overlay）：
 1. 跨 family 优先 | 2. 必须有 peer-reviewer 角色 | 3. 必须 available
 4. 优先 lead | 5. 优先活跃猫
 
@@ -170,6 +170,8 @@ Phase N merge → 碰头（不是"要不要继续"，是"方向对不对"）→ 
 4. 在 clowder-ai 上开 PR、review、merge
 5. Cherry-pick fix 回 cat-cafe main
 6. `intake-from-opensource.sh --record --pr <N> --decision <absorbed|public-only>`
+   - 若 `--decision absorbed`：hotfix 是我们自己 outbound 提的（没有 cat-cafe 的 Intake Intent Issue / absorb PR），必须加 `--skip-absorbed-guard` 跳过 strict guard
+   - 若是社区 inbound PR 的 absorbed record（不是本条 hotfix 流程），参见 `cat-cafe-skills/refs/opensource-ops-inbound-pr.md`，要带 `--intent-issue <I> --absorb-pr <P> --review-proof <URL|file>`
 7. `intake-from-opensource.sh --advance-ledger`
 
 > 详见 Hotfix Lane 设计 (internal)
@@ -201,10 +203,18 @@ Phase N merge → 碰头（不是"要不要继续"，是"方向对不对"）→ 
 4. target 仓后续真正切 `vX.Y.Z` 时，必须通过：
 
 ```bash
-bash scripts/publish-release-tag.sh --release-tag=vX.Y.Z --target-sha <clowder_ai_release_commit_sha> --push
+bash scripts/publish-release-tag.sh \
+  --release-tag=vX.Y.Z \
+  --target-sha <clowder_ai_release_commit_sha> \
+  --reconciliation-report=docs/ops/reconciliation-vX.Y.Z.md \
+  --push
 ```
 
-5. `publish-release-tag.sh` 会强制校验 `source snapshot tag → .sync-provenance.json → target release tag` 三点映射，release notes /后续 backport 也必须引用这两个锚点，而不是口头约定
+5. `publish-release-tag.sh` 会强制校验两层门禁：
+   - `source snapshot tag → .sync-provenance.json → target release tag` 三点映射
+   - `reconciliation report` 必须存在；如果报告把 issue 记为 `closed`，GitHub 上也必须已经是 `CLOSED`
+
+release notes /后续 backport 也必须引用这些锚点，而不是口头约定。
 
 一句话：**以后对齐 release，不靠“记得当时是哪次 sync”，靠 `source snapshot tag → target release tag → backport commit` 三点映射。**
 

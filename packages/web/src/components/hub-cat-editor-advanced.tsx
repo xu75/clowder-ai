@@ -51,7 +51,8 @@ export function AdvancedRuntimeSection({
     approvalPolicy: 'on-request' as const,
     authMode: 'oauth' as const,
   };
-  const cliEffortOptions = getCliEffortOptionsForClient(form.client);
+  const cliEffortOptions = getCliEffortOptionsForClient(form.clientId);
+  const sessionChainEnabled = form.sessionChain === 'true' && (strategyForm?.sessionChainEnabled ?? true);
 
   return (
     <SectionCard
@@ -115,20 +116,22 @@ export function AdvancedRuntimeSection({
             tone="success"
           />
         ) : null}
-        {form.client === 'openai' || form.client === 'opencode' ? (
+        {form.clientId === 'openai' || form.clientId === 'opencode' ? (
           <div className="space-y-1">
             <p className="text-sm font-medium text-[#3D2E22]">额外 CLI 参数</p>
             <TagEditor
               tags={form.cliConfigArgs}
               onChange={(nextTags) => onChange({ cliConfigArgs: nextTags })}
               addLabel="+ 添加参数"
-              placeholder={form.client === 'opencode' ? '例如 --variant low' : '例如 --config model_provider="custom"'}
+              placeholder={
+                form.clientId === 'opencode' ? '例如 --variant low' : '例如 --config model_reasoning_effort="low"'
+              }
               emptyLabel="无额外参数"
               tone="green"
             />
             <p className="text-[11px] leading-4 text-[#8A776B]">
               每条直接追加到 CLI 命令，不做隐式转换。`CLI Effort` 请优先用上面的结构化字段。参考：
-              {form.client === 'opencode' ? (
+              {form.clientId === 'opencode' ? (
                 <a href="https://opencode.ai/docs/cli" target="_blank" rel="noreferrer" className="underline">
                   OpenCode CLI
                 </a>
@@ -148,7 +151,15 @@ export function AdvancedRuntimeSection({
           {strategyError ? (
             <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-600">{strategyError}</p>
           ) : null}
-          {strategyForm ? (
+          {strategyForm && !sessionChainEnabled ? (
+            <div className="rounded-2xl border border-[#F5D2B8] bg-[#FFF4EC] px-4 py-3 text-xs leading-5 text-[#C27D52]">
+              <p className="font-semibold">Session Chain 未开启</p>
+              <p>
+                当前成员不会记录或续接 Session Chain，下面的 Session 策略不会生效；先开启 Session Chain 后再配置策略。
+              </p>
+            </div>
+          ) : null}
+          {strategyForm && sessionChainEnabled ? (
             <div className="space-y-4">
               <div className="rounded-2xl border border-[#CFE5D5] bg-[#F5FBF6] px-4 py-3 text-xs leading-5 text-[#6C7A6D]">
                 阈值基于 context 填充率 = 当前 tokens / Max Context Tokens。拖动滑条调节百分比。

@@ -11,8 +11,8 @@ const MAX_DOTS = 18;
 
 type CatLookup = (id: string) => CatData | undefined;
 
-// Some variants use non-hyphen catIds (e.g. gpt52/sonnet/spark/gemini25 in cat-config.json).
-// During the brief pre-/api/cats state, we only have 3 base cats in fallback CAT_CONFIGS,
+// Some variants use non-hyphen catIds (e.g. gpt52/sonnet/spark/gemini25 in the runtime cat config).
+// During the brief pre-/api/cats state, the cat list may be empty,
 // so we map these variant ids to a base cat for color/name consistency.
 const VARIANT_BASE_FALLBACK: Record<string, string> = {
   gpt52: 'codex',
@@ -26,6 +26,7 @@ const FALLBACK_CAT_META: Record<string, { label: string; color: string }> = {
   opus: { label: '布偶猫', color: '#9B7EBD' },
   codex: { label: '缅因猫', color: '#5B8C5A' },
   gemini: { label: '暹罗猫', color: '#5B9BD5' },
+  kimi: { label: '梵花猫', color: '#4B5563' },
   dare: { label: '狸花猫', color: '#D4A76A' },
 };
 
@@ -82,7 +83,7 @@ function getSenderLabel(
 }
 
 function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return new Date(ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 function truncateContent(content: string, maxLen: number): string {

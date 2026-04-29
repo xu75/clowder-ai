@@ -1,7 +1,8 @@
-import { CAT_CONFIGS } from '@cat-cafe/shared';
 import { create } from 'zustand';
 import { getBubbleInvocationId } from '@/debug/bubbleIdentity';
 import { recordDebugEvent } from '@/debug/invocationEventDebug';
+import { getCachedCats } from '@/hooks/useCatData';
+import { saveThreadMessages as saveMessagesSnapshot, saveThreads as saveThreadsSnapshot } from '../utils/offline-store';
 import type {
   CatInvocationInfo,
   CatStatusType,
@@ -49,12 +50,56 @@ export { DEFAULT_THREAD_STATE } from './chat-types';
 // ── Helpers ──
 
 /** Snapshot the flat active-thread fields into a ThreadState object */
+/**
+ * F173 a2a-handoff bug fix: insert message at correct chronological position
+ * if it carries `extra.systemKind === 'a2a_routing'`; otherwise simple append.
+ *
+ * Why narrow scope: addMessage is the streaming hot path (chunks every few ms,
+ * dedup logic above). A global timestamp sort would touch F173 streaming/dedup
+ * invariants and add O(n) per insert. Marker-gated insert avoids both.
+ *
+ * Why needed: a2a_handoff routing pill ("X → Y") emitted by route-serial.ts
+ * arrives over WebSocket, can race against the next cat's stream bubble. If
+ * the bubble arrives first (already appended), the handoff appended later
+ * shows up visually after the bubble it was supposed to precede.
+ */
+function insertOrAppendMessage(messages: ChatMessage[], msg: ChatMessage): ChatMessage[] {
+  if (msg.extra?.systemKind !== 'a2a_routing') {
+    return [...messages, msg];
+  }
+  // Linear scan from the end. Tie-break rules for a2a_routing:
+  // - Strictly older (cur.ts < msg.ts): insert right after — handoff lands here.
+  // - Same ts AND cur is also a2a_routing: insert AFTER cur to preserve
+  //   arrival/server-emit order (multi-target handoffs from same backend yield).
+  //   Without this, two same-ms handoffs would reverse order.
+  //   砚砚 R2 P2.
+  // - Same ts but cur is non-routing (bubble): skip — handoff biases EARLIER
+  //   so routing semantically precedes the bubble. Cloud Codex R2 P2-1.
+  // - Newer (cur.ts > msg.ts): skip.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const cur = messages[i]!;
+    if (cur.timestamp < msg.timestamp) {
+      const next = messages.slice();
+      next.splice(i + 1, 0, msg);
+      return next;
+    }
+    if (cur.timestamp === msg.timestamp && cur.extra?.systemKind === 'a2a_routing') {
+      const next = messages.slice();
+      next.splice(i + 1, 0, msg);
+      return next;
+    }
+  }
+  // All existing messages are newer (or are equal-ts non-routing bubbles) — insert at front
+  return [msg, ...messages];
+}
+
 function snapshotActive(s: ChatState): ThreadState {
   return {
     messages: s.messages,
     isLoading: s.isLoading,
     isLoadingHistory: s.isLoadingHistory,
     hasMore: s.hasMore,
+    hasDraft: s.hasDraft,
     hasActiveInvocation: s.hasActiveInvocation,
     activeInvocations: s.activeInvocations,
     intentMode: s.intentMode,
@@ -64,7 +109,16 @@ function snapshotActive(s: ChatState): ThreadState {
     currentGame: s.currentGame,
     unreadCount: 0, // active thread always 0
     hasUserMention: false,
-    lastActivity: Date.now(),
+    // If the thread is actively streaming, Date.now() is correct — there IS real activity.
+    // Otherwise, preserve the real timestamp so a mere thread switch doesn't reorder the sidebar.
+    lastActivity: s.hasActiveInvocation
+      ? Date.now()
+      : Math.max(
+          s.threadStates[s.currentThreadId]?.lastActivity ?? 0,
+          s.messages.length > 0
+            ? (s.messages[s.messages.length - 1].deliveredAt ?? s.messages[s.messages.length - 1].timestamp)
+            : 0,
+        ),
     queue: s.queue,
     queuePaused: s.queuePaused,
     queuePauseReason: s.queuePauseReason,
@@ -77,6 +131,68 @@ function snapshotActive(s: ChatState): ThreadState {
   };
 }
 
+/** F173 Phase A — ThreadRuntimeWriter mirror helper.
+ *  When a setThreadX writes to the active thread's flat state, this also mirrors
+ *  the same patch into threadStates[currentThreadId] so threadStates is always
+ *  the source of truth (flat is a compatibility mirror, KD-2).
+ *
+ *  Returns the threadStates patch only — the caller must spread the flat patch
+ *  alongside this to emit a single zustand set() with both halves.
+ *
+ *  Pass the *new* values (post-mutation) so the mirror reflects the same outcome
+ *  as the flat update.
+ */
+function mirrorActiveToThreadStates(
+  state: ChatState,
+  threadId: string,
+  patch: Partial<ThreadState>,
+): { threadStates: Record<string, ThreadState> } {
+  const baseThreadState = state.threadStates[threadId] ?? snapshotActive(state);
+  // F173 receive-review fix for砚砚 P1-2 — do NOT stamp lastActivity on mirror.
+  // Mirror is field synchronization, not "real activity occurred". stampThreadCompletion
+  // handles completion timing. Stamping here would break the sidebar sort stability
+  // invariant: redundant setX calls on inactive threads would falsely bump their position.
+  return {
+    threadStates: {
+      ...state.threadStates,
+      [threadId]: {
+        ...baseThreadState,
+        ...patch,
+      },
+    },
+  };
+}
+
+/** F173 Phase A — receive-review fix for砚砚 P1-2.
+ *  Convenience wrapper: mirror an active-thread flat patch to threadStates[currentThreadId]
+ *  in a single set() call, eliminating the "active flat write skips mirror" gap.
+ */
+function mirrorActiveFlat(
+  state: ChatState,
+  patch: Partial<ThreadState>,
+): { threadStates: Record<string, ThreadState> } {
+  return mirrorActiveToThreadStates(state, state.currentThreadId, patch);
+}
+
+/** Stamp completion time into threadStates for a given thread.
+ *  Centralizes the "real activity just ended" semantic so all invocation-clearing
+ *  paths share one definition. Optional `patch` merges extra fields before stamping. */
+function stampThreadCompletion(
+  threadStates: Record<string, ThreadState>,
+  threadId: string,
+  patch?: Partial<ThreadState>,
+): Record<string, ThreadState> {
+  const existing = threadStates[threadId];
+  return {
+    ...threadStates,
+    [threadId]: {
+      ...(existing ?? { ...DEFAULT_THREAD_STATE }),
+      ...patch,
+      lastActivity: Date.now(),
+    },
+  };
+}
+
 /** Flatten a ThreadState into partial ChatState fields */
 function flattenThread(ts: ThreadState): Partial<ChatState> {
   const result: Partial<ChatState> = {
@@ -84,6 +200,7 @@ function flattenThread(ts: ThreadState): Partial<ChatState> {
     isLoading: ts.isLoading,
     isLoadingHistory: ts.isLoadingHistory,
     hasMore: ts.hasMore,
+    hasDraft: ts.hasDraft ?? false,
     hasActiveInvocation: ts.hasActiveInvocation,
     activeInvocations: ts.activeInvocations,
     intentMode: ts.intentMode,
@@ -111,6 +228,7 @@ function flattenThread(ts: ThreadState): Partial<ChatState> {
 const MAX_BLOB_MESSAGES = 200;
 
 const UI_THINKING_EXPANDED_KEY = 'catcafe.ui.thinkingExpandedByDefault';
+const THINKING_CHUNK_SEPARATOR = '\n\n---\n\n';
 
 function loadUiThinkingExpandedByDefault(): boolean {
   if (typeof window === 'undefined') return false;
@@ -128,6 +246,54 @@ function persistUiThinkingExpandedByDefault(next: boolean) {
   } catch {
     // ignore storage failures (privacy mode, quota, etc.)
   }
+}
+
+function renderThinkingChunks(chunks: string[]): string {
+  return chunks.join(THINKING_CHUNK_SEPARATOR);
+}
+
+function getThinkingChunks(message: Pick<ChatMessage, 'thinking' | 'thinkingChunks'>): string[] {
+  if (message.thinkingChunks && message.thinkingChunks.length > 0) {
+    if (!message.thinking || renderThinkingChunks(message.thinkingChunks) === message.thinking) {
+      return message.thinkingChunks;
+    }
+  }
+  return message.thinking ? [message.thinking] : [];
+}
+
+function appendThinkingChunk(
+  message: Pick<ChatMessage, 'thinking' | 'thinkingChunks'>,
+  next: string,
+): Pick<ChatMessage, 'thinking' | 'thinkingChunks'> {
+  const existingChunks = getThinkingChunks(message);
+  if (existingChunks.length === 0) {
+    return { thinking: next, thinkingChunks: [next] };
+  }
+  const lastChunk = existingChunks.at(-1)!;
+  if (lastChunk === next) {
+    return {
+      thinking: renderThinkingChunks(existingChunks),
+      thinkingChunks: existingChunks,
+    };
+  }
+  if (next.startsWith(lastChunk)) {
+    const thinkingChunks = [...existingChunks.slice(0, -1), next];
+    return {
+      thinking: renderThinkingChunks(thinkingChunks),
+      thinkingChunks,
+    };
+  }
+  if (lastChunk.startsWith(next)) {
+    return {
+      thinking: renderThinkingChunks(existingChunks),
+      thinkingChunks: existingChunks,
+    };
+  }
+  const thinkingChunks = [...existingChunks, next];
+  return {
+    thinking: renderThinkingChunks(thinkingChunks),
+    thinkingChunks,
+  };
 }
 
 export type BubbleExpandState = 'expanded' | 'collapsed';
@@ -261,12 +427,13 @@ function fireOwnerMentionNotification(msg: ChatMessage) {
     Notification.requestPermission();
     return;
   }
-  const catConfig = CAT_CONFIGS[msg.catId ?? ''];
-  const catName = catConfig?.displayName ?? msg.catId ?? '猫猫';
+  const cats = getCachedCats();
+  const catData = cats.find((c) => c.id === msg.catId);
+  const catName = catData?.displayName ?? msg.catId ?? '猫猫';
   const preview = typeof msg.content === 'string' ? msg.content.replace(/\n/g, ' ').slice(0, 120) : '';
   new Notification(`${catName} @ 了你`, {
     body: preview,
-    icon: catConfig?.avatar ?? '/favicon.ico',
+    icon: catData?.avatar ?? '/favicon.ico',
     tag: `cocreator-mention-${msg.id}`,
   });
 }
@@ -368,8 +535,12 @@ function updateThreadMessage(
   updater: (message: ChatMessage) => ChatMessage,
 ): ChatState | Partial<ChatState> {
   if (threadId === state.currentThreadId) {
+    // F173 KD-2 (PR-C Task 10): mirror message edits to threadStates[active]
+    // so reconcile / streaming-flag flips stay in lockstep with flat.
+    const messages = state.messages.map((m) => (m.id === messageId ? updater(m) : m));
     return {
-      messages: state.messages.map((m) => (m.id === messageId ? updater(m) : m)),
+      messages,
+      ...mirrorActiveFlat(state, { messages }),
     };
   }
 
@@ -389,12 +560,13 @@ function updateThreadMessage(
 
 // ── Store interface ──
 
-interface ChatState {
+export interface ChatState {
   // Per-thread state (flat — reflects the active thread for backward compat)
   messages: ChatMessage[];
   isLoading: boolean;
   isLoadingHistory: boolean;
   hasMore: boolean;
+  hasDraft: boolean;
   /** Whether the thread has an active invocation (broader than isLoading — stays true during A2A chains) */
   hasActiveInvocation: boolean;
   /** F108: Per-invocation slot tracking — key=invocationId, value=slot info */
@@ -433,6 +605,8 @@ interface ChatState {
   _pendingAckCount: Record<string, number>;
   threads: Thread[];
   isLoadingThreads: boolean;
+  /** F164: True when messages are from offline snapshot, not fresh API data */
+  isOfflineSnapshot: boolean;
   /** UI: Whether Thinking blocks should be expanded by default (global preference). */
   uiThinkingExpandedByDefault: boolean;
   /** Global bubble display defaults from Config Hub (server-side). */
@@ -443,6 +617,12 @@ interface ChatState {
   removeMessage: (id: string) => void;
   prependHistory: (msgs: ChatMessage[], hasMore: boolean) => void;
   replaceMessages: (msgs: ChatMessage[], hasMore: boolean) => void;
+  /** F173 Phase C Task 5+6+7 — single hydration entry point.
+   *  Server GET is authoritative: replaces flat messages AND overwrites
+   *  IDB snapshot in one atomic call. Use this instead of bare
+   *  replaceMessages + saveMessagesSnapshot whenever a server GET response
+   *  fully replaces the current thread timeline. AC-C10. */
+  hydrateThread: (threadId: string, msgs: ChatMessage[], hasMore: boolean) => void;
   replaceMessageId: (fromId: string, toId: string) => void;
   patchMessage: (id: string, patch: ChatMessagePatch) => void;
   appendToLastMessage: (content: string) => void;
@@ -454,6 +634,7 @@ interface ChatState {
   updateRichBlock: (messageId: string, blockId: string, patch: Record<string, unknown>) => void;
   setStreaming: (id: string, streaming: boolean) => void;
   setLoading: (loading: boolean) => void;
+  setThreadHasDraft: (threadId: string, hasDraft: boolean) => void;
   setHasActiveInvocation: (v: boolean) => void;
   /** F108: Register a new active invocation slot */
   addActiveInvocation: (invocationId: string, catId: string, mode: string, startedAt?: number) => void;
@@ -487,6 +668,7 @@ interface ChatState {
   setCurrentThread: (threadId: string) => void;
   setCurrentProject: (projectPath: string) => void;
   setLoadingThreads: (loading: boolean) => void;
+  setOfflineSnapshot: (v: boolean) => void;
   updateThreadTitle: (threadId: string, title: string) => void;
   updateThreadParticipants: (threadId: string, participants: string[]) => void;
   updateThreadPin: (threadId: string, pinned: boolean) => void;
@@ -543,6 +725,10 @@ interface ChatState {
   /** F069: Initialize unread state from API (page load recovery) */
   initThreadUnread: (threadId: string, unreadCount: number, hasUserMention: boolean) => void;
   updateThreadCatStatus: (threadId: string, catId: string, status: CatStatusType) => void;
+  /** F173 PR-C Task 10: clear targetCats / catStatuses + mark stale catInvocations completed
+   *  for a specific thread. Mirrors flat when active. Replaces the flat-only clearCatStatuses
+   *  inside reconcile / hydration paths so KD-2 mirror invariant holds. */
+  clearThreadCatStatuses: (threadId: string) => void;
   /** Batch content-append + metadata + streaming + catStatus into a single set() to prevent
    *  React update-depth overflow during high-frequency background streaming. */
   batchStreamChunkUpdate: (params: {
@@ -607,9 +793,9 @@ interface ChatState {
   workspaceRevealPath: string | null;
   setWorkspaceRevealPath: (path: string | null, originThreadId?: string | null) => void;
 
-  // Phase H + F139: Workspace mode (dev tools / knowledge feed / schedule panel)
-  workspaceMode: 'dev' | 'recall' | 'schedule';
-  setWorkspaceMode: (mode: 'dev' | 'recall' | 'schedule') => void;
+  // Phase H + F139 + F160 + F168: Workspace mode
+  workspaceMode: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community';
+  setWorkspaceMode: (mode: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community') => void;
 
   // ── F120: Preview auto-open (always-mounted listener) ──
   pendingPreviewAutoOpen: { port: number; path: string } | null;
@@ -621,8 +807,12 @@ interface ChatState {
   setPendingChatInsert: (insert: { threadId: string; text: string } | null) => void;
 
   // ── Hub modal (F12) ──
-  hubState: { open: boolean; tab?: string } | null;
-  openHub: (tab?: string) => void;
+  // F174 D2b-3 cloud P2 #1403: subTabNonce bumps on every openHub call so a
+  // second deep-link with the SAME (tab, subTab) still triggers a re-sync —
+  // value-only diff in HubObservabilityTab's useEffect would silently no-op.
+  hubState: { open: boolean; tab?: string; subTab?: string; subTabNonce?: number } | null;
+  /** F174 D2b-3: optional subTab for deep-linking into observability sub-routes etc. */
+  openHub: (tab?: string, subTab?: string) => void;
   closeHub: () => void;
 
   // ── F079: Vote modal ──
@@ -635,6 +825,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isLoading: false,
   isLoadingHistory: false,
   hasMore: true,
+  hasDraft: false,
   hasActiveInvocation: false,
   activeInvocations: {},
   intentMode: null,
@@ -656,11 +847,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   _unreadSuppressedUntil: {},
   _pendingAckCount: {},
   threads: [],
-  isLoadingThreads: false,
+  isLoadingThreads: true,
+  isOfflineSnapshot: false,
   uiThinkingExpandedByDefault: loadUiThinkingExpandedByDefault(),
   globalBubbleDefaults: {
-    // Use old localStorage value as initial fallback for thinking; CLI defaults to collapsed
-    thinking: loadUiThinkingExpandedByDefault() ? 'expanded' : 'collapsed',
+    // Always start collapsed — server config overwrites via fetchGlobalBubbleDefaults().
+    // Previously used localStorage as initial fallback, but this races with thread loading:
+    // threads can finish before config, causing a flash of expanded bubbles from stale localStorage.
+    thinking: 'collapsed',
     cliOutput: 'collapsed',
   },
 
@@ -915,7 +1109,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setPendingChatInsert: (insert) => set({ pendingChatInsert: insert }),
 
   hubState: null,
-  openHub: (tab) => set({ hubState: { open: true, tab } }),
+  openHub: (tab, subTab) =>
+    set({
+      hubState: {
+        open: true,
+        tab,
+        subTab,
+        // Per-invocation nonce so HubObservabilityTab.useEffect fires even when
+        // (tab, subTab) values repeat (e.g. user navigates away then re-clicks 详情).
+        subTabNonce: Date.now() + Math.random(),
+      },
+    }),
   closeHub: () => set({ hubState: null }),
   showVoteModal: false,
   setShowVoteModal: (show) => set({ showVoteModal: show }),
@@ -950,7 +1154,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return { messages };
       }
 
-      const messages = [...state.messages, msg];
+      const messages = insertOrAppendMessage(state.messages, msg);
       if (messages.length > MAX_BLOB_MESSAGES) {
         revokeBlobUrls(messages.slice(0, messages.length - MAX_BLOB_MESSAGES));
       }
@@ -978,6 +1182,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
       revokeRemovedBlobUrls(state.messages, msgs);
       return { messages: msgs, hasMore };
     }),
+
+  hydrateThread: (threadId, msgs, hasMore) => {
+    // F173 Phase C Task 5+6+7 — atomic server-authoritative hydration that
+    // honors KD-2 (threadStates is the writer source, flat is compat mirror).
+    //
+    // 砚砚 P1 (PR #1413): bare replaceMessages + IDB write doesn't mirror
+    // to threadStates → background hydrate would pollute flat / current-
+    // thread updates wouldn't keep threadStates in sync. This action is
+    // *the* thread-scoped writer for hydration:
+    //   - current thread: write flat + mirror to threadStates (single set())
+    //   - non-current thread: write only threadStates, never touch flat
+    set((state) => {
+      if (threadId === state.currentThreadId) {
+        revokeRemovedBlobUrls(state.messages, msgs);
+        return {
+          messages: msgs,
+          hasMore,
+          ...mirrorActiveFlat(state, { messages: msgs, hasMore }),
+        };
+      }
+      // background hydrate — confined to threadStates, flat untouched.
+      // 砚砚 P1 round 2 (PR #1413): cannot use mirrorActiveToThreadStates
+      // here because its fallback base is snapshotActive(state) — that
+      // would leak the active thread's liveness/queue/workspace into the
+      // background thread when threadStates[threadId] doesn't exist yet.
+      // Use DEFAULT_THREAD_STATE as base for never-seen threads instead.
+      const baseThreadState = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
+      // Cloud Codex P2 (PR #1413): revoke blob: URLs dropped by hydration
+      // to avoid leaking object URLs (locally uploaded images stay alive
+      // until reload otherwise). No-op when prev messages is [].
+      revokeRemovedBlobUrls(baseThreadState.messages, msgs);
+      return {
+        threadStates: {
+          ...state.threadStates,
+          [threadId]: { ...baseThreadState, messages: msgs, hasMore },
+        },
+      };
+    });
+    // IDB overwrite (fire-and-forget). Only persist when thread is still
+    // current — avoids race against a thread switch that already cleared
+    // the outgoing thread's IDB snapshot.
+    if (get().currentThreadId === threadId) {
+      void saveMessagesSnapshot(threadId, msgs, hasMore).catch(() => {});
+    }
+  },
 
   replaceMessageId: (fromId, toId) =>
     set((state) => {
@@ -1049,8 +1298,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: state.messages.map((m) => (m.id === id ? { ...m, isStreaming: streaming } : m)),
     })),
 
-  setLoading: (loading) => set({ isLoading: loading }),
-  setHasActiveInvocation: (v) => set({ hasActiveInvocation: v }),
+  setLoading: (loading) => set((state) => ({ isLoading: loading, ...mirrorActiveFlat(state, { isLoading: loading }) })),
+  setThreadHasDraft: (threadId, hasDraft) =>
+    set((state) => {
+      if (threadId === state.currentThreadId) {
+        if (state.hasDraft === hasDraft) return state;
+        return { hasDraft };
+      }
+
+      const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
+      if ((existing.hasDraft ?? false) === hasDraft) return state;
+      return {
+        threadStates: {
+          ...state.threadStates,
+          [threadId]: {
+            ...existing,
+            hasDraft,
+          },
+        },
+      };
+    }),
+  setHasActiveInvocation: (v) =>
+    set((state) => {
+      // Stamp completion time when transitioning active → inactive on the current thread,
+      // so snapshotActive sees real completion time instead of stale message timestamps.
+      if (!v && state.hasActiveInvocation) {
+        return {
+          hasActiveInvocation: false,
+          threadStates: stampThreadCompletion(state.threadStates, state.currentThreadId, {
+            hasActiveInvocation: false,
+          }),
+        };
+      }
+      return { hasActiveInvocation: v, ...mirrorActiveFlat(state, { hasActiveInvocation: v }) };
+    }),
   /** F108: Register a new active invocation slot */
   addActiveInvocation: (invocationId, catId, mode, startedAt?) =>
     set((state) => {
@@ -1058,37 +1339,79 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ...state.activeInvocations,
         [invocationId]: { catId, mode, startedAt: startedAt ?? Date.now() },
       };
-      return { activeInvocations, hasActiveInvocation: true };
+      return {
+        activeInvocations,
+        hasActiveInvocation: true,
+        ...mirrorActiveFlat(state, { activeInvocations, hasActiveInvocation: true }),
+      };
     }),
   /** F108: Remove an active invocation slot; derives hasActiveInvocation */
   removeActiveInvocation: (invocationId) =>
     set((state) => {
       if (!(invocationId in state.activeInvocations)) {
-        return { hasActiveInvocation: Object.keys(state.activeInvocations).length > 0 };
+        const hasActive = Object.keys(state.activeInvocations).length > 0;
+        if (!hasActive && state.hasActiveInvocation) {
+          return {
+            hasActiveInvocation: false,
+            threadStates: stampThreadCompletion(state.threadStates, state.currentThreadId, {
+              hasActiveInvocation: false,
+            }),
+          };
+        }
+        return { hasActiveInvocation: hasActive, ...mirrorActiveFlat(state, { hasActiveInvocation: hasActive }) };
       }
       const rest = Object.fromEntries(Object.entries(state.activeInvocations).filter(([k]) => k !== invocationId));
-      return { activeInvocations: rest, hasActiveInvocation: Object.keys(rest).length > 0 };
+      const hasActive = Object.keys(rest).length > 0;
+      // When the last invocation ends, stamp the completion time into threadStates
+      // so snapshotActive's idle branch picks up the real "just finished streaming" time.
+      return {
+        activeInvocations: rest,
+        hasActiveInvocation: hasActive,
+        ...(!hasActive
+          ? {
+              threadStates: stampThreadCompletion(state.threadStates, state.currentThreadId, {
+                activeInvocations: rest,
+                hasActiveInvocation: hasActive,
+              }),
+            }
+          : mirrorActiveFlat(state, { activeInvocations: rest, hasActiveInvocation: hasActive })),
+      };
     }),
   /** F108: Clear all active invocations (timeout/error/stop recovery) */
-  clearAllActiveInvocations: () => set({ activeInvocations: {}, hasActiveInvocation: false }),
+  clearAllActiveInvocations: () =>
+    set((state) => ({
+      activeInvocations: {},
+      hasActiveInvocation: false,
+      threadStates: stampThreadCompletion(state.threadStates, state.currentThreadId, {
+        activeInvocations: {},
+        hasActiveInvocation: false,
+      }),
+    })),
   setLoadingHistory: (loading) => set({ isLoadingHistory: loading }),
-  setIntentMode: (mode) => set({ intentMode: mode }),
+  setIntentMode: (mode) => set((state) => ({ intentMode: mode, ...mirrorActiveFlat(state, { intentMode: mode }) })),
 
   setTargetCats: (cats) =>
     set((state) => {
-      if (cats.length === 0) return { targetCats: [], catStatuses: {} };
+      if (cats.length === 0) {
+        return { targetCats: [], catStatuses: {}, ...mirrorActiveFlat(state, { targetCats: [], catStatuses: {} }) };
+      }
       const merged = [...new Set([...state.targetCats, ...cats])];
       const statuses = { ...state.catStatuses };
       for (const c of cats) {
         if (!(c in statuses)) statuses[c] = 'pending' as const;
       }
-      return { targetCats: merged, catStatuses: statuses };
+      return {
+        targetCats: merged,
+        catStatuses: statuses,
+        ...mirrorActiveFlat(state, { targetCats: merged, catStatuses: statuses }),
+      };
     }),
 
   setCatStatus: (catId, status) =>
     set((state) => {
       if (state.catStatuses[catId] === status) return state;
-      return { catStatuses: { ...state.catStatuses, [catId]: status } };
+      const catStatuses = { ...state.catStatuses, [catId]: status };
+      return { catStatuses, ...mirrorActiveFlat(state, { catStatuses }) };
     }),
 
   clearCatStatuses: () =>
@@ -1108,16 +1431,67 @@ export const useChatStore = create<ChatState>((set, get) => ({
           cleanedInvocations[catId] = info;
         }
       }
-      return { targetCats: [], catStatuses: {}, catInvocations: cleanedInvocations };
+      return {
+        targetCats: [],
+        catStatuses: {},
+        catInvocations: cleanedInvocations,
+        ...mirrorActiveFlat(state, { targetCats: [], catStatuses: {}, catInvocations: cleanedInvocations }),
+      };
+    }),
+
+  /** F173 PR-C Task 10: thread-scoped equivalent of clearCatStatuses.
+   *  Active path: clears flat targetCats / catStatuses + marks stale catInvocations
+   *  completed AND mirrors to threadStates[active] (KD-2). Background path: same
+   *  cleanup applied directly to threadStates[threadId]; flat untouched. */
+  clearThreadCatStatuses: (threadId) =>
+    set((state) => {
+      const cleanInvocations = (
+        src: Record<string, import('./chat-types').CatInvocationInfo>,
+      ): Record<string, import('./chat-types').CatInvocationInfo> => {
+        const out: Record<string, import('./chat-types').CatInvocationInfo> = {};
+        for (const [catId, info] of Object.entries(src)) {
+          if (info.taskProgress?.snapshotStatus === 'running') {
+            out[catId] = { ...info, taskProgress: { ...info.taskProgress, snapshotStatus: 'completed' } };
+          } else {
+            out[catId] = info;
+          }
+        }
+        return out;
+      };
+      if (threadId === state.currentThreadId) {
+        const cleaned = cleanInvocations(state.catInvocations);
+        const patch = { targetCats: [] as string[], catStatuses: {}, catInvocations: cleaned };
+        return {
+          targetCats: [],
+          catStatuses: {},
+          catInvocations: cleaned,
+          ...mirrorActiveFlat(state, patch),
+        };
+      }
+      const existing = state.threadStates[threadId];
+      if (!existing) return state;
+      const cleaned = cleanInvocations(existing.catInvocations);
+      return {
+        threadStates: {
+          ...state.threadStates,
+          [threadId]: {
+            ...existing,
+            targetCats: [],
+            catStatuses: {},
+            catInvocations: cleaned,
+          },
+        },
+      };
     }),
 
   setCatInvocation: (catId, info) =>
-    set((state) => ({
-      catInvocations: {
+    set((state) => {
+      const catInvocations = {
         ...state.catInvocations,
         [catId]: { ...state.catInvocations[catId], ...info },
-      },
-    })),
+      };
+      return { catInvocations, ...mirrorActiveFlat(state, { catInvocations }) };
+    }),
 
   setMessageUsage: (messageId, usage) =>
     set((state) => ({
@@ -1137,9 +1511,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setMessageThinking: (messageId, thinking) =>
     set((state) => ({
-      messages: state.messages.map((m) =>
-        m.id === messageId ? { ...m, thinking: m.thinking ? `${m.thinking}\n\n---\n\n${thinking}` : thinking } : m,
-      ),
+      messages: state.messages.map((m) => (m.id === messageId ? { ...m, ...appendThinkingChunk(m, thinking) } : m)),
     })),
 
   setMessageStreamInvocation: (messageId, invocationId) =>
@@ -1175,9 +1547,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // ── Thread management ──
 
-  setThreads: (threads) => set({ threads }),
-  setCurrentProject: (projectPath) => set({ currentProjectPath: projectPath }),
+  setThreads: (threads) => {
+    set({ threads });
+    // F164: Write-through to IndexedDB (fire-and-forget)
+    void saveThreadsSnapshot(threads).catch(() => {});
+  },
+  setCurrentProject: (projectPath) =>
+    set((state) => (state.currentProjectPath === projectPath ? state : { currentProjectPath: projectPath })),
   setLoadingThreads: (loading) => set({ isLoadingThreads: loading }),
+  setOfflineSnapshot: (v) => set({ isOfflineSnapshot: v }),
 
   updateThreadTitle: (threadId, title) =>
     set((state) => ({
@@ -1226,6 +1604,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // Save current flat state to map
       const saved = snapshotActive(state);
+      // F164: Write-through outgoing thread's messages to IndexedDB (fire-and-forget)
+      // Always write — even empty arrays — so server-cleared threads don't leave stale snapshots
+      void saveMessagesSnapshot(state.currentThreadId, saved.messages, saved.hasMore).catch(() => {});
       // Load target thread state (or defaults for first visit)
       const loaded = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
 
@@ -1269,10 +1650,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (msg.mentionsUser && typeof document !== 'undefined' && !document.hasFocus()) {
             fireOwnerMentionNotification(msg);
           }
-          return { messages };
+          return {
+            messages,
+            ...mirrorActiveToThreadStates(state, threadId, { messages }),
+          };
         }
 
-        const messages = [...state.messages, msg];
+        const messages = insertOrAppendMessage(state.messages, msg);
         if (messages.length > MAX_BLOB_MESSAGES) {
           revokeBlobUrls(messages.slice(0, messages.length - MAX_BLOB_MESSAGES));
         }
@@ -1282,7 +1666,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (msg.mentionsUser && typeof document !== 'undefined' && !document.hasFocus()) {
           fireOwnerMentionNotification(msg);
         }
-        return { messages };
+        return {
+          messages,
+          ...mirrorActiveToThreadStates(state, threadId, { messages }),
+        };
       }
 
       // Background thread — update map + increment unread
@@ -1328,7 +1715,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...state.threadStates,
           [threadId]: {
             ...existing,
-            messages: [...existing.messages, msg],
+            messages: insertOrAppendMessage(existing.messages, msg),
             unreadCount: existing.unreadCount + 1,
             hasUserMention: existing.hasUserMention || !!msg.mentionsUser,
             lastActivity: Date.now(),
@@ -1427,11 +1814,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setThreadCatInvocation: (threadId, catId, info) =>
     set((state) => {
       if (threadId === state.currentThreadId) {
+        const catInvocations = {
+          ...state.catInvocations,
+          [catId]: { ...state.catInvocations[catId], ...info },
+        };
         return {
-          catInvocations: {
-            ...state.catInvocations,
-            [catId]: { ...state.catInvocations[catId], ...info },
-          },
+          catInvocations,
+          ...mirrorActiveToThreadStates(state, threadId, { catInvocations }),
         };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
@@ -1472,7 +1861,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) =>
       updateThreadMessage(state, threadId, messageId, (m) => ({
         ...m,
-        thinking: m.thinking ? `${m.thinking}\n\n---\n\n${thinking}` : thinking,
+        ...appendThinkingChunk(m, thinking),
       })),
     ),
 
@@ -1500,7 +1889,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setThreadLoading: (threadId, loading) =>
     set((state) => {
       if (threadId === state.currentThreadId) {
-        return { isLoading: loading };
+        return {
+          isLoading: loading,
+          ...mirrorActiveToThreadStates(state, threadId, { isLoading: loading }),
+        };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
       return {
@@ -1519,7 +1911,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setThreadHasActiveInvocation: (threadId, active) =>
     set((state) => {
       if (threadId === state.currentThreadId) {
-        return { hasActiveInvocation: active };
+        return {
+          hasActiveInvocation: active,
+          ...mirrorActiveToThreadStates(state, threadId, { hasActiveInvocation: active }),
+        };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
       return {
@@ -1543,7 +1938,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...state.activeInvocations,
           [invocationId]: { catId, mode, startedAt: ts },
         };
-        return { activeInvocations, hasActiveInvocation: true };
+        return {
+          activeInvocations,
+          hasActiveInvocation: true,
+          ...mirrorActiveToThreadStates(state, threadId, { activeInvocations, hasActiveInvocation: true }),
+        };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
       const activeInvocations = {
@@ -1563,21 +1962,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       if (threadId === state.currentThreadId) {
         const rest = Object.fromEntries(Object.entries(state.activeInvocations).filter(([k]) => k !== invocationId));
-        return { activeInvocations: rest, hasActiveInvocation: Object.keys(rest).length > 0 };
+        const hasActiveInvocation = Object.keys(rest).length > 0;
+        return {
+          activeInvocations: rest,
+          hasActiveInvocation,
+          ...mirrorActiveToThreadStates(state, threadId, { activeInvocations: rest, hasActiveInvocation }),
+        };
       }
       const existing = state.threadStates[threadId];
       if (!existing) return state;
       const rest = Object.fromEntries(Object.entries(existing.activeInvocations).filter(([k]) => k !== invocationId));
       return {
-        threadStates: {
-          ...state.threadStates,
-          [threadId]: {
-            ...existing,
-            activeInvocations: rest,
-            hasActiveInvocation: Object.keys(rest).length > 0,
-            lastActivity: Date.now(),
-          },
-        },
+        threadStates: stampThreadCompletion(state.threadStates, threadId, {
+          activeInvocations: rest,
+          hasActiveInvocation: Object.keys(rest).length > 0,
+        }),
       };
     }),
 
@@ -1585,20 +1984,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearAllThreadActiveInvocations: (threadId) =>
     set((state) => {
       if (threadId === state.currentThreadId) {
-        return { activeInvocations: {}, hasActiveInvocation: false };
+        return {
+          activeInvocations: {},
+          hasActiveInvocation: false,
+          threadStates: stampThreadCompletion(state.threadStates, state.currentThreadId, {
+            activeInvocations: {},
+            hasActiveInvocation: false,
+          }),
+        };
       }
       const existing = state.threadStates[threadId];
       if (!existing) return state;
       return {
-        threadStates: {
-          ...state.threadStates,
-          [threadId]: {
-            ...existing,
-            activeInvocations: {},
-            hasActiveInvocation: false,
-            lastActivity: Date.now(),
-          },
-        },
+        threadStates: stampThreadCompletion(state.threadStates, threadId, {
+          activeInvocations: {},
+          hasActiveInvocation: false,
+        }),
       };
     }),
 
@@ -1607,7 +2008,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setThreadIntentMode: (threadId, mode) =>
     set((state) => {
       if (threadId === state.currentThreadId) {
-        return { intentMode: mode, catStatuses: {} };
+        return {
+          intentMode: mode,
+          catStatuses: {},
+          ...mirrorActiveToThreadStates(state, threadId, { intentMode: mode, catStatuses: {} }),
+        };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
       return {
@@ -1629,13 +2034,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setThreadTargetCats: (threadId, cats) =>
     set((state) => {
       if (threadId === state.currentThreadId) {
-        if (cats.length === 0) return { targetCats: [], catStatuses: {} };
+        if (cats.length === 0) {
+          return {
+            targetCats: [],
+            catStatuses: {},
+            ...mirrorActiveToThreadStates(state, threadId, { targetCats: [], catStatuses: {} }),
+          };
+        }
         const merged = [...new Set([...state.targetCats, ...cats])];
         const statuses = { ...state.catStatuses };
         for (const c of cats) {
           if (!(c in statuses)) statuses[c] = 'pending' as const;
         }
-        return { targetCats: merged, catStatuses: statuses };
+        return {
+          targetCats: merged,
+          catStatuses: statuses,
+          ...mirrorActiveToThreadStates(state, threadId, { targetCats: merged, catStatuses: statuses }),
+        };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
       if (cats.length === 0) {
@@ -1672,10 +2087,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   replaceThreadTargetCats: (threadId, cats) =>
     set((state) => {
       if (threadId === state.currentThreadId) {
-        if (cats.length === 0) return { targetCats: [], catStatuses: {} };
+        if (cats.length === 0) {
+          return {
+            targetCats: [],
+            catStatuses: {},
+            ...mirrorActiveToThreadStates(state, threadId, { targetCats: [], catStatuses: {} }),
+          };
+        }
         const statuses: Record<string, CatStatusType> = {};
         for (const c of cats) statuses[c] = 'pending' as const;
-        return { targetCats: [...cats], catStatuses: statuses };
+        const targetCats = [...cats];
+        return {
+          targetCats,
+          catStatuses: statuses,
+          ...mirrorActiveToThreadStates(state, threadId, { targetCats, catStatuses: statuses }),
+        };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
       if (cats.length === 0) {
@@ -1816,7 +2242,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       if (threadId === state.currentThreadId) {
         if (state.catStatuses[catId] === status) return state;
-        return { catStatuses: { ...state.catStatuses, [catId]: status } };
+        const catStatuses = { ...state.catStatuses, [catId]: status };
+        return { catStatuses, ...mirrorActiveToThreadStates(state, threadId, { catStatuses }) };
       }
       const existing = state.threadStates[threadId] ?? { ...DEFAULT_THREAD_STATE };
       if (existing.catStatuses[catId] === status) return state;
@@ -1846,9 +2273,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       if (threadId === state.currentThreadId) {
         const statusChanged = state.catStatuses[catId] !== catStatus;
+        const messages = state.messages.map(applyMessageUpdate);
+        const newCatStatuses = statusChanged ? { ...state.catStatuses, [catId]: catStatus } : state.catStatuses;
         return {
-          messages: state.messages.map(applyMessageUpdate),
-          ...(statusChanged ? { catStatuses: { ...state.catStatuses, [catId]: catStatus } } : {}),
+          messages,
+          ...(statusChanged ? { catStatuses: newCatStatuses } : {}),
+          ...mirrorActiveToThreadStates(state, threadId, {
+            messages,
+            ...(statusChanged ? { catStatuses: newCatStatuses } : {}),
+          }),
         };
       }
 
@@ -1871,9 +2304,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   /** Clear hasActiveInvocation for a specific thread (active or background) */
   clearThreadActiveInvocation: (threadId) =>
     set((state) => {
-      // Active thread — clear flat state
+      // Active-thread clear is used by hydration/reconciliation paths to drop stale slots.
+      // Do not stamp lastActivity here: that would turn routine state repair into fake recency.
+      // Real completion paths stamp via removeActiveInvocation / setHasActiveInvocation(false) /
+      // clearAllActiveInvocations / resetThreadInvocationState.
       if (threadId === state.currentThreadId) {
-        return { hasActiveInvocation: false, activeInvocations: {} };
+        // F173 KD-2 (PR-C Task 10): mirror to threadStates[active] so reconcile
+        // sees the same view it would on a background thread.
+        const patch = { hasActiveInvocation: false, activeInvocations: {} };
+        return {
+          hasActiveInvocation: false,
+          activeInvocations: {},
+          ...mirrorActiveFlat(state, patch),
+        };
       }
       // Background thread — update in threadStates map (no-op if unknown)
       const ts = state.threadStates[threadId];
@@ -1897,23 +2340,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         catStatuses: {} as Record<string, CatStatusType>,
       };
 
-      // Active thread — clear flat state
+      // Active thread — clear flat state + stamp completion time
       if (threadId === state.currentThreadId) {
-        return resetPatch;
+        return {
+          ...resetPatch,
+          threadStates: stampThreadCompletion(state.threadStates, state.currentThreadId),
+        };
       }
 
       // Background thread — update in threadStates map (no-op if unknown)
       const ts = state.threadStates[threadId];
       if (!ts) return state;
       return {
-        threadStates: {
-          ...state.threadStates,
-          [threadId]: {
-            ...ts,
-            ...resetPatch,
-            lastActivity: Date.now(),
-          },
-        },
+        threadStates: stampThreadCompletion(state.threadStates, threadId, resetPatch),
       };
     }),
 

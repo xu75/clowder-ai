@@ -1,3 +1,5 @@
+import type { ReplyPreview, SchedulerMessageExtra } from '@cat-cafe/shared';
+
 /** Content block types matching backend MessageContent */
 export interface TextContent {
   type: 'text';
@@ -45,6 +47,7 @@ export interface EvidenceResultData {
   snippet: string;
   confidence: 'high' | 'mid' | 'low';
   sourceType: 'decision' | 'phase' | 'discussion' | 'commit';
+  authority?: string;
 }
 
 export interface EvidenceData {
@@ -89,6 +92,8 @@ export interface RichCardBlock {
   fields?: Array<{ label: string; value: string }>;
   /** F066 Phase 4: Optional action buttons */
   actions?: CardAction[];
+  /** F174 D2b-1: opaque metadata for sub-renderer detection (e.g. callback_auth_failure) */
+  meta?: Record<string, unknown>;
 }
 
 export interface RichDiffBlock {
@@ -130,6 +135,13 @@ export interface RichAudioBlock {
   mimeType?: string;
 }
 
+/** F155: Direct action for interactive options that bypass the chat message pipeline */
+export interface OptionAction {
+  type: 'callback';
+  endpoint: string;
+  payload?: Record<string, unknown>;
+}
+
 /** F096: Interactive block option */
 export interface InteractiveOption {
   id: string;
@@ -144,6 +156,8 @@ export interface InteractiveOption {
   customInput?: boolean;
   /** Placeholder text for the custom input field */
   customInputPlaceholder?: string;
+  /** F155: When present, clicking calls the endpoint directly instead of sending a chat message */
+  action?: OptionAction;
 }
 
 /** F096: Interactive rich block — user can select/confirm within the block */
@@ -242,6 +256,8 @@ export interface ChatMessage {
     stream?: { invocationId?: string };
     /** F098-C1: Explicit target cats from post_message API */
     targetCats?: string[];
+    /** Scheduler presentation metadata (hidden trigger / ephemeral lifecycle toast) */
+    scheduler?: SchedulerMessageExtra['scheduler'];
     /** F118 AC-C3: Timeout diagnostics for enhanced error display */
     timeoutDiagnostics?: TimeoutDiagnostics;
     /** F070: Governance blocked data for actionable bootstrap card */
@@ -250,9 +266,20 @@ export interface ChatMessage {
       reasonKind: 'needs_bootstrap' | 'needs_confirmation' | 'files_missing';
       invocationId?: string;
     };
+    /**
+     * F173 a2a-handoff bug fix: marker for system messages that must be
+     * timestamp-ordered into the message list (not appended at end).
+     * a2a_handoff: routing pill ("缅因猫 → 布偶猫") emitted by route-serial,
+     * which can arrive after the next cat's stream bubble due to WebSocket
+     * pipeline race; without marker it ends up visually after the bubble it
+     * should precede.
+     */
+    systemKind?: 'a2a_routing';
   };
   /** F045: Extended thinking content, rendered as collapsible block inside assistant bubble */
   thinking?: string;
+  /** Internal chunk boundaries for robust thinking dedupe when payloads contain the visual separator. */
+  thinkingChunks?: string[];
   /** Message origin: stream = CLI stdout (thinking), callback = MCP post_message (speech), briefing = F148 Phase E context briefing */
   origin?: 'stream' | 'callback' | 'briefing';
   /** F35: Message visibility. undefined/public = visible to all */
@@ -266,7 +293,7 @@ export interface ChatMessage {
   /** F121: ID of the message this is replying to */
   replyTo?: string;
   /** F121: Server-hydrated reply preview (sender + truncated content) */
-  replyPreview?: { senderCatId: string | null; content: string; deleted?: true };
+  replyPreview?: ReplyPreview;
 }
 
 export type ChatMessagePatch = Omit<Partial<ChatMessage>, 'id' | 'type'>;
@@ -309,6 +336,7 @@ export interface Thread {
 export interface BootcampStateV1 {
   v: 1;
   phase: string;
+  guideStep?: string | null;
   leadCat?: string;
   selectedTaskId?: string;
   envCheck?: Record<string, { ok: boolean; version?: string; note?: string }>;
@@ -430,7 +458,14 @@ export interface TimeoutDiagnostics {
   rawArchivePath?: string;
 }
 
-export type CatStatusType = 'pending' | 'streaming' | 'done' | 'error' | 'alive_but_silent' | 'suspected_stall';
+export type CatStatusType =
+  | 'spawning'
+  | 'pending'
+  | 'streaming'
+  | 'done'
+  | 'error'
+  | 'alive_but_silent'
+  | 'suspected_stall';
 
 /** F39: Queue entry from backend InvocationQueue */
 export interface QueueEntry {
@@ -449,6 +484,12 @@ export interface QueueEntry {
   autoExecute?: boolean;
   /** F122B: which cat initiated this entry (for A2A handoff display) */
   callerCatId?: string;
+  /** F175: dequeue priority */
+  priority?: 'urgent' | 'normal';
+  /** F175: source category for visual grouping */
+  sourceCategory?: 'ci' | 'review' | 'conflict' | 'scheduled' | 'a2a';
+  /** F175: explicit dequeue position from drag-reorder */
+  position?: number;
 }
 
 /** F39: Message delivery mode — undefined = smart default, 'queue' = enqueue, 'force' = cancel + execute */
@@ -469,6 +510,7 @@ export interface ThreadState {
   isLoading: boolean;
   isLoadingHistory: boolean;
   hasMore: boolean;
+  hasDraft?: boolean;
   /** Whether the thread has an active invocation (broader than isLoading — stays true during A2A chains) */
   hasActiveInvocation: boolean;
   /** F108: Per-invocation slot tracking — key=invocationId, value=slot info */
@@ -521,6 +563,7 @@ export const DEFAULT_THREAD_STATE: ThreadState = {
   isLoading: false,
   isLoadingHistory: false,
   hasMore: true,
+  hasDraft: false,
   hasActiveInvocation: false,
   intentMode: null,
   targetCats: [],

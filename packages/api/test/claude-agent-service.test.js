@@ -528,9 +528,8 @@ test('passes correct model flag (default and custom)', async () => {
   const args1 = spawnFn1.mock.calls[0].arguments[1];
   const modelIdx1 = args1.indexOf('--model');
   assert.ok(modelIdx1 >= 0);
-  // F32-b: getCatModel('opus') resolves via catRegistry > CAT_CONFIGS fallback.
-  // In test context catRegistry is empty, so this is CAT_CONFIGS['opus'].defaultModel.
-  assert.equal(args1[modelIdx1 + 1], 'claude-sonnet-4-5-20250929');
+  // F32-b: getCatModel('opus') resolves via catRegistry (populated from runtime config).
+  assert.equal(args1[modelIdx1 + 1], 'claude-opus-4-6');
 
   // Custom model (explicit constructor param)
   const proc2 = createMockProcess();
@@ -548,7 +547,7 @@ test('passes correct model flag (default and custom)', async () => {
 
 test('F32-b P1 regression: env var CAT_*_MODEL overrides default when model not passed', async () => {
   // Simulate index.ts pattern: pass catId but NOT model → constructor resolves via getCatModel()
-  // getCatModel() should respect env var > catRegistry > CAT_CONFIGS fallback
+  // getCatModel() should respect env var > catRegistry
   const saved = process.env.CAT_OPUS_MODEL;
   process.env.CAT_OPUS_MODEL = 'env-override-model';
   try {
@@ -1031,4 +1030,67 @@ test('F24-fix: lastTurnInputTokens resets when final message_start has no usage 
     undefined,
     'lastTurnInputTokens must not carry over from a previous turn when the final turn lacks usage',
   );
+});
+
+// ── Model override regression tests (third-party Anthropic-compatible APIs) ──
+
+test('third-party model (glm-5): omits --model flag and injects ANTHROPIC_MODEL env var', async () => {
+  const proc = createMockProcess();
+  const spawnFn = createMockSpawnFn(proc);
+  const service = new ClaudeAgentService({ spawnFn });
+
+  const promise = collect(
+    service.invoke('hello', {
+      callbackEnv: {
+        CAT_CAFE_API_URL: 'http://localhost:3004',
+        CAT_CAFE_INVOCATION_ID: 'inv-glm',
+        CAT_CAFE_CALLBACK_TOKEN: 'token-glm',
+        CAT_CAFE_ANTHROPIC_PROFILE_MODE: 'api_key',
+        CAT_CAFE_ANTHROPIC_API_KEY: 'sk-bigmodel',
+        CAT_CAFE_ANTHROPIC_BASE_URL: 'https://open.bigmodel.cn/api/paas',
+        CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE: 'glm-5',
+      },
+    }),
+  );
+  emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
+  await promise;
+
+  const args = spawnFn.mock.calls[0].arguments[1];
+  const spawnOpts = spawnFn.mock.calls[0].arguments[2];
+
+  // --model must NOT appear in args for non-Anthropic models
+  assert.ok(!args.includes('--model'), '--model flag must be omitted for third-party model glm-5');
+  // ANTHROPIC_MODEL env var must carry the model name
+  assert.equal(spawnOpts.env.ANTHROPIC_MODEL, 'glm-5', 'ANTHROPIC_MODEL env var must be set to glm-5');
+});
+
+test('native Anthropic model (claude-sonnet-4-6): keeps --model flag, no ANTHROPIC_MODEL env var', async () => {
+  const proc = createMockProcess();
+  const spawnFn = createMockSpawnFn(proc);
+  const service = new ClaudeAgentService({ spawnFn });
+
+  const promise = collect(
+    service.invoke('hello', {
+      callbackEnv: {
+        CAT_CAFE_API_URL: 'http://localhost:3004',
+        CAT_CAFE_INVOCATION_ID: 'inv-native',
+        CAT_CAFE_CALLBACK_TOKEN: 'token-native',
+        CAT_CAFE_ANTHROPIC_PROFILE_MODE: 'api_key',
+        CAT_CAFE_ANTHROPIC_API_KEY: 'sk-anthropic',
+        CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE: 'claude-sonnet-4-6',
+      },
+    }),
+  );
+  emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
+  await promise;
+
+  const args = spawnFn.mock.calls[0].arguments[1];
+  const spawnOpts = spawnFn.mock.calls[0].arguments[2];
+  const modelIdx = args.indexOf('--model');
+
+  // --model must be present with the exact Anthropic model name
+  assert.ok(modelIdx >= 0, '--model flag must be present for native Anthropic model');
+  assert.equal(args[modelIdx + 1], 'claude-sonnet-4-6');
+  // ANTHROPIC_MODEL must NOT be set (native model goes through --model)
+  assert.ok(!spawnOpts.env.ANTHROPIC_MODEL, 'ANTHROPIC_MODEL env var must not be set for native Anthropic model');
 });

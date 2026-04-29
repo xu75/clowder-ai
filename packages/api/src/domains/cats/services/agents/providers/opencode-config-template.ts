@@ -9,7 +9,7 @@ import { join } from 'node:path';
  * This generator produces a config with:
  * - Anthropic provider (via proxy)
  * - Optional OMOC plugin (oh-my-opencode)
- * - No Cat Cafe MCP tools (isolation by design)
+ * - Optional Clowder AI MCP server (deterministic injection via mcpServerPath)
  */
 
 interface OpenCodeConfigOptions {
@@ -82,14 +82,14 @@ const NPM_ADAPTER_FOR_API_TYPE: Record<string, string> = {
 };
 
 /**
- * Derive the OpenCode API type from the member's ocProviderName binding.
+ * Derive the OpenCode API type from the member's provider name binding.
  *
  * Account-level protocol is no longer used — it was removed from the UI and
- * should not drive runtime routing. The sole authority is ocProviderName,
+ * should not drive runtime routing. The sole authority is the provider name,
  * which the user explicitly sets in the member editor "Provider 名称" field.
  */
-export function deriveOpenCodeApiType(ocProviderName: string | undefined): OpenCodeApiType {
-  const normalized = ocProviderName?.toLowerCase();
+export function deriveOpenCodeApiType(providerName: string | undefined): OpenCodeApiType {
+  const normalized = providerName?.toLowerCase();
   if (normalized === 'openai-responses') return 'openai-responses';
   if (normalized === 'anthropic') return 'anthropic';
   if (normalized === 'google') return 'google';
@@ -102,6 +102,8 @@ export interface OpenCodeRuntimeConfigOptions {
   defaultModel?: string;
   apiType?: OpenCodeApiType;
   hasBaseUrl?: boolean;
+  /** Absolute path to Clowder AI MCP server entry (packages/mcp-server/dist/index.js). */
+  mcpServerPath?: string;
 }
 
 export interface OpenCodeRuntimeConfigDebugSummary {
@@ -150,23 +152,23 @@ export function safeProviderName(name: string): string {
 }
 
 export function generateOpenCodeRuntimeConfig(options: OpenCodeRuntimeConfigOptions): OpenCodeConfig {
-  const { providerName, models, defaultModel, apiType = 'openai', hasBaseUrl = false } = options;
+  const { providerName, models, defaultModel, apiType = 'openai', hasBaseUrl = false, mcpServerPath } = options;
 
   const configName = safeProviderName(providerName);
 
   const modelsMap: Record<string, { name: string }> = {};
-  for (const rawModel of models) {
+  const modelsToRegister = defaultModel ? [...models, defaultModel] : [...models];
+  for (const rawModel of modelsToRegister) {
     const modelName = stripOwnProviderPrefix(rawModel, providerName);
     modelsMap[modelName] = { name: modelName };
   }
 
-  // Remap model prefix when provider name was rewritten
   let configDefaultModel = defaultModel;
   if (configName !== providerName && defaultModel?.startsWith(`${providerName}/`)) {
     configDefaultModel = `${configName}/${defaultModel.slice(providerName.length + 1)}`;
   }
 
-  return {
+  const config: OpenCodeConfig = {
     $schema: 'https://opencode.ai/config.json',
     ...(configDefaultModel ? { model: configDefaultModel } : {}),
     provider: {
@@ -180,6 +182,17 @@ export function generateOpenCodeRuntimeConfig(options: OpenCodeRuntimeConfigOpti
       },
     },
   };
+
+  if (mcpServerPath) {
+    config.mcp = {
+      'cat-cafe': {
+        type: 'local',
+        command: ['node', mcpServerPath],
+      },
+    };
+  }
+
+  return config;
 }
 
 function summarizeEnvPlaceholder(value: string | undefined): string | undefined {

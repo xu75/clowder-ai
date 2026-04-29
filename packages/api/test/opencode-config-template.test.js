@@ -178,7 +178,7 @@ describe('parseOpenCodeModel', () => {
 });
 
 describe('deriveOpenCodeApiType', () => {
-  test('derives apiType solely from ocProviderName', () => {
+  test('derives apiType solely from providerName', () => {
     const scenarios = [
       { ocProviderName: 'anthropic', expected: 'anthropic' },
       { ocProviderName: 'google', expected: 'google' },
@@ -259,6 +259,19 @@ describe('generateOpenCodeRuntimeConfig', () => {
     assert.equal(config.model, 'openai-compat/gpt-4o', 'model prefix must match remapped provider key');
   });
 
+  test('registers defaultModel even when the account model list is stale', () => {
+    const config = generateOpenCodeRuntimeConfig({
+      providerName: 'openai',
+      models: ['qwen3.6-plus', 'Qwen3.6-Max', 'kimi-2.6'],
+      defaultModel: 'openai/qwen3.6-max-preview',
+      apiType: 'openai',
+      hasBaseUrl: true,
+    });
+
+    assert.equal(config.model, 'openai-compat/qwen3.6-max-preview');
+    assert.ok(config.provider['openai-compat'].models?.['qwen3.6-max-preview']);
+  });
+
   test('non-reserved providerName is kept as-is', () => {
     const config = generateOpenCodeRuntimeConfig({
       providerName: 'kimi',
@@ -277,6 +290,33 @@ describe('generateOpenCodeRuntimeConfig', () => {
       apiType: 'bogus',
     });
     assert.equal(config.provider.test.npm, '@ai-sdk/openai-compatible');
+  });
+
+  test('mcpServerPath injects mcp.cat-cafe section into config', () => {
+    const config = generateOpenCodeRuntimeConfig({
+      providerName: 'anthropic',
+      models: ['anthropic/claude-opus-4-6'],
+      defaultModel: 'anthropic/claude-opus-4-6',
+      apiType: 'anthropic',
+      mcpServerPath: '/absolute/path/to/packages/mcp-server/dist/index.js',
+    });
+
+    assert.ok(config.mcp, 'config must have mcp section when mcpServerPath is provided');
+    assert.deepStrictEqual(config.mcp['cat-cafe'], {
+      type: 'local',
+      command: ['node', '/absolute/path/to/packages/mcp-server/dist/index.js'],
+    });
+  });
+
+  test('mcp section is absent when mcpServerPath is not provided', () => {
+    const config = generateOpenCodeRuntimeConfig({
+      providerName: 'maas',
+      models: ['maas/glm-5'],
+      defaultModel: 'maas/glm-5',
+      apiType: 'openai',
+    });
+
+    assert.strictEqual(config.mcp, undefined, 'config must not have mcp section without mcpServerPath');
   });
 
   test('summarizeOpenCodeRuntimeConfigForDebug reports provider adapter and model keys', () => {
@@ -319,6 +359,27 @@ describe('writeOpenCodeRuntimeConfig', () => {
       const content = JSON.parse(readFileSync(configPath, 'utf-8'));
       assert.equal(content.model, 'maas/glm-5');
       assert.deepStrictEqual(content.provider.maas.models, { 'glm-5': { name: 'glm-5' } });
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('persists mcp.cat-cafe section to disk when mcpServerPath is provided', () => {
+    const tmpRoot = mkdtempSync(join(tmpdir(), 'oc-runtime-mcp-'));
+    try {
+      const mcpPath = '/opt/cat-cafe/packages/mcp-server/dist/index.js';
+      const configPath = writeOpenCodeRuntimeConfig(tmpRoot, 'opencode', 'inv-game-001', {
+        providerName: 'anthropic',
+        models: ['anthropic/claude-opus-4-6'],
+        defaultModel: 'anthropic/claude-opus-4-6',
+        apiType: 'anthropic',
+        mcpServerPath: mcpPath,
+      });
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'));
+      assert.deepStrictEqual(content.mcp, {
+        'cat-cafe': { type: 'local', command: ['node', mcpPath] },
+      });
     } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
     }

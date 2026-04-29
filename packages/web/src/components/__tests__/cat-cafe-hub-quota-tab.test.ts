@@ -23,7 +23,7 @@ vi.mock('@/hooks/useCatData', () => ({
         nickname: '砚砚',
         color: { primary: '#4A90E2', secondary: '#E6F2FF' },
         mentionPatterns: ['@codex'],
-        provider: 'openai',
+        clientId: 'openai',
         defaultModel: 'gpt-5.3-codex',
         avatar: '/avatars/codex.png',
         roleDescription: '代码审查',
@@ -39,7 +39,7 @@ vi.mock('@/hooks/useCatData', () => ({
             nickname: '砚砚',
             color: { primary: '#4A90E2', secondary: '#E6F2FF' },
             mentionPatterns: ['@codex'],
-            provider: 'openai',
+            clientId: 'openai',
             defaultModel: 'gpt-5.3-codex',
             avatar: '/avatars/codex.png',
             roleDescription: '代码审查',
@@ -75,6 +75,7 @@ describe('CatCafeHub quota tab', () => {
     const html = renderToStaticMarkup(React.createElement(HubRoutingPolicyTab));
     expect(html).toContain('配额看板');
     expect(html).toContain('路由策略（猫粮约束子模块）');
-    expect(html).toContain('@codex');
+    // Member tags (@codex) require useEffect to load profiles — not testable via SSR.
+    // Covered by hub-quota-board-v2.test.ts DOM render tests.
   });
 });

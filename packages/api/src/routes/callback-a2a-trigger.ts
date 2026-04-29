@@ -17,7 +17,12 @@ import type { FastifyBaseLogger } from 'fastify';
 import { getDefaultCatId } from '../config/cat-config-loader.js';
 import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
-import { hasWorklist, pushToWorklist } from '../domains/cats/services/agents/routing/WorklistRegistry.js';
+import {
+  getWorklist,
+  hasWorklist,
+  pushToWorklist,
+  updateStreakOnPush,
+} from '../domains/cats/services/agents/routing/WorklistRegistry.js';
 import { parseIntent } from '../domains/cats/services/context/IntentParser.js';
 import type { AgentRouter } from '../domains/cats/services/index.js';
 import type { DeliveryCursorStore } from '../domains/cats/services/stores/ports/DeliveryCursorStore.js';
@@ -40,12 +45,7 @@ export interface A2ATriggerDeps {
   /** F122B: InvocationQueue for agent-sourced entries */
   invocationQueue?: Pick<
     InvocationQueue,
-    | 'enqueue'
-    | 'countAgentEntriesForThread'
-    | 'hasQueuedAgentForCat'
-    | 'backfillMessageId'
-    | 'appendMergedMessageId'
-    | 'list'
+    'enqueue' | 'countAgentEntriesForThread' | 'hasQueuedAgentForCat' | 'backfillMessageId' | 'list'
   >;
   log: FastifyBaseLogger;
 }
@@ -71,9 +71,15 @@ export async function enqueueA2ATargets(
   },
 ): Promise<{ enqueued: CatId[]; fallback: boolean }> {
   const { log } = deps;
-  const { targetCats, threadId, callerCatId } = opts;
+  const { threadId, callerCatId } = opts;
   const triggerMessageId = opts.triggerMessage.id;
   const { deliveryCursorStore } = deps;
+
+  // F167 Phase E (KD-20): L3 role-gate retired. Role-based handoff permission is
+  // no longer harness-enforced — cat-config.restrictions flows into sender & target
+  // prompts (buildTeammateRoster / buildStaticIdentity); cats self-regulate.
+  const fromCatId = callerCatId ?? opts.triggerMessage.catId ?? getDefaultCatId();
+  const targetCats = opts.targetCats;
 
   // F122B: If InvocationQueue is available, enqueue as agent entry (unified dispatch).
   // This replaces both the worklist path and the fallback standalone invocation.
@@ -81,10 +87,18 @@ export async function enqueueA2ATargets(
   if (deps.invocationQueue) {
     const MAX_A2A_DEPTH = 10;
 
+    // F167 L1 AC-A4 + Phase D (cloud Codex P1): streak check must cover modern path
+    // AND only fire when we know the target is actually about to enqueue — otherwise
+    // a callback that hits depth/dedup would still mutate the counter (reset by
+    // substantive content, ++ by inertia), weakening the breaker.
+    // Pre-resolve worklist entry once; updateStreakOnPush is called inside the loop.
+    const canTrackStreak = callerCatId !== undefined && targetCats.length === 1;
+    const streakEntry = canTrackStreak ? getWorklist(threadId, opts.parentInvocationId) : null;
+
     const enqueued: CatId[] = [];
     const queueDiagnostics: Array<{
       catId: CatId;
-      outcome: string; // enqueue() returns 'enqueued'|'merged'; 'full' unreachable here (depth guard breaks first)
+      outcome: string;
       entryId?: string;
       createdAt?: number;
     }> = [];
@@ -103,6 +117,38 @@ export async function enqueueA2ATargets(
         log.info({ threadId, triggerMessageId, catId }, '[F122B] A2A callback: skipping duplicate agent entry for cat');
         continue;
       }
+      // Guard 3 (F167 Phase D cloud Codex P1): streak check fires here — after
+      // depth + dedup — so a would-be-skipped target never mutates the counter.
+      // Callback path has no tool_use stream → fail-closed on hadSubstantiveToolCall
+      // (routing tool ≠ work). outputLength from content still exempts long-form MCP.
+      if (canTrackStreak && streakEntry) {
+        const streak = updateStreakOnPush(streakEntry, callerCatId!, catId, {
+          hadSubstantiveToolCall: false,
+          outputLength: opts.content.length,
+        });
+        if (streak.blockPingPong) {
+          log.info(
+            { threadId, triggerMessageId, fromCatId, catId, pairCount: streak.count },
+            'F167 L1: callback A2A (invocationQueue) ping-pong terminated (streak >= 4)',
+          );
+          deps.socketManager.broadcastAgentMessage(
+            {
+              type: 'system_info',
+              catId: fromCatId,
+              content: JSON.stringify({
+                type: 'a2a_pingpong_terminated',
+                fromCatId,
+                targetCatId: catId,
+                pairCount: streak.count,
+              }),
+              timestamp: Date.now(),
+            },
+            threadId,
+          );
+          break;
+        }
+        // streak.warnPingPong → injected via buildInvocationContext on next turn, no-op here.
+      }
       const result = deps.invocationQueue.enqueue({
         threadId,
         userId: opts.userId,
@@ -119,17 +165,10 @@ export async function enqueueA2ATargets(
         entryId: result.entry?.id,
         createdAt: result.entry?.createdAt,
       });
-      if (result.outcome === 'enqueued' || result.outcome === 'merged') {
+      if (result.outcome === 'enqueued') {
         enqueued.push(catId);
-        // AC-B6-P1: Link triggerMessage.id so QueueProcessor.executeEntry can markDelivered.
-        // Use backfillMessageId for new entries, appendMergedMessageId for merged entries
-        // to avoid overwriting the first entry's messageId (cloud P1).
         if (result.entry) {
-          if (result.outcome === 'enqueued') {
-            deps.invocationQueue.backfillMessageId(threadId, opts.userId, result.entry.id, triggerMessageId);
-          } else {
-            deps.invocationQueue.appendMergedMessageId(threadId, opts.userId, result.entry.id, triggerMessageId);
-          }
+          deps.invocationQueue.backfillMessageId(threadId, opts.userId, result.entry.id, triggerMessageId);
         }
       }
     }
@@ -167,7 +206,12 @@ export async function enqueueA2ATargets(
   // Legacy path: F27 worklist + standalone fallback (when invocationQueue dep not wired)
   // F27: Try to push to parent worklist first
   if (hasWorklist(threadId)) {
-    const pushResult = pushToWorklist(threadId, targetCats, callerCatId, opts.parentInvocationId, triggerMessageId);
+    // F167 Phase D: fail-closed callerActivity — callback has no tool_use stream,
+    // outputLength from content exempts long-form discussion.
+    const pushResult = pushToWorklist(threadId, targetCats, callerCatId, opts.parentInvocationId, triggerMessageId, {
+      hadSubstantiveToolCall: false,
+      outputLength: opts.content.length,
+    });
     const enqueued = pushResult.added;
     if (enqueued.length > 0) {
       if (deliveryCursorStore) {
@@ -215,15 +259,38 @@ export async function enqueueA2ATargets(
         '[F27] A2A callback: worklist vanished between has/push, falling back to standalone',
       );
     } else {
-      log.info(
-        {
+      if (pushResult.blockPingPong) {
+        // F167 L1 AC-A4: streak=4 — callback path must broadcast termination,
+        // parity with route-serial's inline block emit.
+        log.info(
+          { threadId, triggerMessageId, fromCatId, targetCats, pairCount: pushResult.pairCount },
+          'F167 L1: callback A2A ping-pong terminated (streak >= 4)',
+        );
+        deps.socketManager.broadcastAgentMessage(
+          {
+            type: 'system_info',
+            catId: fromCatId,
+            content: JSON.stringify({
+              type: 'a2a_pingpong_terminated',
+              fromCatId,
+              targetCatId: targetCats[0],
+              pairCount: pushResult.pairCount ?? 0,
+            }),
+            timestamp: Date.now(),
+          },
           threadId,
-          triggerMessageId,
-          targetCats,
-          reason: pushResult.reason,
-        },
-        `[F27] A2A callback: targets not enqueued (${pushResult.reason})`,
-      );
+        );
+      } else {
+        log.info(
+          {
+            threadId,
+            triggerMessageId,
+            targetCats,
+            reason: pushResult.reason,
+          },
+          `[F27] A2A callback: targets not enqueued (${pushResult.reason})`,
+        );
+      }
       return { enqueued, fallback: false };
     }
   }
@@ -265,7 +332,10 @@ export async function enqueueA2ATargets(
     '[F27] A2A callback: no parent worklist found, falling back to standalone invocation',
   );
 
-  await triggerA2AInvocation(deps, opts);
+  // F167 PR1 history note: originally this path filtered role-gated targets before
+  // fallback; Phase E retires L3, so targetCats == opts.targetCats now. Kept the
+  // explicit spread for intent clarity and future filter hooks.
+  await triggerA2AInvocation(deps, { ...opts, targetCats });
   return { enqueued: targetCats, fallback: true };
 }
 

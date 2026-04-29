@@ -122,7 +122,7 @@ describe('transformAcpEvent', () => {
     assert.equal(result.toolName, undefined);
   });
 
-  it('tool_call_update → tool_use (incremental)', () => {
+  it('tool_call_update → tool_use (Gemini CLI emits updates without initial tool_call)', () => {
     const update = {
       sessionId: 's1',
       update: {
@@ -149,6 +149,7 @@ describe('transformAcpEvent', () => {
     const result = transformAcpEvent(update, catId, metadata);
     assert.equal(result.type, 'tool_use');
     assert.equal(result.toolName, 'write_file');
+    assert.equal(result.content, 'wrote 42 bytes');
   });
 
   it('plan → system_info with type=plan', () => {

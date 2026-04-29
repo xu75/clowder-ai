@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -182,6 +182,52 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
     assert.doesNotMatch(result.stderr, /API port appears active/);
   });
 
+  it('seeds missing runtime auth config from the launcher project during init', () => {
+    const projectDir = createTempProject('runtime-auth-config-seed');
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'runtime-auth-config-worktree-'));
+    const remoteDir = mkdtempSync(join(tmpdir(), 'runtime-auth-config-remote-'));
+    tempDirs.push(runtimeDir, remoteDir);
+
+    execFileSync('git', ['init', '-b', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['add', 'scripts', 'packages'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['init', '--bare', remoteDir], { stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteDir], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+
+    mkdirSync(join(projectDir, '.cat-cafe'), { recursive: true });
+    writeFileSync(
+      join(projectDir, '.cat-cafe', 'accounts.json'),
+      `${JSON.stringify({ codex: { authType: 'oauth', models: ['gpt-5.4'] } }, null, 2)}\n`,
+      'utf8',
+    );
+    writeFileSync(
+      join(projectDir, '.cat-cafe', 'credentials.json'),
+      `${JSON.stringify({ 'installer-openai': { apiKey: 'sk-runtime' } }, null, 2)}\n`,
+      'utf8',
+    );
+
+    const result = spawnSync(
+      'bash',
+      [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'init', '--dir', runtimeDir, '--no-install'],
+      {
+        cwd: projectDir,
+        encoding: 'utf8',
+      },
+    );
+
+    assert.equal(result.status, 0, `exit=${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    const normalizedRuntimeDir = realpathSync(runtimeDir);
+    assert.deepEqual(JSON.parse(readFileSync(join(normalizedRuntimeDir, '.cat-cafe', 'accounts.json'), 'utf8')), {
+      codex: { authType: 'oauth', models: ['gpt-5.4'] },
+    });
+    assert.deepEqual(JSON.parse(readFileSync(join(normalizedRuntimeDir, '.cat-cafe', 'credentials.json'), 'utf8')), {
+      'installer-openai': { apiKey: 'sk-runtime' },
+    });
+  });
+
   it('fails fast when project is a git repo but the configured remote is missing', () => {
     const projectDir = createTempProject('runtime-missing-remote');
     execFileSync('git', ['init', '-b', 'main'], { cwd: projectDir, stdio: 'ignore' });
@@ -298,15 +344,20 @@ server.listen(3002,'127.0.0.1',()=>setInterval(()=>{},1000));`,
     tempProcs.push(server);
     await waitForLocalPort(3002);
 
+    const ncFallbackEnv = {
+      ...process.env,
+      API_SERVER_PORT: '3002',
+      PATH: `${binDir}:${process.env.PATH}`,
+      RUNTIME_TEST_PNPM_LOG: logFile,
+    };
+    // Ensure CAT_CAFE_RUNTIME_RESTART_OK is not inherited from the parent env;
+    // this test specifically validates that restart is REFUSED when the API port is active.
+    delete ncFallbackEnv.CAT_CAFE_RUNTIME_RESTART_OK;
+
     const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-sync'], {
       cwd: projectDir,
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        API_SERVER_PORT: '3002',
-        PATH: `${binDir}:${process.env.PATH}`,
-        RUNTIME_TEST_PNPM_LOG: logFile,
-      },
+      env: ncFallbackEnv,
     });
 
     assert.notEqual(result.status, 0);
@@ -332,17 +383,115 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
     tempProcs.push(server);
     await waitForLocalPort(3010);
 
+    const envFilePortEnv = {
+      ...process.env,
+      CAT_CAFE_RUNTIME_DIR: projectDir,
+    };
+    // Ensure CAT_CAFE_RUNTIME_RESTART_OK is not inherited from the parent env;
+    // this test validates that restart is REFUSED when .env API_SERVER_PORT is active.
+    delete envFilePortEnv.CAT_CAFE_RUNTIME_RESTART_OK;
+
     const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-sync'], {
       cwd: projectDir,
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        CAT_CAFE_RUNTIME_DIR: projectDir,
-      },
+      env: envFilePortEnv,
     });
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /API port appears active/);
     assert.doesNotMatch(result.stdout, /STARTED:/);
+  });
+
+  it('auto-stashes isolated pnpm lock drift before sync during start', () => {
+    const projectDir = createTempProject('runtime-lock-drift-start');
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'runtime-lock-drift-worktree-'));
+    const remoteDir = mkdtempSync(join(tmpdir(), 'runtime-lock-drift-remote-'));
+    tempDirs.push(runtimeDir, remoteDir);
+
+    writeFileSync(join(projectDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n', 'utf8');
+    execFileSync('git', ['init', '-b', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: projectDir, stdio: 'ignore' });
+
+    execFileSync('git', ['init', '--bare', remoteDir], { stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteDir], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['fetch', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['worktree', 'add', runtimeDir, '-b', 'runtime/main-sync', 'origin/main'], {
+      cwd: projectDir,
+      stdio: 'ignore',
+    });
+    const normalizedRuntimeDir = realpathSync(runtimeDir);
+
+    writeFileSync(join(normalizedRuntimeDir, 'pnpm-lock.yaml'), 'lockfileVersion: 8\n', 'utf8');
+    const env = withStubbedPnpmEnv(normalizedRuntimeDir);
+
+    const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--daemon'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env: {
+        ...env,
+        CAT_CAFE_RUNTIME_RESTART_OK: '1',
+        CAT_CAFE_RUNTIME_DIR: normalizedRuntimeDir,
+        API_SERVER_PORT: '19899',
+      },
+    });
+
+    assert.equal(result.status, 0, `exit=${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /lock drift detected/i);
+    assert.match(result.stdout, /STARTED:/);
+    const dirty = execFileSync('git', ['diff', '--name-only'], { cwd: normalizedRuntimeDir, encoding: 'utf8' }).trim();
+    assert.equal(dirty, '');
+  });
+
+  it('rejects staged dirty files even when unstaged lock drift is present', () => {
+    const projectDir = createTempProject('runtime-staged-plus-lock');
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'runtime-staged-lock-worktree-'));
+    const remoteDir = mkdtempSync(join(tmpdir(), 'runtime-staged-lock-remote-'));
+    tempDirs.push(runtimeDir, remoteDir);
+
+    writeFileSync(join(projectDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n', 'utf8');
+    writeFileSync(join(projectDir, 'src.js'), 'original\n', 'utf8');
+    execFileSync('git', ['init', '-b', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: projectDir, stdio: 'ignore' });
+
+    execFileSync('git', ['init', '--bare', remoteDir], { stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteDir], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['fetch', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['worktree', 'add', runtimeDir, '-b', 'runtime/main-sync', 'origin/main'], {
+      cwd: projectDir,
+      stdio: 'ignore',
+    });
+    const normalizedRuntimeDir = realpathSync(runtimeDir);
+
+    // Staged non-lock change + unstaged lock drift
+    writeFileSync(join(normalizedRuntimeDir, 'src.js'), 'modified\n', 'utf8');
+    execFileSync('git', ['add', 'src.js'], { cwd: normalizedRuntimeDir, stdio: 'ignore' });
+    writeFileSync(join(normalizedRuntimeDir, 'pnpm-lock.yaml'), 'lockfileVersion: 8\n', 'utf8');
+
+    const env = withStubbedPnpmEnv(normalizedRuntimeDir);
+    const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--daemon'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env: {
+        ...env,
+        CAT_CAFE_RUNTIME_RESTART_OK: '1',
+        CAT_CAFE_RUNTIME_DIR: normalizedRuntimeDir,
+        API_SERVER_PORT: '19899',
+      },
+    });
+
+    assert.notEqual(
+      result.status,
+      0,
+      `should reject but exited 0\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.match(result.stderr, /runtime worktree has local changes/);
   });
 });

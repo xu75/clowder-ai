@@ -1,9 +1,9 @@
 ---
 name: schedule-tasks
 description: >
-  定时任务注册、管理、能力指南。
-  Use when: 用户想设定时任务、定期提醒、周期巡检、定时发送内容。
-  Not for: 一次性即时操作、已有 builtin 任务的手动触发。
+  定时任务注册、管理、能力指南。支持周期任务和一次性延迟任务。
+  Use when: 用户想设定时任务、定期提醒、周期巡检、定时发送内容、延迟执行一次性操作。
+  Not for: 已有 builtin 任务的手动触发。
   Output: 注册/管理定时任务，任务到点唤醒猫执行。
 triggers:
   - "定时"
@@ -17,6 +17,21 @@ triggers:
   - "定期"
   - "周期"
   - "定时任务"
+  - "分钟后"
+  - "小时后"
+  - "之后"
+  - "later"
+  - "in 5 minutes"
+  - "once"
+  - "删除"
+  - "清理"
+  - "移除"
+  - "取消"
+  - "停掉"
+  - "remove"
+  - "cancel"
+  - "delete"
+  - "stop task"
 ---
 
 # Schedule Tasks — 定时任务注册与管理
@@ -72,6 +87,8 @@ triggers:
 
 ## Trigger 语法速查
 
+### 周期触发（recurring）
+
 | 用户说 | trigger JSON |
 |--------|-------------|
 | 每天早上 9 点 | `{"type":"cron","expression":"0 9 * * *"}` |
@@ -79,6 +96,17 @@ triggers:
 | 每 30 分钟 | `{"type":"interval","ms":1800000}` |
 | 每周一早上 10 点 | `{"type":"cron","expression":"0 10 * * 1"}` |
 | 每 5 分钟 | `{"type":"interval","ms":300000}` |
+
+### 一次性触发（once — #415）
+
+| 用户说 | trigger JSON |
+|--------|-------------|
+| 2 分钟后提醒我 | `{"type":"once","delayMs":120000}` |
+| 1 小时后查天气 | `{"type":"once","delayMs":3600000}` |
+| 30 秒后通知我 | `{"type":"once","delayMs":30000}` |
+
+一次性任务执行后会**自动退役**（从 runtime 注销 + 从 SQLite 删除），不会重复触发。
+路由层会将 `delayMs` 归一化为绝对时间 `fireAt`（epoch ms），确保重启后触发时间不漂移。
 
 ## 管理
 
@@ -88,6 +116,14 @@ triggers:
 | 暂停/恢复 | SchedulePanel UI（目前无 MCP 工具，只能在面板操作） |
 | 删除 | `cat_cafe_remove_scheduled_task` |
 | 手动触发 | SchedulePanel UI "立即执行" 按钮（目前无 MCP 工具） |
+
+### 删除流程（3 步）
+
+用户说"删除/清理/取消定时任务"时：
+
+1. **确认目标** — 调用 `cat_cafe_list_tasks` 或让用户在 SchedulePanel 中查看，确认要删除的任务 `taskId`
+2. **用户确认** — 展示任务详情（名称、触发规则、上次执行），让用户确认删除
+3. **执行删除** — 调用 `cat_cafe_remove_scheduled_task`（参数：`taskId`），删除后告知用户结果
 
 ## 常见错误
 

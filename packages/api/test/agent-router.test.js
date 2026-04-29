@@ -21,7 +21,7 @@ function createMockRegistry() {
       invocationId: `inv-${++counter}`,
       callbackToken: `tok-${counter}`,
     }),
-    verify: () => null,
+    verify: async () => ({ ok: false, reason: 'unknown_invocation' }),
   };
 }
 
@@ -238,7 +238,7 @@ function createAvailabilityConfigProject(availabilityOverrides = {}) {
     variants: [
       {
         id: `${id}-default`,
-        provider,
+        clientId: provider,
         defaultModel,
         mcpSupport: true,
         cli: {
@@ -2562,7 +2562,7 @@ describe('#58: preferredCats candidate scope (not dispatch list)', () => {
     assert.deepStrictEqual(targetCats, ['codex'], 'should route to last replier, not all preferred cats');
   });
 
-  test('last replier NOT in preferred set → routes to first preferred cat only', async () => {
+  test('last replier NOT in preferred set → still routes to last replier (user mental model)', async () => {
     const { AgentRouter } = await import('../dist/domains/cats/services/agents/routing/AgentRouter.js');
 
     const threadStore = createMockThreadStore(
@@ -2588,8 +2588,8 @@ describe('#58: preferredCats candidate scope (not dispatch list)', () => {
     const { targetCats } = await router.resolveTargetsAndIntent('hello', 't1');
     assert.deepStrictEqual(
       targetCats,
-      ['opus'],
-      'should route to first preferred cat when last replier is outside preferred set',
+      ['codex'],
+      'should route to last replier even when outside preferred set — user expects continuity',
     );
   });
 

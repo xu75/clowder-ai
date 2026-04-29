@@ -913,6 +913,199 @@ created: 2026-02-26
 
 ---
 
+### LL-047: Socket.IO `cors` 不保护 WebSocket — `allowRequest` 才是安全边界
+- 状态：validated
+- 更新时间：2026-04-10
+
+- 背景：Cat Cafe Hub 的 Socket.IO 实时通道被发现存在 CSWSH（Cross-Site WebSocket Hijacking）风险。`Origin: https://evil.example` 可以成功建立 WebSocket 连接到 `127.0.0.1:3004`
+
+- 影响：恶意网页可从任意 Origin 连接本机 WebSocket，冒充用户、监听消息、干扰猫猫工作
+
+- 根因：
+  1. **Socket.IO v4 的 `cors` 配置只对 HTTP long-polling 生效**，不校验 WebSocket upgrade 请求的 Origin 头（Socket.IO 官方文档 2026-02-16 明确标注）
+  2. 身份自报（`handshake.auth.userId`）无服务端校验
+  3. Room 无 ACL，任何连接可加入任意 room
+  4. @fastify/websocket 的 plain WS 端点（terminal PTY）完全绕过 Socket.IO，无任何 Origin 检查
+
+- 修复：
+  1. **Phase A**（PR #1041）：`allowRequest` hook 显式校验 Origin + 禁止自报 userId + 私网 Origin 收紧
+  2. **Phase B**（PR #1045）：terminal WS Origin gate + cancelAll 授权 + 全局 room ACL
+  3. **Phase D**（规划中）：HTTP session 替代自报身份 + Clickjacking + CSP + Prompt Injection 降权
+
+- 教训：
+  1. **框架的 CORS 配置 ≠ WebSocket 安全**——Socket.IO/Express 的 cors 中间件只管 HTTP，WebSocket upgrade 是独立的协议切换，必须在 upgrade 层单独校验
+  2. **本机 ≠ 安全**——浏览器同源策略不阻止 JS 向 localhost 发 WebSocket 连接，任何打开的网页都是潜在攻击面
+  3. **"能连上"比"能做什么"更危险**——一旦连接建立，后续的身份/Room/事件授权都是亡羊补牢；连接层拒绝是第一道也是最关键的防线
+  4. **Agent 产品的攻击面比传统 Web 应用更大**——Prompt Injection、工具调用误用、外部内容驱动的高危操作是传统安全审计不覆盖的维度
+
+- 来源锚点：
+  - F156 spec：`docs/features/F156-websocket-security-hardening.md`
+  - 三猫安全审计：*(internal reference removed)*
+  - PR #1041（Phase A）、PR #1045（Phase B）
+  - 外部参考：OpenClaw CVE-2026-25253 + ClawJacked（同类攻击链）
+
+### LL-048: 用户可感知状态禁止默认 TTL——静默消失按 P0 治理
+- 状态：validated
+- 更新时间：2026-04-10
+
+- 坑：F100 Self-Evolution 线程在创建 30 天后突然从 Hub UI 消失——不在列表、不在垃圾桶、搜索不到。铲屎官："太恐怖了！"
+- 根因：`RedisThreadStore.ts` 硬编码 `DEFAULT_TTL = 30 * 24 * 60 * 60`（30 天），thread 创建时调用 `EXPIRE`。但 `updateLastActive()` 只更新排序分数，**从不刷新 hash TTL**。到期后 Redis 静默删除 hash，而 sorted set index 因其他 thread 操作续期而存活——形成"索引有 ID 但 hash 已消失"的孤儿状态。
+- 触发条件：任何带非零 DEFAULT_TTL 的 Redis store（thread/message/task/summary/backlog/session 等），只要用户在 TTL 窗口内未触发恰好刷新 hash TTL 的操作，就会静默丢失。
+- 修复：
+  1. 全量止血：所有 16+ Redis store 的 DEFAULT_TTL 改为 0（persistent），`EXPIRE 0` / `SET EX 0` 陷阱用条件分支防御
+  2. 自愈机制：`get()` 发现 hash 缺失时从 message timeline 重建元数据（`recoverThreadFromMessages`）
+  3. 统一 key 续期：所有 detail 变更通过 `setDetailFields()`/`deleteDetailFields()` 自动调用 `applyKeyRetention()`
+  4. 文档 + .env.example 同步更新
+- 防护：
+  1. 铁律 #5"禁止用户状态静默消失"——默认持久化，TTL 只能 opt-in
+  2. 新增 Redis store 必须 DEFAULT_TTL=0，引入非零 TTL 需 P0 级审批
+  3. 任何 `EXPIRE` / `SET EX` 调用必须有 `> 0` 守卫，防止 TTL=0 变成立即删除
+- 来源锚点：
+  - 根因文件：`packages/api/src/domains/cats/services/stores/redis/RedisThreadStore.ts:32`
+  - 丢失 thread：`thread_mmlv4v2oq6dxefr6`（2026-03-11 创建，2026-04-10 过期）
+  - Feature spec：`docs/features/F100-self-evolution.md` line 54
+- 原理：**EXPIRE 0 = 立即删除**（Redis 语义）。框架层 TTL 默认值决定了用户数据的生死线——这不是"配置"，而是产品决策。opt-out 持久化 = 用户必须知道一个他们不可能知道的配置才能保住自己的数据，这在产品层面是不可接受的。
+
+---
+
+### LL-049: `pnpm dev:direct` 无差别杀端口——review 踢翻 runtime
+- 状态：draft
+- 更新时间：2026-04-11
+
+- 坑：2026-04-10，Maine Coon在 review F152 PR (#1070) 时，在主仓库执行 `pnpm dev:direct`。`start-dev.sh` 的 `kill_managed_ports()` 无条件杀掉 3003/3004 端口上的进程——正在运行的 runtime 被踢掉，铲屎官被动中断。
+- 根因：
+  1. **`kill_port()` 不检查进程归属**：谁占着端口就杀谁，不区分是本 worktree 残留还是 runtime/alpha 等其他实例
+  2. **护栏分裂**：`runtime-worktree.sh` 有 `CAT_CAFE_RUNTIME_RESTART_OK` 授权门，但 `dev:direct` 走 `start-dev.sh`，绕过了这道门
+  3. **`guard_main_branch_start()` 盲区**：只拦 `main` 分支 + `cat-cafe` 仓库名，主仓库切到 feature branch 照样触发事故
+  4. **review 沙盒规范有文档无工具**：request-review skill 写了"在沙盒操作"，但缺少统一入口和强制机制
+- 触发条件：任何猫在非隔离环境（主仓库、错误 worktree）执行 `pnpm dev:direct` / `pnpm start`，且 runtime 正在使用相同端口
+- 修复（PR #1077，已合入 `807536df5`）：
+  1. 新增 `pid_cwd()` + `path_is_within_project()` + `guard_port_kill_ownership()`：`kill_port()` 前检查占用进程的工作目录是否属于当前 `$PROJECT_DIR`，跨 worktree 默认拒绝 kill
+  2. `CAT_CAFE_RUNTIME_RESTART_OK=1` 显式授权才放行
+  3. 新增 `scripts/review-start.sh`（`pnpm review:start`）：review 验证统一入口，自动分配 3201/3202 端口、内存 Redis、review 沙盒路径
+  4. review 模板新增"沙盒路径 + 启动命令 + 实际端口"必填字段
+- 防护：
+  1. `start-dev.sh` 端口归属 guard（基于进程 cwd，不硬编码端口号）——任何端口冲突都能防
+  2. 回归测试覆盖"默认拒绝跨 worktree kill"和"显式授权放行"两条路径
+  3. `pnpm review:start` 统一入口消除"在哪启动、用什么端口"的歧义
+  4. request-review 模板强制证据字段（reviewer 必须填沙盒路径和端口）
+- 来源锚点：
+  - 事故报告：`docs/bug-report/2026-04-10-review-dev-direct-runtime-interruption/bug-report.md`
+  - 修复 PR：zts212653/cat-cafe#1077
+  - 端口归属 guard：`scripts/start-dev.sh:450`（`guard_port_kill_ownership`）
+  - review 入口：`scripts/review-start.sh`
+- 原理：**"默认安全"优于"靠人记得"**。LL-045 证明纪律文档拦不住猫——写了"不要动 runtime"但多个 session 仍然直接操作。端口保护和 Redis production Redis (sacred)一样，必须在工具层面做到"默认不可能发生"，而非"读了文档就不会发生"。
+
+- 关联：LL-045（runtime worktree 反复被猫污染）| PR #1077 | `feedback_no_touch_runtime.md` | CLAUDE.md 铁律 #4
+
+---
+
+### LL-050: ADR 漂移 2 个月无人发现——Feature 完成不扫知识影响
+- 状态：draft
+- 更新时间：2026-04-13
+
+- 坑：ADR-009（2026-02-10）选择"仅用户级 skill 分发"，F070（2026-03-08）引入项目级 governance bootstrap，事实性推翻 ADR-009 的核心假设。但 F070 完成时未触发任何 ADR/spec 影响检查，导致 ADR-009 以 `active` 状态存续 2 个月，直到社区 issue clowder-ai#386（2026-04-08）才暴露。
+- 根因：
+  1. **Feature 完成无"知识影响扫描"**：feat-lifecycle close step 不检查新 Feature 是否推翻了现有 ADR/spec 的前提
+  2. **ADR 缺 machine-readable 状态**：无 `drifted`/`superseded` 状态字段，`search_evidence` 无法区分过时文档和当前真相
+  3. **双层挂载无一致性校验**：preflight 只检查项目级 symlink 存在，不校验跨层一致性
+- 触发条件：任何 Feature 改变了现有 ADR 的核心假设，但 Feature 完成时无人检查
+- 修复：
+  1. ADR-009 已标注 `status: drifted`（2026-04-07）
+  2. ADR-025 作为 successor ADR 已完成三猫 review（2026-04-13 收敛）
+  3. ADR/spec frontmatter 新增 `status: active|drifted|superseded|historical` + `drifted_by` + `last_reviewed` 字段
+- 防护（待落地）：
+  1. feat-lifecycle close step 增加"知识影响扫描"：新 Feature 是否改变了现有 ADR/spec 的假设？
+  2. `search_evidence` 检索排序降权 drifted/historical 文档
+  3. 定期 ADR 巡检（半年一次 `last_reviewed` 刷新）
+- 来源锚点：
+  - 社区 issue：[clowder-ai#386](https://github.com/zts212653/clowder-ai/issues/386)
+  - ADR-009 drift 标注：`docs/decisions/009-cat-cafe-skills-distribution.md`
+  - Successor ADR：`docs/decisions/025-skills-canonical-mount-policy.md`
+- 原理：**知识也有保质期**。ADR 记录的是某个时间点的决策假设，后续架构演进可能悄悄推翻这些假设。如果只靠猫的记忆发现漂移，检测延迟 = Feature 交付频率的倒数。必须在 Feature completion 工具层面做"知识影响扫描"，才能把漂移窗口从月级压到天级。
+
+- 关联：ADR-009 | ADR-025 | F070 | clowder-ai#386 | `project_knowledge_lifecycle_gap.md`
+
+---
+
+### LL-051: 实验框架空转——造了铁路没装货物
+- 状态：draft
+- 更新时间：2026-04-18
+
+- 坑：F163 记忆熵减用 3 Phase 建了完整实验基础设施（schema V14 多轴元数据 + 7 flag + experiment logger + shadow mode + Health Tab UI），shadow 模式运行 32 小时、记录 448 次搜索。诊断发现三层空转：① 1501 篇文档 authority 全部是 `observed`（默认值），boost 权重全 1.0 等于无 boost；② shadow payload 只记 `{query, resultCount}`，没记录 before/after 排序对比；③ `evidence.ts:117` 硬编码 `confidence: 'mid' as const`，前端无信号差异。
+- 根因：
+  1. **坐标系错误（Round 4 原理）**：核心需求是"重要知识排前面"，最小方案是 `pathToAuthority()` 纯函数 + backfill。但选了"先建完整实验框架再灰度上线"的路径，把 70% 工作量花在框架本身而非核心价值。
+  2. **Phase 拆分遮蔽空洞**：每个 Phase 有自己的 AC 并全部通过，但 AC 验的是"能力存在"不是"能力有效"。`applyAuthorityBoost()` 存在且可调用 → AC pass，但所有文档权重 1.0 → 实际无效。
+  3. **Shadow mode 设计半成品**：spec 要求"后台并行跑新策略，记录差异"，实现只记了 flag snapshot + query，没记排序差异——因为差异计算依赖 authority 分化，而分化从未发生。
+- 触发条件：任何 feature 用"先建框架 → 再填数据"的顺序推进，且 AC 只验证框架存在性而非端到端效果
+- 修复：
+  1. 写 `pathToAuthority()` 纯函数，索引时从路径/frontmatter 自动派生 authority（而非手动 promotion）
+  2. 修 `confidence: 'mid' as const` → 从 authority 派生 high/mid/low
+  3. 直接切 `F163_AUTHORITY_BOOST=on`（跳过无价值的 shadow）
+- 防护：
+  1. Feature AC 必须包含至少一条"端到端效果验证"（不只是"能力存在"）
+  2. 实验 flag 开 shadow 后 48h 内必须检查 payload 是否包含对比数据——空跑 shadow 浪费资源且给人虚假安全感
+- 来源锚点：
+  - F163 shadow 数据诊断：`evidence.sqlite` f163_logs 表 448 条 search、authority 分布 100% observed
+  - 硬编码 confidence：`packages/api/src/routes/evidence.ts:117`
+  - Meta-Aesthetics canon（从 Round 4 数学之美升格）：`docs/canon/meta-aesthetics.md`
+- 原理：**Agent Quality = Model Capability × Environment Fit**（Round 4）。F163 在 Environment 侧堆了大量维度（多项式拟合），但没有验证任何一个维度是否真正改善 Fit。正确的路径是坐标变换：找到"authority 信号已经在文档路径里"这个洞察，用一个纯函数解决，而不是建一整套实验框架去"发现"这个答案。最优表达在正确坐标系下必然最简。
+
+- 关联：F163 | Round 4 数学之美讨论 | LL-050（知识漂移）
+
+---
+
+### LL-052: `exec VAR=val cmd` 不设置环境变量——bash 把它当可执行名
+- 状态：draft
+- 更新时间：2026-04-18
+
+- 坑：shell 启动脚本里 `exec ${env_prefix}pnpm run start`（`env_prefix="NODE_ENV=production "`）直接启动失败，bash 报 "NODE_ENV=production: command not found"。结果不是"设置环境变量后再 exec pnpm"，而是把 `NODE_ENV=production` 当成可执行文件名去 PATH 里查找。F153 intake clowder-ai#512 合入当天社区小伙伴启动就挂。
+- 根因：
+  1. **`exec` builtin 不解析内联赋值**：bash 的 `VAR=val command arg` 形式，**只有当 command 是外部可执行程序**（如 `env`、`pnpm`）时，内联 `VAR=val` 才会作为临时环境变量传递。`exec` 是 shell builtin，走 replace-current-process 路径，第一个 token 直接被当成要 exec 的 program name——`NODE_ENV=production pnpm` 等同于 `exec 'NODE_ENV=production' pnpm`。
+  2. **字符串断言掩盖启动失败**：`test/start-dev-script.test.js` 只断言 `printf "$(api_launch_command)"` 输出 `"cd ... && exec NODE_ENV=... pnpm ..."` 这个字符串字面量，没有 `eval` 这段输出验证进程真能启动。CI 全绿但 `pnpm run start` 从未被实际执行过。
+- 触发条件：shell 脚本里 `exec ${prefix}command` 模式，`prefix` 含内联环境变量赋值（`VAR=value `）
+- 修复：改写成 `exec env ${prefix}command`——`env` 是 POSIX 外部程序，会正确解析内联赋值并把变量注入子进程
+- 防护：
+  1. Shell 启动脚本的单测不能只断言 `printf` 输出文本，至少一个 case 必须 `bash -n` 语法检查 + 在 mock 环境下 `eval` 这段命令验证 exit code（或跑 `pnpm dev:direct --dry-run`）
+  2. Intake 社区 PR 改动 `scripts/**` 尤其启动/runtime 脚本时，reviewer checklist 加一条"本地跑一次 `pnpm alpha:start` 或 `pnpm dev:direct` 确认实际能启动不报错"
+- 来源锚点：
+  - Bug report: `clowder-ai#526`（2026-04-18 社区小伙伴报挂）
+  - 引入 commit: `cat-cafe:206ae80c40`（F153 intake clowder-ai#512）
+  - 修复 commit: `cat-cafe:bf5f54b9`（PR #1257）+ `clowder-ai:6ab02c44`（PR #527）
+  - 修复位置: `scripts/start-dev.sh:683-685` `api_launch_command()`
+- 原理：**`VAR=val command arg` 语法中 `VAR=val` 是"赋值前缀"还是 argv[0] 取决于 command 的类别**——外部程序会被 shell 剥离前缀作为临时 env 传递；builtin（`exec` / `source` / `:`）则直接把前缀当成参数。`env` 这个 POSIX 工具的存在就是为了让"在指定环境下运行程序"成为一个可被任何 builtin/context 调用的显式动作。**任何需要给子进程设环境变量又必须经过 builtin（典型就是 `exec`）的场景，用 `env` 显式承接。**
+
+- 关联：F153 intake clowder-ai#512 | clowder-ai#526 | cat-cafe#1257 | clowder-ai#527
+
+---
+
+### LL-053: 无头 Codex CLI 长任务不能靠 shell 伪后台——要么守住 `session_id`，要么真正 detached spawn
+- 状态：draft
+- 更新时间：2026-04-20
+
+- 坑：在 Codex CLI 无头 `exec_command` 环境里，把长任务写成 `bash ... &`、`nohup ... &`、`disown` 或 `setsid`，CLI 返回后看起来“命令发出去了”，但后台子进程常常已经跟着父命令一起死。于是会误判“还在跑”，实际任务根本没活。
+- 根因：
+  1. **把 shell 作业控制误当成 harness 生命周期控制**：`&` / `nohup` / `disown` / `setsid` 只是 shell 级语义；在无头 CLI harness 里，顶层命令退出后，同一进程树里的后台子进程仍可能被回收。
+  2. **把轮询误当保活**：实测前台长任务拿到 `session_id` 后，即使隔 15 秒再 `write_stdin` 也能正常收尾。轮询只是读取进度/结果，不是给进程“续命”。
+- 触发条件：任何从无头 CLI 里拉 sidecar、proxy、测试服务、长脚本、fire-and-forget worker，尤其是想偷懒用 shell `&` 时。
+- 修复：
+  1. **需要交互/输出**：保持前台，接住 `session_id`，后续继续在同一个 session 上 `write_stdin`
+  2. **需要真正后台脱离**：用 Node `spawn(..., { detached: true, stdio: 'ignore' })` + `child.unref()`，并把日志/结果文件作为外部探针
+- 防护：
+  1. 原生 system prompt 明确禁用“在无头 CLI 里拿 shell 伪后台跑持久任务”
+  2. Fire-and-forget 任务必须同时定义 `pid` / `log` / `result` 探针；没有外部探针，不算启动成功
+  3. 命令已经返回 `session_id` 时，不要重开新命令抢跑；优先续同一个 session
+- 来源锚点：
+  - *(internal reference removed)*
+  - *(internal reference removed)*
+  - *(internal reference removed)*
+  - `packages/api/src/domains/cats/services/agents/providers/GeminiAgentService.ts`
+- 原理：**长任务的关键不是“后台”两个字，而是谁拥有生命周期。** 需要持续交互时，生命周期应该绑在当前 `session_id`；需要任务脱离对话继续跑时，必须显式切换到真正 detached 的进程组，并用外部探针观测。shell 伪后台只是“看起来像分叉了”，不是可靠的 liveness ownership。
+
+- 关联：`assets/system-prompts/cats/codex.md` | *(internal reference removed)*
+
+---
+
 ## 8) 维护约定
 
 - 本文件是入口，不替代 ADR/bug-report 原文。

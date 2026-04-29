@@ -1,15 +1,24 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
-function runSourceOnlySnippet(scriptPath, snippet) {
+function baseShellEnv(overrides = {}) {
+  return {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    TERM: process.env.TERM ?? 'xterm-256color',
+    ...overrides,
+  };
+}
+
+function runSourceOnlySnippet(scriptPath, snippet, envOverrides = {}) {
   const result = spawnSync(
     'bash',
     ['-lc', `set -e\nsource "${scriptPath}" --source-only >/dev/null 2>&1\ntrap - EXIT INT TERM\n${snippet}`],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', env: baseShellEnv(envOverrides) },
   );
 
   assert.equal(result.status, 0, `snippet failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
@@ -27,6 +36,7 @@ declare -F background_eval_with_null_stdin >/dev/null
 declare -F wait_for_port_or_exit >/dev/null
 declare -F api_launch_command >/dev/null
 declare -F frontend_launch_command >/dev/null
+declare -F web_production_build_ready >/dev/null
 declare -F default_redis_storage_key >/dev/null
 declare -F default_redis_data_dir >/dev/null
 declare -F default_redis_backup_dir >/dev/null
@@ -102,27 +112,119 @@ printf '%s' "$CAT_CAFE_MCP_SERVER_PATH"
   assert.equal(output, explicitPath);
 });
 
-test('load_dare_env_from_local whitelists anthropic key+endpoint overrides', () => {
-  const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
-  const output = runSourceOnlySnippet(
-    scriptPath,
-    `
-tmp_dir=$(mktemp -d)
-trap 'rm -rf "$tmp_dir"' RETURN
-cd "$tmp_dir"
-cat > .env.local <<'EOF'
-DARE_API_KEY=sk-dare-local
-DARE_ENDPOINT=https://dare-proxy.example/v1
-ANTHROPIC_API_KEY=sk-ant-local
-ANTHROPIC_BASE_URL=https://anthropic-proxy.example
-EOF
-unset DARE_API_KEY DARE_ENDPOINT ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
-load_dare_env_from_local
-printf '%s|%s|%s|%s' "$DARE_API_KEY" "$DARE_ENDPOINT" "$ANTHROPIC_API_KEY" "$ANTHROPIC_BASE_URL"
-`,
-  );
+function createTempProject() {
+  const tmp = mkdtempSync(join(tmpdir(), 'env-local-'));
+  const scriptsDir = join(tmp, 'scripts');
+  mkdirSync(scriptsDir);
+  const realScriptsDir = resolve(process.cwd(), '../../scripts');
+  cpSync(join(realScriptsDir, 'start-dev.sh'), join(scriptsDir, 'start-dev.sh'));
+  cpSync(join(realScriptsDir, 'download-source-overrides.sh'), join(scriptsDir, 'download-source-overrides.sh'));
+  chmodSync(join(scriptsDir, 'start-dev.sh'), 0o755);
+  return tmp;
+}
 
-  assert.equal(output, 'sk-dare-local|https://dare-proxy.example/v1|sk-ant-local|https://anthropic-proxy.example');
+test('.env.local overrides same-name keys from .env (#603)', () => {
+  const tmp = createTempProject();
+  try {
+    writeFileSync(join(tmp, '.env'), 'FRONTEND_PORT=3003\nPREVIEW_GATEWAY_PORT=4099\n');
+    writeFileSync(join(tmp, '.env.local'), 'FRONTEND_PORT=3013\nPREVIEW_GATEWAY_PORT=4199\n');
+    const scriptPath = join(tmp, 'scripts', 'start-dev.sh');
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e\nsource "${scriptPath}" --source-only >/dev/null 2>&1\ntrap - EXIT INT TERM\nprintf '%s|%s' "$FRONTEND_PORT" "$PREVIEW_GATEWAY_PORT"`,
+      ],
+      {
+        encoding: 'utf8',
+        env: baseShellEnv({ CAT_CAFE_RESPECT_DOTENV_PORTS: '1' }),
+      },
+    );
+
+    assert.equal(result.status, 0, `snippet failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), '3013|4199');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CLI env vars beat .env.local for port keys in default mode (#603)', () => {
+  const tmp = createTempProject();
+  try {
+    writeFileSync(join(tmp, '.env'), 'FRONTEND_PORT=3003\nAPI_SERVER_PORT=3004\n');
+    writeFileSync(join(tmp, '.env.local'), 'FRONTEND_PORT=3013\nAPI_SERVER_PORT=3014\n');
+    const scriptPath = join(tmp, 'scripts', 'start-dev.sh');
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e\nsource "${scriptPath}" --source-only >/dev/null 2>&1\ntrap - EXIT INT TERM\nprintf '%s|%s' "$FRONTEND_PORT" "$API_SERVER_PORT"`,
+      ],
+      {
+        encoding: 'utf8',
+        env: baseShellEnv({ FRONTEND_PORT: '3099', API_SERVER_PORT: '3098' }),
+      },
+    );
+
+    assert.equal(result.status, 0, `snippet failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), '3099|3098');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('.env.local beats CLI env in respect-dotenv-ports mode (#603)', () => {
+  const tmp = createTempProject();
+  try {
+    writeFileSync(join(tmp, '.env'), 'FRONTEND_PORT=3003\n');
+    writeFileSync(join(tmp, '.env.local'), 'FRONTEND_PORT=3013\n');
+    const scriptPath = join(tmp, 'scripts', 'start-dev.sh');
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e\nsource "${scriptPath}" --source-only >/dev/null 2>&1\ntrap - EXIT INT TERM\nprintf '%s' "$FRONTEND_PORT"`,
+      ],
+      {
+        encoding: 'utf8',
+        env: baseShellEnv({ FRONTEND_PORT: '3099', CAT_CAFE_RESPECT_DOTENV_PORTS: '1' }),
+      },
+    );
+
+    assert.equal(result.status, 0, `snippet failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), '3013');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('.env.local can activate respect-dotenv-ports mode (#603)', () => {
+  const tmp = createTempProject();
+  try {
+    writeFileSync(join(tmp, '.env'), 'FRONTEND_PORT=3003\n');
+    writeFileSync(join(tmp, '.env.local'), 'CAT_CAFE_RESPECT_DOTENV_PORTS=1\nFRONTEND_PORT=3013\n');
+    const scriptPath = join(tmp, 'scripts', 'start-dev.sh');
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e\nsource "${scriptPath}" --source-only >/dev/null 2>&1\ntrap - EXIT INT TERM\nprintf '%s' "$FRONTEND_PORT"`,
+      ],
+      {
+        encoding: 'utf8',
+        env: baseShellEnv({ FRONTEND_PORT: '3099' }),
+      },
+    );
+
+    assert.equal(result.status, 0, `snippet failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), '3013');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('explicit port env vars override .env values for direct startup', () => {
@@ -135,12 +237,11 @@ test('explicit port env vars override .env values for direct startup', () => {
     ],
     {
       encoding: 'utf8',
-      env: {
-        ...process.env,
+      env: baseShellEnv({
         FRONTEND_PORT: '3023',
         API_SERVER_PORT: '3024',
         REDIS_PORT: '6409',
-      },
+      }),
     },
   );
 
@@ -158,10 +259,9 @@ test('explicit NEXT_PUBLIC_API_URL override survives project .env during direct 
     ],
     {
       encoding: 'utf8',
-      env: {
-        ...process.env,
+      env: baseShellEnv({
         NEXT_PUBLIC_API_URL: 'http://localhost:3035',
-      },
+      }),
     },
   );
 
@@ -179,10 +279,9 @@ test('explicit PREVIEW_GATEWAY_PORT override survives project .env during direct
     ],
     {
       encoding: 'utf8',
-      env: {
-        ...process.env,
+      env: baseShellEnv({
         PREVIEW_GATEWAY_PORT: '5120',
-      },
+      }),
     },
   );
 
@@ -195,12 +294,9 @@ test('direct command mode can prefer current .env ports over ambient shell ports
   const tempRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-start-dev-dotenv-ports-'));
   const tempScriptPath = join(tempRoot, 'scripts', 'start-dev.sh');
   const tempOverridesPath = join(tempRoot, 'scripts', 'download-source-overrides.sh');
-  const baseEnv = {
-    PATH: process.env.PATH ?? '',
-    HOME: process.env.HOME ?? '',
-    TERM: process.env.TERM ?? 'xterm-256color',
+  const baseEnv = baseShellEnv({
     CAT_CAFE_RESPECT_DOTENV_PORTS: '1',
-  };
+  });
 
   try {
     mkdirSync(join(tempRoot, 'scripts'), { recursive: true });
@@ -258,12 +354,7 @@ test('raw dev entry remaps setup-style Redis 6399 defaults to dev Redis 6398', (
       {
         cwd: tempRoot,
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: process.env.PATH ?? '',
-          HOME: process.env.HOME ?? '',
-          TERM: process.env.TERM ?? 'xterm-256color',
-        },
+        env: baseShellEnv(),
       },
     );
 
@@ -295,13 +386,9 @@ test('respect-dotenv mode keeps explicit Redis 6399 defaults intact for wrappers
       {
         cwd: tempRoot,
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: process.env.PATH ?? '',
-          HOME: process.env.HOME ?? '',
-          TERM: process.env.TERM ?? 'xterm-256color',
+        env: baseShellEnv({
           CAT_CAFE_RESPECT_DOTENV_PORTS: '1',
-        },
+        }),
       },
     );
 
@@ -325,11 +412,10 @@ test('redis port override also recomputes isolated redis dirs', () => {
       ],
       {
         encoding: 'utf8',
-        env: {
-          ...process.env,
+        env: baseShellEnv({
           HOME: tempHome,
           REDIS_PORT: '6409',
-        },
+        }),
       },
     );
 
@@ -648,11 +734,80 @@ test('api_launch_command uses exec so wait tracks the long-lived server process'
     scriptPath,
     `
 CAT_CAFE_DIRECT_NO_WATCH=1
+PROD_WEB=true
 printf '%s' "$(api_launch_command)"
 `,
   );
 
-  assert.equal(output, 'cd packages/api && exec pnpm run start');
+  assert.equal(output, 'cd packages/api && exec env NODE_ENV=production pnpm run start');
+});
+
+test('api_launch_command routes multiple env assignments through env before pnpm', () => {
+  const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
+  const output = runSourceOnlySnippet(
+    scriptPath,
+    `
+CAT_CAFE_DIRECT_NO_WATCH=1
+PROD_WEB=true
+DEBUG_MODE=true
+printf '%s' "$(api_launch_command)"
+`,
+  );
+
+  assert.equal(output, 'cd packages/api && exec env NODE_ENV=production LOG_LEVEL=debug pnpm run start');
+});
+
+test('api_launch_command output is actually executable: pnpm gets invoked with NODE_ENV propagated', () => {
+  // Regression guard for LL-052: string-literal assertions above can't catch
+  // `exec VAR=val pnpm` (no env) because bash would treat VAR=val as the program
+  // name. This test eval()s the command in a bash sandbox with a pnpm shim on
+  // PATH and asserts the shim actually ran with NODE_ENV=production.
+  const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
+  const tempRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-start-dev-real-exec-'));
+  const fakeApiDir = join(tempRoot, 'packages', 'api');
+  const shimDir = join(tempRoot, 'bin');
+  const capturePath = join(tempRoot, 'captured.txt');
+
+  try {
+    mkdirSync(fakeApiDir, { recursive: true });
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(
+      join(shimDir, 'pnpm'),
+      `#!/usr/bin/env bash\nprintf 'NODE_ENV=%s\\nARGS=%s\\n' "\${NODE_ENV:-<unset>}" "$*" > "${capturePath}"\n`,
+      'utf8',
+    );
+    chmodSync(join(shimDir, 'pnpm'), 0o755);
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e
+source "${scriptPath}" --source-only >/dev/null 2>&1
+trap - EXIT INT TERM
+CAT_CAFE_DIRECT_NO_WATCH=1
+PROD_WEB=true
+cmd=$(api_launch_command)
+cd "${tempRoot}"
+eval "$cmd"`,
+      ],
+      {
+        encoding: 'utf8',
+        env: baseShellEnv({ PATH: `${shimDir}:${process.env.PATH ?? ''}` }),
+      },
+    );
+
+    assert.equal(
+      result.status,
+      0,
+      `bash failed to exec api_launch_command (would catch broken \`exec VAR=val pnpm\` form)\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    const captured = readFileSync(capturePath, 'utf8');
+    assert.match(captured, /NODE_ENV=production/, 'NODE_ENV did not propagate to pnpm');
+    assert.match(captured, /ARGS=run start/, 'pnpm args incorrect');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test('frontend_launch_command uses exec in production mode so wait tracks next start', () => {
@@ -667,6 +822,37 @@ printf '%s' "$(frontend_launch_command)"
   );
 
   assert.equal(output, 'cd packages/web && PORT=3013 exec pnpm exec next start -p 3013 -H 0.0.0.0');
+});
+
+test('web_production_build_ready requires BUILD_ID instead of only .next directory', () => {
+  const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
+  const tempRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-start-dev-web-build-'));
+
+  try {
+    mkdirSync(join(tempRoot, 'packages', 'web', '.next'), { recursive: true });
+
+    const output = runSourceOnlySnippet(
+      scriptPath,
+      `
+PROJECT_DIR="${tempRoot}"
+if web_production_build_ready; then
+  printf 'ready-before|'
+else
+  printf 'missing-before|'
+fi
+printf 'build-id' > "$PROJECT_DIR/packages/web/.next/BUILD_ID"
+if web_production_build_ready; then
+  printf 'ready-after'
+else
+  printf 'missing-after'
+fi
+`,
+    );
+
+    assert.equal(output, 'missing-before|ready-after');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test('print_manual_download_source_summary returns zero under set -e even when no overrides are set', () => {

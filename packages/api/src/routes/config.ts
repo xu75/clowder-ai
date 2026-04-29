@@ -8,10 +8,19 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import { resolve } from 'node:path';
+import { catRegistry } from '@cat-cafe/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { collectConfigSnapshot } from '../config/ConfigRegistry.js';
 import { configStore } from '../config/ConfigStore.js';
+import {
+  clearRuntimeDefaultCatId,
+  getDefaultCatId,
+  getOwnerUserId,
+  hasRuntimeDefaultCatOverride,
+  isCatAvailable,
+  setRuntimeDefaultCatId,
+} from '../config/cat-config-loader.js';
 import { configEventBus, createChangeSetId } from '../config/config-event-bus.js';
 import type { ConfigSnapshot } from '../config/config-snapshot.js';
 import {
@@ -24,6 +33,9 @@ import {
 import { updateRuntimeCoCreator } from '../config/runtime-cat-catalog.js';
 import { AuditEventTypes, getEventAuditLog } from '../domains/cats/services/orchestration/EventAuditLog.js';
 import { resolveActiveProjectRoot } from '../utils/active-project-root.js';
+import { resolveHeaderUserId } from '../utils/request-identity.js';
+import { getDefaultUploadDir } from '../utils/upload-paths.js';
+import { configCatOrderRoutes } from './config-cat-order.js';
 
 const patchSchema = z.object({
   key: z.string().min(1),
@@ -127,6 +139,8 @@ export async function configRoutes(app: FastifyInstance, opts: ConfigRoutesOptio
   const projectRoot = opts.projectRoot ?? resolveActiveProjectRoot();
   const envFilePath = opts.envFilePath ?? resolve(projectRoot, '.env');
 
+  await app.register(configCatOrderRoutes, { projectRoot });
+
   app.get('/api/config', async () => ({
     config: collectConfigSnapshot(),
   }));
@@ -137,7 +151,7 @@ export async function configRoutes(app: FastifyInstance, opts: ConfigRoutesOptio
       reply.status(400);
       return { error: 'Invalid request', details: parsed.error.issues };
     }
-    const operator = resolveOperator(request.headers['x-cat-cafe-user']);
+    const operator = resolveHeaderUserId(request);
     if (!operator) {
       reply.status(400);
       return { error: 'Identity required (X-Cat-Cafe-User header)' };
@@ -190,7 +204,7 @@ export async function configRoutes(app: FastifyInstance, opts: ConfigRoutesOptio
       reply.status(400);
       return { error: 'Invalid request', details: parsed.error.issues };
     }
-    const operator = resolveOperator(request.headers['x-cat-cafe-user']);
+    const operator = resolveHeaderUserId(request);
     if (!operator) {
       reply.status(400);
       return { error: 'Identity required (X-Cat-Cafe-User header)' };
@@ -249,7 +263,7 @@ export async function configRoutes(app: FastifyInstance, opts: ConfigRoutesOptio
           runtimeLogs: resolve(apiCwd, './data/logs/api'),
           cliArchive: resolve(apiCwd, process.env.CLI_RAW_ARCHIVE_DIR ?? './data/cli-raw-archive'),
           redisDevSandbox: resolve(home, '.cat-cafe/redis-dev-sandbox'),
-          uploads: resolve(apiCwd, process.env.UPLOAD_DIR ?? './uploads'),
+          uploads: getDefaultUploadDir(process.env.UPLOAD_DIR),
         },
       },
     };
@@ -261,7 +275,7 @@ export async function configRoutes(app: FastifyInstance, opts: ConfigRoutesOptio
       reply.status(400);
       return { error: 'Invalid request', details: parsed.error.issues };
     }
-    const operator = resolveOperator(request.headers['x-cat-cafe-user']);
+    const operator = resolveHeaderUserId(request);
     if (!operator) {
       reply.status(400);
       return { error: 'Identity required (X-Cat-Cafe-User header)' };
@@ -276,7 +290,7 @@ export async function configRoutes(app: FastifyInstance, opts: ConfigRoutesOptio
       updates.set(update.name, update.value);
     }
 
-    // Owner gate: sensitive-editable vars require configured owner identity
+    // Owner gate: sensitive-editable vars require EXPLICIT owner config (F136 trust anchor)
     const touchesSensitive = hasSensitiveEditableVars(updates.keys());
     if (touchesSensitive) {
       const ownerId = process.env.DEFAULT_OWNER_USER_ID?.trim();
@@ -343,5 +357,65 @@ export async function configRoutes(app: FastifyInstance, opts: ConfigRoutesOptio
     }
 
     return { ok: true, envFilePath, summary: buildEnvSummary() };
+  });
+
+  // ── F154 AC-A4: Default cat runtime override (owner-gated) ──────────
+
+  function persistDefaultCatToEnv(catId: string | null): void {
+    const current = existsSync(envFilePath) ? readFileSync(envFilePath, 'utf8') : '';
+    const updates = new Map<string, string | null>([['DEFAULT_CAT_ID', catId]]);
+    const next = applyEnvUpdatesToFile(current, updates);
+    writeFileSync(envFilePath, next, 'utf8');
+    if (catId) process.env.DEFAULT_CAT_ID = catId;
+    else delete process.env.DEFAULT_CAT_ID;
+  }
+
+  app.get('/api/config/default-cat', async () => ({
+    catId: getDefaultCatId(),
+    isOverride: hasRuntimeDefaultCatOverride(),
+  }));
+
+  const defaultCatPutSchema = z.object({
+    catId: z.string().min(1).nullable(),
+  });
+
+  app.put('/api/config/default-cat', async (request: FastifyRequest, reply: FastifyReply) => {
+    const operator = resolveHeaderUserId(request);
+    if (!operator) {
+      reply.status(400);
+      return { error: 'Identity required (X-Cat-Cafe-User header)' };
+    }
+
+    if (operator !== getOwnerUserId()) {
+      reply.status(403);
+      return { error: 'Only the owner can change the default cat' };
+    }
+
+    const parsed = defaultCatPutSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.status(400);
+      return { error: 'Invalid request', details: parsed.error.issues };
+    }
+
+    if (parsed.data.catId === null) {
+      persistDefaultCatToEnv(null);
+      clearRuntimeDefaultCatId();
+      return { ok: true, catId: getDefaultCatId(), isOverride: false };
+    }
+
+    // Validate catId is registered
+    if (!catRegistry.has(parsed.data.catId)) {
+      reply.status(400);
+      return { error: `Unknown catId: ${parsed.data.catId}` };
+    }
+
+    if (!isCatAvailable(parsed.data.catId)) {
+      reply.status(400);
+      return { error: `Cat ${parsed.data.catId} is unavailable` };
+    }
+
+    persistDefaultCatToEnv(parsed.data.catId);
+    setRuntimeDefaultCatId(parsed.data.catId);
+    return { ok: true, catId: parsed.data.catId, isOverride: true };
   });
 }

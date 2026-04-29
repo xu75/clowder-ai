@@ -131,6 +131,21 @@ tty_read_secret() {
 # These provide a TUI-style menu: ↑↓ to move, space to toggle, enter to confirm.
 # Falls back to plain tty_read when HAS_TTY is false.
 
+tty_arrow_delta() {
+    case "$1" in
+        '[A'|'OA') printf '%s' '-1'; return 0 ;;
+        '[B'|'OB') printf '%s' '1'; return 0 ;;
+    esac
+    return 1
+}
+tty_numeric_index() {
+    local key="$1" count="$2"
+    [[ "$key" =~ ^[1-9]$ ]] || return 1
+    local idx=$((10#$key - 1))
+    (( idx >= 0 && idx < count )) || return 1
+    printf '%s' "$idx"
+}
+
 # tty_select: Single-select with arrow keys.
 #   Usage: tty_select RESULT_VAR "prompt" "option1" "option2" ...
 #   Sets RESULT_VAR to the 0-based index of the chosen option (default 0).
@@ -138,22 +153,27 @@ tty_select() {
     local result_var="$1" prompt="$2"; shift 2
     local -a options=("$@")
     local count=${#options[@]} cur=0
+    local default_index="${TTY_SELECT_DEFAULT_INDEX:-0}"
+    if [[ "$default_index" =~ ^[0-9]+$ ]]; then
+        local parsed_default=$((10#$default_index))
+        (( parsed_default >= 0 && parsed_default < count )) && cur="$parsed_default"
+    fi
 
     if [[ "$HAS_TTY" != true || $count -eq 0 ]]; then
-        printf -v "$result_var" '%s' '0'; return
+        printf -v "$result_var" '%s' "$cur"; return
     fi
 
     # Save terminal state and switch to raw mode
     local saved_tty; saved_tty="$(stty -g </dev/tty 2>/dev/null)"
     printf '\n%s\n' "$prompt" >/dev/tty
-    printf '  Use ↑↓ arrows to move, Enter to select\n\n' >/dev/tty
+    printf '  Use ↑↓ arrows or number keys to move, Enter to select\n\n' >/dev/tty
 
     local i
     for ((i=0; i<count; i++)); do
         if ((i == cur)); then
-            printf '  \033[36m❯ %s\033[0m\n' "${options[$i]}" >/dev/tty
+            printf '  %d. \033[36m❯ %s\033[0m\n' "$((i+1))" "${options[$i]}" >/dev/tty
         else
-            printf '    %s\n' "${options[$i]}" >/dev/tty
+            printf '  %d.   %s\n' "$((i+1))" "${options[$i]}" >/dev/tty
         fi
     done
 
@@ -166,10 +186,18 @@ tty_select() {
         local need_redraw=false
         if [[ "$key" == $'\x1b' ]]; then
             read -rsn2 -t 0.1 key </dev/tty 2>/dev/null || true
-            case "$key" in
-                '[A') ((cur > 0)) && ((cur--)) || true; need_redraw=true ;;
-                '[B') ((cur < count-1)) && ((cur++)) || true; need_redraw=true ;;
-            esac
+            local delta
+            if delta="$(tty_arrow_delta "$key")"; then
+                if ((delta < 0)); then
+                    ((cur > 0)) && ((cur--)) || true
+                elif ((delta > 0)); then
+                    ((cur < count-1)) && ((cur++)) || true
+                fi
+                need_redraw=true
+            fi
+        elif tty_numeric_index "$key" "$count" >/dev/null; then
+            cur="$(tty_numeric_index "$key" "$count")"
+            need_redraw=true
         elif [[ "$key" == '' ]]; then
             break
         fi
@@ -178,9 +206,9 @@ tty_select() {
         for ((i=0; i<count; i++)); do
             printf '\r\033[K' >/dev/tty
             if ((i == cur)); then
-                printf '  \033[36m❯ %s\033[0m\n' "${options[$i]}" >/dev/tty
+                printf '  %d. \033[36m❯ %s\033[0m\n' "$((i+1))" "${options[$i]}" >/dev/tty
             else
-                printf '    %s\n' "${options[$i]}" >/dev/tty
+                printf '  %d.   %s\n' "$((i+1))" "${options[$i]}" >/dev/tty
             fi
         done
     done
@@ -214,14 +242,14 @@ tty_multiselect() {
 
     local saved_tty; saved_tty="$(stty -g </dev/tty 2>/dev/null)"
     printf '\n%s\n' "$prompt" >/dev/tty
-    printf '  Use ↑↓ to move, Space to toggle, Enter to confirm\n\n' >/dev/tty
+    printf '  Use ↑↓ to move, number keys to jump, Space to toggle, Enter to confirm\n\n' >/dev/tty
 
     for ((i=0; i<count; i++)); do
         local marker="◉"; [[ "${selected[$i]}" != "1" ]] && marker="○"
         if ((i == cur)); then
-            printf '  \033[36m❯ %s %s\033[0m\n' "$marker" "${options[$i]}" >/dev/tty
+            printf '  %d. \033[36m❯ %s %s\033[0m\n' "$((i+1))" "$marker" "${options[$i]}" >/dev/tty
         else
-            printf '    %s %s\n' "$marker" "${options[$i]}" >/dev/tty
+            printf '  %d.   %s %s\n' "$((i+1))" "$marker" "${options[$i]}" >/dev/tty
         fi
     done
 
@@ -234,10 +262,18 @@ tty_multiselect() {
         local need_redraw=false
         if [[ "$key" == $'\x1b' ]]; then
             read -rsn2 -t 0.1 key </dev/tty 2>/dev/null || true
-            case "$key" in
-                '[A') ((cur > 0)) && ((cur--)) || true; need_redraw=true ;;
-                '[B') ((cur < count-1)) && ((cur++)) || true; need_redraw=true ;;
-            esac
+            local delta
+            if delta="$(tty_arrow_delta "$key")"; then
+                if ((delta < 0)); then
+                    ((cur > 0)) && ((cur--)) || true
+                elif ((delta > 0)); then
+                    ((cur < count-1)) && ((cur++)) || true
+                fi
+                need_redraw=true
+            fi
+        elif tty_numeric_index "$key" "$count" >/dev/null; then
+            cur="$(tty_numeric_index "$key" "$count")"
+            need_redraw=true
         elif [[ "$key" == ' ' ]]; then
             if [[ "${selected[$cur]}" == "1" ]]; then selected[$cur]="0"; else selected[$cur]="1"; fi
             need_redraw=true
@@ -250,9 +286,9 @@ tty_multiselect() {
             local marker="◉"; [[ "${selected[$i]}" != "1" ]] && marker="○"
             printf '\r\033[K' >/dev/tty
             if ((i == cur)); then
-                printf '  \033[36m❯ %s %s\033[0m\n' "$marker" "${options[$i]}" >/dev/tty
+                printf '  %d. \033[36m❯ %s %s\033[0m\n' "$((i+1))" "$marker" "${options[$i]}" >/dev/tty
             else
-                printf '    %s %s\n' "$marker" "${options[$i]}" >/dev/tty
+                printf '  %d.   %s %s\n' "$((i+1))" "$marker" "${options[$i]}" >/dev/tty
             fi
         done
     done
@@ -296,9 +332,54 @@ read_env_key() {
     printf '%s\n' "$value"
 }
 pnpm_install_with_fallback() {
-    pnpm install --frozen-lockfile && return 0; [[ -n "$NPM_REGISTRY" ]] && return 1
+    local log_file; log_file="$(mktemp)"
+    if run_pnpm_install_capture "$log_file" pnpm install --frozen-lockfile; then
+        rm -f "$log_file"
+        return 0
+    fi
+    if pnpm_install_needs_puppeteer_skip "$log_file"; then
+        warn_puppeteer_skip_fallback
+        if run_pnpm_install_capture "$log_file" env PUPPETEER_SKIP_DOWNLOAD=1 pnpm install --frozen-lockfile; then
+            rm -f "$log_file"
+            return 0
+        fi
+    fi
+    if [[ -n "$NPM_REGISTRY" ]]; then
+        rm -f "$log_file"
+        return 1
+    fi
     warn "pnpm install failed — retrying with npmmirror"; use_registry "https://registry.npmmirror.com"
-    pnpm install --frozen-lockfile
+    if run_pnpm_install_capture "$log_file" pnpm install --frozen-lockfile; then
+        rm -f "$log_file"
+        return 0
+    fi
+    if pnpm_install_needs_puppeteer_skip "$log_file"; then
+        warn_puppeteer_skip_fallback
+        if run_pnpm_install_capture "$log_file" env PUPPETEER_SKIP_DOWNLOAD=1 pnpm install --frozen-lockfile; then
+            rm -f "$log_file"
+            return 0
+        fi
+    fi
+    rm -f "$log_file"
+    return 1
+}
+run_pnpm_install_capture() {
+    local log_file="$1"; shift
+    local status=0
+    set +e
+    "$@" 2>&1 | tee "$log_file"
+    status=${PIPESTATUS[0]}
+    set -e
+    return "$status"
+}
+pnpm_install_needs_puppeteer_skip() {
+    local log_file="$1"
+    grep -Eqi 'puppeteer' "$log_file" \
+        && grep -Eqi 'Failed to set up chrome|PUPPETEER_SKIP_DOWNLOAD' "$log_file"
+}
+warn_puppeteer_skip_fallback() {
+    warn "Bundled Chrome download failed — skipped"
+    warn "Thread export / screenshot may be unavailable. To install later: npx puppeteer browsers install chrome"
 }
 build_step() { local label="$1"; shift; info "  Building $label..."
     "$@" || { fail "$label build failed in $PROJECT_DIR"; exit 1; }; ok "$label done"; }
@@ -485,56 +566,66 @@ ENV_KEYS=(); ENV_VALUES=(); ENV_DELETE_KEYS=()
 reset_env_changes() { ENV_KEYS=(); ENV_VALUES=(); ENV_DELETE_KEYS=(); }
 collect_env() { ENV_KEYS+=("$1"); ENV_VALUES+=("$2"); }
 clear_env() { ENV_DELETE_KEYS+=("$1"); }
-set_codex_oauth_mode() {
-    collect_env "CODEX_AUTH_MODE" "oauth"
-    clear_env "OPENAI_API_KEY"; clear_env "OPENAI_BASE_URL"; clear_env "CAT_CODEX_MODEL"
+# #340 P6: Dead .env auth wrappers removed — all auth now uses
+# install-auth-config.mjs client-auth set → accounts.json + credentials.json
+default_runtime_dir() {
+    local parent
+    parent="$(cd "$PROJECT_DIR/.." && pwd)"
+    printf '%s/cat-cafe-runtime\n' "$parent"
 }
-set_codex_api_key_mode() {
-    local key="$1" base_url="$2" model="$3"
-    collect_env "CODEX_AUTH_MODE" "api_key"; collect_env "OPENAI_API_KEY" "$key"
-    [[ -n "$base_url" ]] && collect_env "OPENAI_BASE_URL" "$base_url" || clear_env "OPENAI_BASE_URL"
-    [[ -n "$model" ]] && collect_env "CAT_CODEX_MODEL" "$model" || clear_env "CAT_CODEX_MODEL"
+runtime_worktree_initialized() {
+    local runtime_dir="$1"
+    [[ -d "$runtime_dir" ]] || return 1
+    [[ -e "$runtime_dir/.git" ]] || return 1
+    git -C "$runtime_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+
+    local resolved_runtime resolved_toplevel resolved_project project_toplevel worktree_line resolved_worktree
+    resolved_runtime="$(cd "$runtime_dir" && pwd -P)"
+    resolved_toplevel="$(git -C "$runtime_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$resolved_toplevel" ]] || return 1
+    resolved_toplevel="$(cd "$resolved_toplevel" && pwd -P)"
+    [[ "$resolved_runtime" == "$resolved_toplevel" ]] || return 1
+
+    [[ -d "$PROJECT_DIR" ]] || return 1
+    [[ -e "$PROJECT_DIR/.git" ]] || return 1
+    resolved_project="$(cd "$PROJECT_DIR" && pwd -P)"
+    project_toplevel="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$project_toplevel" ]] || return 1
+    project_toplevel="$(cd "$project_toplevel" && pwd -P)"
+    [[ "$resolved_project" == "$project_toplevel" ]] || return 1
+
+    while IFS= read -r worktree_line; do
+        [[ "$worktree_line" == worktree\ * ]] || continue
+        resolved_worktree="$(cd "${worktree_line#worktree }" 2>/dev/null && pwd -P)" || continue
+        [[ "$resolved_worktree" == "$resolved_runtime" ]] && return 0
+    done < <(git -C "$project_toplevel" worktree list --porcelain 2>/dev/null)
+
+    return 1
 }
-set_gemini_oauth_mode() {
-    clear_env "GEMINI_API_KEY"; clear_env "GEMINI_BASE_URL"; clear_env "CAT_GEMINI_MODEL"
+resolve_installer_auth_config_root() {
+    if [[ -n "${CAT_CAFE_GLOBAL_CONFIG_ROOT:-}" ]]; then
+        printf '%s\n' "$CAT_CAFE_GLOBAL_CONFIG_ROOT"
+        return 0
+    fi
+
+    local runtime_dir="${CAT_CAFE_RUNTIME_DIR:-}"
+    [[ -n "$runtime_dir" ]] || runtime_dir="$(default_runtime_dir)"
+    if runtime_worktree_initialized "$runtime_dir"; then
+        (cd "$runtime_dir" && pwd)
+        return 0
+    fi
+
+    printf '%s\n' "$PROJECT_DIR"
 }
-set_gemini_api_key_mode() {
-    local key="$1" base_url="$2" model="$3"
-    collect_env "GEMINI_API_KEY" "$key"
-    [[ -n "$base_url" ]] && collect_env "GEMINI_BASE_URL" "$base_url" || clear_env "GEMINI_BASE_URL"
-    [[ -n "$model" ]] && collect_env "CAT_GEMINI_MODEL" "$model" || clear_env "CAT_GEMINI_MODEL"
+run_install_auth_config() {
+    local auth_root
+    auth_root="$(resolve_installer_auth_config_root)"
+    CAT_CAFE_GLOBAL_CONFIG_ROOT="$auth_root" node scripts/install-auth-config.mjs "$@"
+    if [[ -z "${CAT_CAFE_GLOBAL_CONFIG_ROOT:-}" && "$auth_root" != "$PROJECT_DIR" ]]; then
+        CAT_CAFE_GLOBAL_CONFIG_ROOT="$PROJECT_DIR" node scripts/install-auth-config.mjs "$@"
+    fi
 }
-write_claude_profile() {
-    local key="$1" base_url="$2" model="$3" pdir=""
-    pdir="$(resolve_provider_profiles_dir)"; mkdir -p "$pdir"
-    node - "$pdir" "$key" "${base_url:-https://api.anthropic.com}" "$model" <<'EONODE'
-const fs = require('fs'), path = require('path');
-const [dir, key, baseUrl, model] = process.argv.slice(2), id = 'installer-managed', now = new Date().toISOString();
-const pf = path.join(dir, 'provider-profiles.json'), sf = path.join(dir, 'provider-profiles.secrets.local.json');
-const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return { version: 1, providers: {} }; } };
-const profiles = read(pf), secrets = read(sf), anth = profiles.providers.anthropic ?? { profiles: [] };
-const keep = (anth.profiles ?? []).filter((p) => p.id !== id);
-keep.push({ id, provider: 'anthropic', name: 'Installer API Key', mode: 'api_key', baseUrl, createdAt: now, updatedAt: now, ...(model ? { modelOverride: model } : {}) });
-profiles.providers.anthropic = { ...anth, activeProfileId: id, profiles: keep };
-secrets.providers.anthropic = { ...(secrets.providers.anthropic ?? {}), [id]: { apiKey: key } };
-fs.writeFileSync(pf, JSON.stringify(profiles)); fs.writeFileSync(sf, JSON.stringify(secrets)); fs.chmodSync(sf, 0o600);
-EONODE
-}
-remove_claude_installer_profile() {
-    local pdir=""
-    pdir="$(resolve_provider_profiles_dir)"; [[ -d "$pdir" ]] || return 0
-    node - "$pdir" <<'EONODE'
-const fs = require('fs'), path = require('path');
-const [dir] = process.argv.slice(2), id = 'installer-managed';
-const pf = path.join(dir, 'provider-profiles.json'), sf = path.join(dir, 'provider-profiles.secrets.local.json');
-const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
-const profiles = read(pf), secrets = read(sf); if (!profiles?.providers?.anthropic) process.exit(0);
-const anth = profiles.providers.anthropic, nextProfiles = (anth.profiles ?? []).filter((p) => p.id !== id);
-profiles.providers.anthropic = { ...anth, profiles: nextProfiles, ...(anth.activeProfileId === id ? { activeProfileId: nextProfiles[0]?.id ?? '' } : {}) };
-if (secrets?.providers?.anthropic?.[id]) delete secrets.providers.anthropic[id];
-fs.writeFileSync(pf, JSON.stringify(profiles)); if (secrets) fs.writeFileSync(sf, JSON.stringify(secrets));
-EONODE
-}
+
 
 PLATFORM="$(uname -s)"
 
@@ -873,7 +964,7 @@ ok "Build complete"
 # Skills: per-skill user-level symlinks (ADR-009)
 SKILLS_SOURCE="$PROJECT_DIR/cat-cafe-skills"
 if [[ -d "$SKILLS_SOURCE" ]]; then
-    for tdir in "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.gemini/skills"; do
+    for tdir in "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.gemini/skills" "$HOME/.kimi/skills"; do
         mkdir -p "$tdir"
         for sd in "$SKILLS_SOURCE"/*/; do
             [[ -d "$sd" ]] || continue; sn=$(basename "$sd"); [[ "$sn" == "refs" ]] && continue; ln -sfn "$sd" "$tdir/$sn"
@@ -905,6 +996,21 @@ install_brew_cask() {
     hash -r 2>/dev/null || true
     command -v "$cmd" &>/dev/null || { fail "$name install failed. Try: brew install --cask $cask"; exit 1; }; ok "$name installed"
 }
+install_kimi_cli() {
+    info "  Installing Kimi CLI..."
+    if command -v uv &>/dev/null; then
+        uv tool install --python 3.13 kimi-cli >/dev/null 2>&1 || uv tool upgrade kimi-cli >/dev/null 2>&1 || true
+    elif command -v pipx &>/dev/null; then
+        pipx install kimi-cli >/dev/null 2>&1 || pipx upgrade kimi-cli >/dev/null 2>&1 || true
+    elif command -v python3 &>/dev/null; then
+        python3 -m pip install --user --upgrade kimi-cli >/dev/null 2>&1 || true
+    else
+        fail "Kimi install failed. Need uv, pipx, or python3 to install kimi-cli"
+        exit 1
+    fi
+    export PATH="$HOME/.local/bin:$PATH"; hash -r 2>/dev/null || true
+    command -v kimi &>/dev/null || { fail "Kimi install failed. Try: uv tool install --python 3.13 kimi-cli"; exit 1; }; ok "Kimi CLI installed"
+}
 install_claude_cli() {
     info "  Installing Claude Code..."
     if [[ "$DISTRO_FAMILY" == "darwin" ]]; then
@@ -929,6 +1035,7 @@ MISSING_AGENTS=()
 command -v claude &>/dev/null && ok "Claude Code already installed" || MISSING_AGENTS+=("claude")
 command -v codex &>/dev/null && ok "Codex CLI already installed"  || MISSING_AGENTS+=("codex")
 command -v gemini &>/dev/null && ok "Gemini CLI already installed" || MISSING_AGENTS+=("gemini")
+command -v kimi &>/dev/null && ok "Kimi CLI already installed"   || MISSING_AGENTS+=("kimi")
 
 if [[ ${#MISSING_AGENTS[@]} -gt 0 ]]; then
     INSTALL_AGENTS=("${MISSING_AGENTS[@]}")  # default: install all missing
@@ -953,6 +1060,7 @@ if [[ ${#MISSING_AGENTS[@]} -gt 0 ]]; then
             claude) install_claude_cli ;;
             codex)  install_codex_cli ;;
             gemini) install_npm_cli "Gemini CLI" "gemini" "@google/gemini-cli" ;;
+            kimi)   install_kimi_cli ;;
         esac
     done
 fi
@@ -961,11 +1069,12 @@ fi
 step "[7/9] Authentication setup / 认证配置..."
 configure_agent_auth() {
     local name="$1" cmd="$2"
+    local allow_skip="${3:-false}"
     command -v "$cmd" &>/dev/null || return 0
 
     # Gemini CLI doesn't support custom API endpoints — always use OAuth
     if [[ "$cmd" == "gemini" ]]; then
-        node scripts/install-auth-config.mjs client-auth set \
+        run_install_auth_config client-auth set \
             --project-dir "$PROJECT_DIR" \
             --client "$cmd" \
             --mode oauth
@@ -974,15 +1083,23 @@ configure_agent_auth() {
     fi
 
     local auth_sel
-    tty_select auth_sel "  $name ($cmd) — auth mode:" \
-        "OAuth / Subscription (recommended / 推荐)" \
+    local -a auth_options=(
+        "OAuth / Subscription (recommended / 推荐)"
         "API Key"
+    )
+    [[ "$allow_skip" == true ]] && auth_options+=("Skip auth setup (default / configure later / 稍后配置)")
+    local skip_index=2
+    local default_auth_sel=0
+    [[ "$allow_skip" == true ]] && default_auth_sel="$skip_index"
+    TTY_SELECT_DEFAULT_INDEX="$default_auth_sel" tty_select auth_sel "  $name ($cmd) — auth mode:" "${auth_options[@]}"
+    if [[ "$allow_skip" == true && "$auth_sel" == "$skip_index" ]]; then
+        warn "$name: auth setup skipped"
+        return 0
+    fi
     if [[ "$auth_sel" != "1" ]]; then
-        # Remove stale installer API Key profile + set OAuth binding
-        node scripts/install-auth-config.mjs client-auth remove \
-            --project-dir "$PROJECT_DIR" \
-            --client "$cmd" 2>/dev/null || true
-        node scripts/install-auth-config.mjs client-auth set \
+        # Do not auto-delete installer API-key profiles here: accounts are global
+        # and we cannot prove other projects are not still bound to installer refs.
+        run_install_auth_config client-auth set \
             --project-dir "$PROJECT_DIR" \
             --client "$cmd" \
             --mode oauth
@@ -997,7 +1114,7 @@ configure_agent_auth() {
     if [[ -n "$key" ]]; then
         # All clients use the same install-auth-config.mjs to create provider profiles
         local install_args=(
-            node scripts/install-auth-config.mjs client-auth set
+            run_install_auth_config client-auth set
             --project-dir "$PROJECT_DIR"
             --client "$cmd"
             --mode api_key
@@ -1008,11 +1125,9 @@ configure_agent_auth() {
         ok "$name: API key profile created in .cat-cafe/"
     else
         # No key provided — set OAuth mode via unified path
-        # Also remove any stale installer API Key profile for this client
-        node scripts/install-auth-config.mjs client-auth remove \
-            --project-dir "$PROJECT_DIR" \
-            --client "$cmd" 2>/dev/null || true
-        node scripts/install-auth-config.mjs client-auth set \
+        # Do not auto-delete installer API-key profiles here: accounts are global
+        # and we cannot prove other projects are not still bound to installer refs.
+        run_install_auth_config client-auth set \
             --project-dir "$PROJECT_DIR" \
             --client "$cmd" \
             --mode oauth
@@ -1023,9 +1138,9 @@ configure_agent_auth() {
 if [[ "$HAS_TTY" == true ]]; then
     info "  Configure each agent / 逐个配置每只猫的认证方式："
     configure_agent_auth "Claude (布偶猫)" "claude"; configure_agent_auth "Codex (缅因猫)" "codex"
-    configure_agent_auth "Gemini (暹罗猫)" "gemini"
+    configure_agent_auth "Gemini (暹罗猫)" "gemini"; configure_agent_auth "Kimi (月之暗面)" "kimi" true
 else
-    info "  Non-interactive — skipping auth. Run each CLI to log in: claude / codex / gemini"
+    info "  Non-interactive — skipping auth. Run each CLI to log in: claude / codex / gemini / kimi"
 fi
 
 # ── [8/9] Generate .env with all collected config ─────────

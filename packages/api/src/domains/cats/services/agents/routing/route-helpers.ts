@@ -16,9 +16,11 @@ import { checkContextBudget, type DegradationResult } from '../../orchestration/
 import { DeliveryCursorStore } from '../../stores/ports/DeliveryCursorStore.js';
 import type { IDraftStore } from '../../stores/ports/DraftStore.js';
 import type { IMessageStore, StoredMessage, StoredToolEvent } from '../../stores/ports/MessageStore.js';
+import type { Thread } from '../../stores/ports/ThreadStore.js';
 import { canViewMessage } from '../../stores/visibility.js';
 import type { AgentMessage, AgentService } from '../../types.js';
 import type { InvocationDeps } from '../invocation/invoke-single-cat.js';
+import { extractRecentArtifacts, mergeLedger, sortAndCapArtifacts } from './artifact-tracking.js';
 import type { CoverageMap } from './context-transport.js';
 import {
   buildCoverageMap,
@@ -30,6 +32,8 @@ import {
   scrubToolPayloads,
   selectAnchors,
 } from './context-transport.js';
+import { extractBatonContext, formatNavigationHeader, summarizeActiveTasks } from './navigation-context.js';
+import { rankArtifactSources } from './source-ranking.js';
 
 /** Minimal broadcast interface — avoids coupling routing layer to SocketManager concrete class */
 export interface RouteBroadcaster {
@@ -52,6 +56,8 @@ export interface RouteStrategyDeps {
   evidenceStore?: import('../../../../memory/interfaces.js').IEvidenceStore;
   /** F150: Tool usage counter (fire-and-forget INCR on tool_use events) */
   toolUsageCounter?: import('../../tool-usage/ToolUsageCounter.js').ToolUsageCounter;
+  /** F148 Phase F: Task store for navigation context (optional, fail-open) */
+  taskStore?: import('../../stores/ports/TaskStore.js').ITaskStore;
 }
 
 /** Mutable context for tracking persistence failures across the generator boundary.
@@ -98,6 +104,14 @@ export interface RouteOptions {
   /** F108: Unique invocation ID for WorklistRegistry isolation in concurrent execution.
    *  When provided, worklist is keyed by this ID instead of threadId. */
   parentInvocationId?: string | undefined;
+  /** Parent invocation controller used to keep A2A worklist slots tied to the same cancel signal. */
+  invocationController?: AbortController | undefined;
+  /** Register an A2A worklist target with the outer invocation tracker before it executes. */
+  trackA2ASlot?: ((threadId: string, catId: CatId, userId: string, controller: AbortController) => void) | undefined;
+  /** Cleanup registered A2A worklist slots if the route exits before every target emits done. */
+  completeA2ASlots?: ((threadId: string, catIds: readonly CatId[], controller: AbortController) => void) | undefined;
+  /** F153 Phase E: Root route span — invocation spans become children of this. */
+  routeSpan?: import('@opentelemetry/api').Span | undefined;
 }
 
 export interface IncrementalContextResult {
@@ -116,7 +130,35 @@ export interface IncrementalContextResult {
   briefingContext?: {
     threadMemorySummary?: string;
     anchorSummaries?: string[];
+    baton?: import('./navigation-context.js').BatonContext;
+    activeTasks?: import('./navigation-context.js').TaskSummary[];
+    recentArtifacts?: import('./artifact-tracking.js').RecentArtifact[];
+    rankedSources?: import('./source-ranking.js').RankedSource[];
   };
+  /** F148 Phase F: Navigation context header (injected on ALL paths — KD-7) */
+  navigationHeader?: string;
+}
+
+/**
+ * Decide whether the routing layer should append the raw current user message
+ * outside the incremental context envelope.
+ *
+ * The normal path is:
+ * - append when the current message is genuinely absent from unseen history
+ * - do NOT append when the message was filtered out for privacy
+ *
+ * Defensive guard:
+ * some smart-window / metadata paths can still surface the current message ID
+ * inside `contextText` even when `includesCurrentUserMessage` is false.
+ * In that case, appending the raw message would duplicate it in the same prompt.
+ */
+export function shouldAppendExplicitCurrentMessage(
+  inc: Pick<IncrementalContextResult, 'contextText' | 'includesCurrentUserMessage' | 'currentMessageFilteredOut'>,
+  currentUserMessageId: string | undefined,
+): boolean {
+  if (inc.includesCurrentUserMessage || inc.currentMessageFilteredOut) return false;
+  if (currentUserMessageId && inc.contextText.includes(currentUserMessageId)) return false;
+  return true;
 }
 
 /**
@@ -139,6 +181,43 @@ export function getService(services: Record<string, AgentService>, catId: CatId)
   const service = services[catId];
   if (!service) throw new Error(`Unknown cat ID: ${catId as string}`);
   return service;
+}
+
+export function getThreadBootcampMemberCount(thread: Thread | null | undefined): number | undefined {
+  if (!thread?.bootcampState) return undefined;
+  const members = new Set<string>(thread.participants);
+  if (thread.bootcampState.leadCat) {
+    members.add(thread.bootcampState.leadCat);
+  }
+  return members.size;
+}
+
+export function shouldHandleCompletedGuide(
+  guideCompletionOwner: string | undefined,
+  targetCatIds: ReadonlySet<string>,
+  fallbackCatId: string | undefined,
+  catId: string,
+): boolean {
+  if (!guideCompletionOwner) return true;
+  if (guideCompletionOwner === catId) return true;
+  if (!targetCatIds.has(guideCompletionOwner)) return fallbackCatId === catId;
+  return false;
+}
+
+export function shouldHandleOfferedGuide(
+  guideOfferOwner: string | undefined,
+  targetCatIds: ReadonlySet<string>,
+  fallbackCatId: string | undefined,
+  catId: string,
+  hasUserSelection: boolean,
+  allowOwnerMissingFallback = false,
+): boolean {
+  if (!guideOfferOwner) return true;
+  if (guideOfferOwner === catId) return true;
+  if ((hasUserSelection || allowOwnerMissingFallback) && !targetCatIds.has(guideOfferOwner)) {
+    return fallbackCatId === catId;
+  }
+  return false;
 }
 
 export function detectContextDegradation(
@@ -228,6 +307,188 @@ export function isUserFacingSystemInfoContent(content: string): boolean {
   }
 }
 
+function isInternalToolRecipientName(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    (value.startsWith('functions.') || value.startsWith('mcp__') || value.startsWith('multi_tool_use.'))
+  );
+}
+
+function looksLikeLeakedToolCallPayload(candidate: string): boolean {
+  const trimmed = candidate.trim();
+  if (!trimmed.startsWith('{')) return false;
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      tool_uses?: Array<{ recipient_name?: unknown }>;
+      recipient_name?: unknown;
+    };
+    if (Array.isArray(parsed.tool_uses)) {
+      return parsed.tool_uses.some((item) => isInternalToolRecipientName(item?.recipient_name));
+    }
+    return isInternalToolRecipientName(parsed.recipient_name);
+  } catch {
+    return false;
+  }
+}
+
+const LEAKED_TOOL_CALL_SIGNATURES = [
+  '{"tool_uses":[{"recipient_name":"functions.',
+  '{"tool_uses":[{"recipient_name":"mcp__',
+  '{"tool_uses":[{"recipient_name":"multi_tool_use.',
+  '{"recipient_name":"functions.',
+  '{"recipient_name":"mcp__',
+  '{"recipient_name":"multi_tool_use.',
+];
+
+const INTENTIONAL_JSON_EXAMPLE_LINE_RE =
+  /^(?:(?:(?:文档|JSON)\s*)?示例|for\s+example|example|json\s+example|例如|比如)\s*(?:[:：]\s*)?$/i;
+
+function looksLikePotentialLeakedToolCallPayloadPrefix(candidate: string): boolean {
+  const trimmed = candidate.trim();
+  if (!trimmed.startsWith('{')) return false;
+
+  const compact = trimmed.replace(/\s+/g, '');
+  return LEAKED_TOOL_CALL_SIGNATURES.some(
+    (signature) => signature.startsWith(compact) || compact.startsWith(signature),
+  );
+}
+
+function findLineStartPayloadIndex(
+  content: string,
+  predicate: (candidate: string) => boolean,
+): { index: number; candidate: string } | null {
+  const lines = content.split('\n');
+  let offset = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith('{')) {
+      offset += line.length + 1;
+      continue;
+    }
+
+    const leadingWhitespace = line.length - trimmed.length;
+    const candidate = lines.slice(i).join('\n');
+    if (predicate(candidate)) {
+      return { index: offset + leadingWhitespace, candidate };
+    }
+    offset += line.length + 1;
+  }
+
+  return null;
+}
+
+function isIntentionalJsonExamplePrefix(prefix: string): boolean {
+  const trimmed = prefix.trimEnd();
+  if (!trimmed) return false;
+
+  const lines = trimmed.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = (lines[i] ?? '').trim();
+    if (!line) continue;
+    if (/^```(?:json)?$/i.test(line)) return true;
+    return INTENTIONAL_JSON_EXAMPLE_LINE_RE.test(line);
+  }
+
+  return false;
+}
+
+export function stripLeakedToolCallPayload(content: string): string {
+  if (!content) return content;
+
+  const match = findLineStartPayloadIndex(content, looksLikeLeakedToolCallPayload);
+  if (match) {
+    const prefix = content.slice(0, match.index);
+    if (isIntentionalJsonExamplePrefix(prefix)) {
+      return content;
+    }
+    return prefix.replace(/\s+$/, '');
+  }
+
+  return content;
+}
+
+export interface RoutedMessageTransform {
+  transform(msg: AgentMessage): AgentMessage[];
+}
+
+export interface LeakedToolCallStreamStripper {
+  push(content: string): string;
+  flush(): string;
+}
+
+export function createLeakedToolCallStreamStripper(): LeakedToolCallStreamStripper {
+  let pending = '';
+  let pendingEmittedLength = 0;
+
+  return {
+    push(content: string): string {
+      if (!content) return content;
+
+      const combined = pending + content;
+      const alreadyEmittedLength = pendingEmittedLength;
+      pending = '';
+      pendingEmittedLength = 0;
+
+      const stripped = stripLeakedToolCallPayload(combined);
+      if (stripped !== combined) {
+        return stripped.slice(alreadyEmittedLength);
+      }
+
+      const match = findLineStartPayloadIndex(combined, looksLikePotentialLeakedToolCallPayloadPrefix);
+      if (!match) {
+        return combined.slice(alreadyEmittedLength);
+      }
+
+      const emittedPrefix = combined.slice(0, match.index).replace(/\s+$/, '');
+      pending = combined;
+      pendingEmittedLength = emittedPrefix.length;
+      return emittedPrefix.slice(alreadyEmittedLength);
+    },
+    flush(): string {
+      if (!pending) return '';
+
+      const remaining = pending;
+      const alreadyEmittedLength = pendingEmittedLength;
+      pending = '';
+      pendingEmittedLength = 0;
+      return stripLeakedToolCallPayload(remaining).slice(alreadyEmittedLength);
+    },
+  };
+}
+
+export function createRoutingMessageTransform(explicitCatId?: CatId): RoutedMessageTransform {
+  const leakedPayloadStripper = createLeakedToolCallStreamStripper();
+
+  return {
+    transform(msg: AgentMessage): AgentMessage[] {
+      if (msg.type === 'text') {
+        const content = msg.content ? leakedPayloadStripper.push(msg.content) : msg.content;
+        return content ? [{ ...msg, content }] : [];
+      }
+
+      if (msg.type === 'done') {
+        const transformed: AgentMessage[] = [];
+        const flushedText = leakedPayloadStripper.flush();
+        if (flushedText) {
+          transformed.push({
+            type: 'text',
+            catId: msg.catId ?? explicitCatId,
+            content: flushedText,
+            timestamp: msg.timestamp,
+          });
+        }
+        transformed.push(msg);
+        return transformed;
+      }
+
+      return [msg];
+    },
+  };
+}
+
 export function sanitizeInjectedContent(content: string): string {
   const lines = content.split('\n');
   const kept: string[] = [];
@@ -257,7 +518,7 @@ export function sanitizeInjectedContent(content: string): string {
     kept.push(line);
   }
 
-  return kept.join('\n').trim();
+  return stripLeakedToolCallPayload(kept.join('\n')).trim();
 }
 
 /**
@@ -317,6 +578,9 @@ export interface IncrementalContextOptions {
    * so the assembled context + system parts never exceed the model's input limit.
    */
   effectiveMaxContextTokens?: number;
+  recentFilesTouched?: Array<{ path: string; ops: string[] }>;
+  canonicalFeatureId?: string;
+  threadTitle?: string;
 }
 
 export async function assembleIncrementalContext(
@@ -363,6 +627,73 @@ export async function assembleIncrementalContext(
       unseen.some((m) => m.id === currentUserMessageId),
   );
 
+  // F148 Phase F (KD-7): Navigation context — injected on ALL paths (cold + warm)
+  // P1 fix: extract baton from unseen (pre-stream-filter) so cat→cat @ mentions via stream are visible
+  const batonCandidates = unseen.filter(
+    (m) => (m.userId !== 'system' || m.catId !== null) && m.origin !== 'briefing' && canViewMessage(m, viewer),
+  );
+  const baton = extractBatonContext(batonCandidates, catId);
+  let activeTasks: import('./navigation-context.js').TaskSummary[] = [];
+  let allThreadTasks: import('./artifact-tracking.js').ArtifactExtractionInput['prTasks'] = [];
+  if (deps.taskStore) {
+    try {
+      const tasks = await Promise.resolve(deps.taskStore.listByThread(threadId));
+      activeTasks = summarizeActiveTasks(tasks);
+      allThreadTasks = tasks;
+    } catch {
+      // fail-open: tasks stay empty
+    }
+  }
+
+  const recentArtifacts = extractRecentArtifacts({
+    filesTouched: options?.recentFilesTouched ?? [],
+    prTasks: allThreadTasks,
+    catId,
+  });
+
+  // G1→G2 bridge: read stored ledger from threadMemory to merge with current-invocation artifacts
+  let storedLedgerArtifacts: import('./artifact-tracking.js').RecentArtifact[] = [];
+  const threadStore = deps.invocationDeps.threadStore;
+  if (threadStore) {
+    try {
+      const mem = await Promise.resolve(threadStore.getThreadMemory(threadId));
+      if (mem && Array.isArray(mem.recentArtifacts) && mem.recentArtifacts.length > 0) {
+        storedLedgerArtifacts = mem.recentArtifacts as import('./artifact-tracking.js').RecentArtifact[];
+      }
+    } catch {
+      // fail-open: ranking degrades to current-invocation only
+    }
+  }
+  const mergedLedger = mergeLedger(storedLedgerArtifacts, recentArtifacts);
+
+  const rankedSources = rankArtifactSources(
+    mergedLedger,
+    allThreadTasks.map((t) => ({ kind: t.kind, subjectKey: t.subjectKey ?? null, title: t.title, status: t.status })),
+    { canonicalFeatureId: options?.canonicalFeatureId, threadTitle: options?.threadTitle },
+  );
+  const topSource = rankedSources[0] ?? null;
+  const bestNextSource = topSource ? `先看 ${topSource.label}: ${topSource.ref}` : undefined;
+  const navigationHeader = formatNavigationHeader({
+    baton,
+    tasks: activeTasks,
+    artifacts: recentArtifacts,
+    truthSource: topSource ? { label: topSource.label, ref: topSource.ref, provenance: topSource.provenance } : null,
+    bestNextSource,
+  });
+
+  log.info({
+    f148: 'navigation-header',
+    threadId,
+    catId,
+    hasBaton: baton !== null,
+    batonFrom: baton?.fromSpeakerDisplay ?? null,
+    taskCount: activeTasks.length,
+    artifactCount: recentArtifacts.length,
+    headerLength: navigationHeader.length,
+    unseenCount: unseen.length,
+    batonCandidateCount: batonCandidates.length,
+  });
+
   // F148: Smart window — cold mention detection
   // P1-review: short-circuit on count first — avoid O(n) tokenize when count already triggers
   const hcConfig = DEFAULT_HIERARCHICAL_CONTEXT;
@@ -395,6 +726,12 @@ export async function assembleIncrementalContext(
       hcConfig,
       cursor,
       options,
+      navigationHeader,
+      baton,
+      activeTasks,
+      recentArtifacts,
+      rankedSources,
+      storedLedgerArtifacts,
     );
   }
 
@@ -411,8 +748,14 @@ export async function assembleIncrementalContext(
 
   if (capped.length === 0) {
     return cursor
-      ? { contextText: '', boundaryId: cursor, includesCurrentUserMessage, currentMessageFilteredOut }
-      : { contextText: '', includesCurrentUserMessage, currentMessageFilteredOut };
+      ? {
+          contextText: navigationHeader,
+          boundaryId: cursor,
+          includesCurrentUserMessage,
+          currentMessageFilteredOut,
+          navigationHeader,
+        }
+      : { contextText: navigationHeader, includesCurrentUserMessage, currentMessageFilteredOut, navigationHeader };
   }
 
   const truncateLimit = budget.maxContentLengthPerMsg;
@@ -436,11 +779,12 @@ export async function assembleIncrementalContext(
     const zeroBudgetDegradation = `⚠️ 增量上下文预算耗尽: 系统提示已占满 prompt 预算，${capped.length} 条未读消息全部丢弃`;
     const zeroBoundaryId = capped[capped.length - 1]?.id;
     return {
-      contextText: '',
+      contextText: navigationHeader,
       boundaryId: zeroBoundaryId,
       includesCurrentUserMessage: false,
       currentMessageFilteredOut,
       degradation: zeroBudgetDegradation,
+      navigationHeader,
     };
   }
 
@@ -476,8 +820,19 @@ export async function assembleIncrementalContext(
 
   if (finalCapped.length === 0) {
     return cursor
-      ? { contextText: '', boundaryId: cursor, includesCurrentUserMessage: false, currentMessageFilteredOut }
-      : { contextText: '', includesCurrentUserMessage: false, currentMessageFilteredOut };
+      ? {
+          contextText: navigationHeader,
+          boundaryId: cursor,
+          includesCurrentUserMessage: false,
+          currentMessageFilteredOut,
+          navigationHeader,
+        }
+      : {
+          contextText: navigationHeader,
+          includesCurrentUserMessage: false,
+          currentMessageFilteredOut,
+          navigationHeader,
+        };
   }
 
   let degradation: string | undefined;
@@ -491,11 +846,12 @@ export async function assembleIncrementalContext(
 
   const boundaryId = finalCapped[finalCapped.length - 1]?.id;
   return {
-    contextText: `[对话历史增量 - 未发送过 ${finalCapped.length} 条]\n${finalLines.join('\n')}\n[/对话历史]`,
+    contextText: `${navigationHeader}\n[对话历史增量 - 未发送过 ${finalCapped.length} 条]\n${finalLines.join('\n')}\n[/对话历史]`,
     boundaryId,
     includesCurrentUserMessage: finalIncludesCurrentUserMessage,
     currentMessageFilteredOut,
     degradation,
+    navigationHeader,
   };
 }
 
@@ -513,6 +869,12 @@ async function assembleSmartWindowContext(
   hcConfig: import('../../../../../config/hierarchical-context-config.js').HierarchicalContextConfig,
   _cursor: string | undefined,
   options: IncrementalContextOptions | undefined,
+  navigationHeader: string,
+  baton: import('./navigation-context.js').BatonContext | null,
+  activeTasks: import('./navigation-context.js').TaskSummary[],
+  recentArtifacts: import('./artifact-tracking.js').RecentArtifact[],
+  rankedSources: import('./source-ranking.js').RankedSource[],
+  preReadStoredArtifacts: import('./artifact-tracking.js').RecentArtifact[],
 ): Promise<IncrementalContextResult> {
   const budget = getCatContextBudget(catId as string);
   const truncateLimit = budget.maxContentLengthPerMsg;
@@ -575,6 +937,7 @@ async function assembleSmartWindowContext(
 
   // 3.7 Phase D: Fetch thread memory (fail-open)
   let threadMemorySummary = '';
+  const storedFileArtifacts = preReadStoredArtifacts;
   let threadMemoryMeta: {
     available: boolean;
     sessionsIncorporated: number;
@@ -604,6 +967,7 @@ async function assembleSmartWindowContext(
           summary = summary.slice(0, lo) + '…';
         }
         threadMemorySummary = summary;
+        // storedFileArtifacts already pre-read via preReadStoredArtifacts (G1→G2 bridge)
         threadMemoryMeta = {
           available: true,
           sessionsIncorporated: mem.sessionsIncorporated,
@@ -773,7 +1137,7 @@ async function assembleSmartWindowContext(
 
   const contextText =
     sections.length > 0
-      ? `[对话历史增量 - 智能窗口: ${omitted.length} 条已摘要, ${finalBurstMsgs.length} 条详细]\n${sections.join('\n')}\n[/对话历史]`
+      ? `${navigationHeader}\n[对话历史增量 - 智能窗口: ${omitted.length} 条已摘要, ${finalBurstMsgs.length} 条详细]\n${sections.join('\n')}\n[/对话历史]`
       : '';
 
   // Final hard cap: envelope overhead may push total over budget
@@ -797,6 +1161,14 @@ async function assembleSmartWindowContext(
     briefingContext: {
       ...(threadMemorySummary ? { threadMemorySummary } : {}),
       ...(finalAnchorLines.length > 0 ? { anchorSummaries: finalAnchorLines } : {}),
+      ...(baton ? { baton } : {}),
+      ...(activeTasks.length > 0 ? { activeTasks } : {}),
+      ...(() => {
+        const merged = mergeLedger(storedFileArtifacts, recentArtifacts);
+        return merged.length > 0 ? { recentArtifacts: merged } : {};
+      })(),
+      ...(rankedSources.length > 0 ? { rankedSources } : {}),
     },
+    navigationHeader,
   };
 }

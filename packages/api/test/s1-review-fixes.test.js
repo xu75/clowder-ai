@@ -7,6 +7,7 @@
  * P2:   multipart 路径需要提取 idempotencyKey
  */
 
+import './helpers/setup-cat-registry.js';
 import assert from 'node:assert/strict';
 import { describe, mock, test } from 'node:test';
 
@@ -55,7 +56,7 @@ describe('P1-2: resolveTargetsAndIntent persist writes participants', () => {
     let counter = 0;
     return {
       create: () => ({ invocationId: `inv-${++counter}`, callbackToken: `tok-${counter}` }),
-      verify: () => null,
+      verify: async () => ({ ok: false, reason: 'unknown_invocation' }),
     };
   }
 

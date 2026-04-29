@@ -15,6 +15,22 @@
 
 ## Quick Start
 
+### Choose an Installation Path
+
+For most non-developer users, start with the desktop installer when a release asset is available:
+
+| Platform | Recommended path | Notes |
+|----------|------------------|-------|
+| Windows | Download the `.exe` installer from [Releases](https://github.com/zts212653/clowder-ai/releases) | Bundles the runtime, portable Node.js, Redis, desktop shortcut, and first-run config generation |
+| macOS | Download the `.dmg` from [Releases](https://github.com/zts212653/clowder-ai/releases) | Drag to Applications; if the unsigned app is blocked, right-click → **Open** |
+| Linux | Source setup or `bash scripts/install.sh` | Desktop AppImage is not available yet |
+
+After launching the desktop app, go to **Hub → System Settings → Account Configuration** to connect provider API keys and CLI accounts. The installer prepares the local runtime; it does not complete your third-party provider login for you.
+
+Use the source setup below if you want to develop Clowder, run from a specific branch, or no desktop installer is available for your platform.
+
+### Source Setup
+
 ```bash
 # 1. Clone
 git clone https://github.com/zts212653/clowder-ai.git
@@ -34,6 +50,8 @@ pnpm start
 # If this fails with "target path exists", use:
 #   pnpm start:direct
 ```
+
+To enable local semantic rerank for the memory system, set `EMBED_MODE=on` (or `shadow`) in `.env`. `pnpm start` / `pnpm start:direct` will auto-launch the platform launcher (`scripts/embed-server.sh` on Unix, `scripts/embed-server.ps1` on Windows). Apple Silicon uses MLX by default; other platforms fall back to `sentence-transformers`.
 
 `pnpm start` uses the **runtime worktree** architecture: it creates an isolated `../cat-cafe-runtime` worktree (on first run), syncs it to `origin/main`, builds, starts Redis, and launches Frontend (port 3003) + API (port 3004). This keeps your development checkout clean.
 
@@ -214,11 +232,15 @@ There are two types of accounts:
 2. Choose a provider or add a custom one
 3. For built-in providers: select OAuth/subscription mode (no key needed if CLI is authenticated)
 4. For API key providers: enter your API key and (optionally) a custom base URL
-5. Click **Test** to verify connectivity
+5. Click **Save**
 
 **Adding Chinese / third-party providers (Kimi, GLM, MiniMax, Qwen, OpenRouter):**
 
-These providers are configured as API key accounts with a custom base URL. For detailed setup instructions (base URLs, model names, protocol selection, common pitfalls), see the **[Third-Party AI Provider Guide](docs/guides/provider-configuration.md)**.
+These providers are configured as API key accounts with a custom base URL. In the **Account Configuration** UI, add a new account, choose the provider, enter your API key, and set the base URL to the provider's OpenAI-compatible endpoint. Select the appropriate protocol and click **Save**.
+
+**Example — Alibaba Bailian (Qwen):**
+
+![Provider account configuration for Bailian](docs/setup/setup-provider-bailian.png)
 
 > **Legacy `.env` fallback:** The system still reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GOOGLE_API_KEY` from `.env` as a fallback, but this path is deprecated. Use the UI for all new setups.
 
@@ -230,9 +252,36 @@ To add team members (cats) that use specific providers:
 2. Each member can be bound to a provider account from your Account Configuration
 3. Built-in providers support OAuth; third-party providers use API key accounts
 
+![Member bound to Bailian provider](docs/setup/setup-member-binding.png)
+
 ## Optional Features
 
 Clowder works out of the box with model access and Redis (or `--memory` mode). Everything below is opt-in.
+
+### Design Tooling (Pencil MCP)
+
+For design tasks, UI iteration, screenshots, and design-to-code workflows, install [Pencil](https://marketplace.visualstudio.com/items?itemName=highagency.pencildev) in your editor (VS Code, Cursor, or Antigravity).
+
+Without Pencil: Clowder still runs, coding tasks still work, design tasks degrade to plain text guidance.
+
+**Auto-configuration:** The capability orchestrator automatically detects your Pencil installation by scanning (in order):
+
+1. `PENCIL_MCP_BIN` environment variable (explicit path — highest priority)
+2. `~/.antigravity/extensions/highagency.pencildev-*/`
+3. `~/.vscode/extensions/highagency.pencildev-*/`
+4. `~/.cursor/extensions/highagency.pencildev-*/`
+5. `~/.vscode-insiders/extensions/highagency.pencildev-*/`
+
+The newest version across all editors is selected. When two editors have the same version, Antigravity is preferred.
+
+**Environment variable overrides:**
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `PENCIL_MCP_BIN` | Force a specific Pencil binary path | `/path/to/mcp-server-darwin-arm64` |
+| `PENCIL_MCP_APP` | Force which editor to connect to | `vscode`, `antigravity`, `cursor`, `vscode-insiders` |
+
+**Diagnostics:** `pnpm mcp:doctor` shows MCP readiness (ready / missing / unresolved).
 
 ### Voice Input / Output
 
@@ -539,11 +588,16 @@ NEXT_PUBLIC_LLM_POSTPROCESS_URL=http://your-llm-host:9878
 
 The API automatically accepts requests from:
 - `localhost` / `127.0.0.1` (any port)
-- RFC 1918 private networks (`10.x.x.x`, `172.16-31.x.x`, `192.168.x.x`)
-- Tailscale IPs (`100.x.x.x`)
 - The `FRONTEND_URL` you set
 
-No additional CORS configuration is needed for most LAN / VPN setups.
+If you open Cat Cafe directly from a LAN / Tailscale IP (for example `http://192.168.x.x:3003` or `http://100.x.x.x:3003`), also set:
+
+```bash
+API_SERVER_HOST=0.0.0.0
+CORS_ALLOW_PRIVATE_NETWORK=true
+```
+
+This opt-in trusts browsers from RFC 1918 private networks (`10.x.x.x`, `172.16-31.x.x`, `192.168.x.x`) and Tailscale IPs (`100.x.x.x`). If you use a reverse proxy or a fixed `FRONTEND_URL`, you usually do not need the extra flag.
 
 ## Troubleshooting
 
@@ -566,4 +620,3 @@ No additional CORS configuration is needed for most LAN / VPN setups.
 - For local dev, `NEXT_PUBLIC_API_URL=http://localhost:3004` should be in `.env`
 - Behind a reverse proxy, the frontend auto-detects the API at the same origin — make sure Nginx proxies `/api/` and `/socket.io/` to port 3004
 - API must be running before frontend loads
-

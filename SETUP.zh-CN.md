@@ -15,6 +15,22 @@
 
 ## 快速开始
 
+### 先选安装路径
+
+对大多数非开发者用户，如果 Releases 里已经有桌面安装包，优先走安装包：
+
+| 平台 | 推荐路径 | 说明 |
+|------|----------|------|
+| Windows | 从 [Releases](https://github.com/zts212653/clowder-ai/releases) 下载 `.exe` 安装包 | 自带运行时、便携 Node.js、Redis、桌面快捷方式和首次启动配置生成 |
+| macOS | 从 [Releases](https://github.com/zts212653/clowder-ai/releases) 下载 `.dmg` | 拖到 Applications；如果未签名应用被拦截，右键 → **打开** |
+| Linux | 源码安装或 `bash scripts/install.sh` | 暂时没有桌面 AppImage |
+
+启动桌面应用后，进入 **Hub → 系统配置 → 账号配置**，连接 provider API key 和 CLI 账号。安装包负责准备本地运行时，但不会替你完成第三方 provider 登录。
+
+如果你要开发 Clowder、运行指定分支，或者你的平台暂时没有桌面安装包，再走下面的源码安装。
+
+### 源码安装
+
 ```bash
 # 1. 克隆
 git clone https://github.com/zts212653/clowder-ai.git
@@ -34,6 +50,8 @@ pnpm start
 # 如果报 "target path exists" 错误，改用：
 #   pnpm start:direct
 ```
+
+如果要给记忆系统开启本地语义 rerank，把 `.env` 里的 `EMBED_MODE` 改成 `on`（或 `shadow`）。开启后，`pnpm start` / `pnpm start:direct` 会自动拉起对应平台的 launcher（Unix 用 `scripts/embed-server.sh`，Windows 用 `scripts/embed-server.ps1`）。Apple Silicon 默认走 MLX，其它平台回落到 `sentence-transformers`。
 
 `pnpm start` 使用**运行时 worktree** 架构：首次运行时自动创建隔离的 `../cat-cafe-runtime` worktree，同步到 `origin/main`，构建，启动 Redis，然后启动前端（端口 3003）+ API（端口 3004）。这样你的开发目录保持干净。
 
@@ -214,11 +232,15 @@ NEXT_PUBLIC_API_URL=http://localhost:3004
 2. 选择一个 provider 或添加自定义 provider
 3. 内置 provider：选择 OAuth/订阅模式（CLI 已认证则无需 key）
 4. API key provider：输入 API key，可选填自定义 base URL
-5. 点击 **测试** 验证连通性
+5. 点击 **保存**
 
 **添加国产 / 第三方 provider（Kimi、GLM、MiniMax、Qwen、OpenRouter）：**
 
-这些 provider 以 API key 账号形式配置，需要填写自定义 base URL。详细配置说明（base URL、模型名、协议选择、常见坑）请参阅 **[第三方 AI Provider 配置指南](docs/guides/provider-configuration.md)**。
+这些 provider 以 API key 账号形式配置，需要填写自定义 base URL。在**账号配置** UI 中添加新账号，选择 provider，输入 API key，填入该 provider 的 OpenAI 兼容端点 URL，选择对应协议，点击**保存**。
+
+**示例 — 阿里百炼（Qwen）：**
+
+![百炼 Provider 账号配置](docs/setup/setup-provider-bailian.png)
 
 > **兼容模式：** 系统仍会从 `.env` 读取 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`GOOGLE_API_KEY` 作为兜底，但这条路径已不推荐。新安装请统一用 UI 配置。
 
@@ -230,9 +252,36 @@ NEXT_PUBLIC_API_URL=http://localhost:3004
 2. 每个成员可以绑定账号配置中的一个 provider 账号
 3. 内置 provider 支持 OAuth；第三方 provider 使用 API key 账号
 
+![成员绑定百炼 Provider](docs/setup/setup-member-binding.png)
+
 ## 可选功能
 
 只要有模型访问 + Redis（或 `--memory` 模式），Clowder 就能开箱即用。以下功能全是可选的。
+
+### 设计工具（Pencil MCP）
+
+设计任务、UI 迭代、截图、设计转代码等工作流需要在编辑器（VS Code、Cursor 或 Antigravity）中安装 [Pencil](https://marketplace.visualstudio.com/items?itemName=highagency.pencildev)。
+
+不装 Pencil：Clowder 照常运行，编码任务不受影响，设计任务退化为纯文本指导。
+
+**自动配置：** 能力编排器会自动检测你的 Pencil 安装，按以下顺序扫描：
+
+1. `PENCIL_MCP_BIN` 环境变量（显式路径 — 最高优先级）
+2. `~/.antigravity/extensions/highagency.pencildev-*/`
+3. `~/.vscode/extensions/highagency.pencildev-*/`
+4. `~/.cursor/extensions/highagency.pencildev-*/`
+5. `~/.vscode-insiders/extensions/highagency.pencildev-*/`
+
+自动选择所有编辑器中最新的版本。当两个编辑器安装了相同版本时，优先选择 Antigravity。
+
+**环境变量覆盖：**
+
+| 变量 | 用途 | 示例 |
+|------|------|------|
+| `PENCIL_MCP_BIN` | 强制指定 Pencil 二进制路径 | `/path/to/mcp-server-darwin-arm64` |
+| `PENCIL_MCP_APP` | 强制连接到指定编辑器 | `vscode`、`antigravity`、`cursor`、`vscode-insiders` |
+
+**诊断：** `pnpm mcp:doctor` 显示 MCP 就绪状态（ready / missing / unresolved）。
 
 ### 语音输入 / 输出
 
@@ -539,11 +588,16 @@ NEXT_PUBLIC_LLM_POSTPROCESS_URL=http://your-llm-host:9878
 
 API 自动接受以下来源的请求：
 - `localhost` / `127.0.0.1`（任意端口）
-- RFC 1918 内网地址（`10.x.x.x`、`172.16-31.x.x`、`192.168.x.x`）
-- Tailscale IP（`100.x.x.x`）
 - 你设置的 `FRONTEND_URL`
 
-大多数局域网 / VPN 场景不需要额外的 CORS 配置。
+如果你是直接通过局域网 / Tailscale IP 打开 Cat Cafe（例如 `http://192.168.x.x:3003` 或 `http://100.x.x.x:3003`），还需要在 `.env` 里加上：
+
+```bash
+API_SERVER_HOST=0.0.0.0
+CORS_ALLOW_PRIVATE_NETWORK=true
+```
+
+这个显式开关会信任 RFC 1918 内网地址（`10.x.x.x`、`172.16-31.x.x`、`192.168.x.x`）和 Tailscale IP（`100.x.x.x`）上的浏览器。如果你走反向代理或固定 `FRONTEND_URL`，通常不需要额外打开这个选项。
 
 ## 常见问题
 

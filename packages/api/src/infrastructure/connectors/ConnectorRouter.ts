@@ -9,7 +9,8 @@
  *   4. Broadcast to WebSocket
  *   5. Trigger cat invocation
  *
- * Follows ReviewRouter pattern but for chat platform messages.
+ * Routes inbound chat platform messages (analogous to legacy review-routing pattern,
+ * but for chat connectors instead of GitHub review email).
  *
  * F088 Multi-Platform Chat Gateway
  */
@@ -111,7 +112,7 @@ export interface ConnectorRouterOptions {
       contentBlocks?: readonly MessageContent[],
       policy?: unknown,
       sender?: { id: string; name?: string },
-    ): 'dispatched' | 'enqueued' | 'merged' | 'full';
+    ): 'dispatched' | 'enqueued' | 'full';
   };
   readonly socketManager?:
     | {
@@ -200,6 +201,14 @@ export class ConnectorRouter {
       return { kind: 'skipped', reason: 'duplicate' };
     }
 
+    // F157: Fire-and-forget emoji reaction as instant ack (< 500ms)
+    const ackAdapter = this.opts.adapters?.get(connectorId);
+    if (ackAdapter?.addReaction && externalMessageId) {
+      ackAdapter.addReaction(externalMessageId, 'HEART').catch((err) => {
+        log.warn({ err, connectorId, externalMessageId }, '[ConnectorRouter] addReaction failed (non-fatal)');
+      });
+    }
+
     const trimmedText = text.trim();
 
     // 1a. F134 Phase D: Group whitelist check
@@ -268,7 +277,11 @@ export class ConnectorRouter {
           }
         }
         // ISSUE-8 (8A): Store command exchange in Hub thread, not conversation thread
-        const chatLabel = chatType === 'group' ? `飞书群聊 · ${chatName || externalChatId.slice(-8)}` : undefined;
+        const cmdDef = getConnectorDefinition(connectorId);
+        const chatLabel =
+          chatType === 'group'
+            ? `${cmdDef?.displayName ?? connectorId}群聊 · ${chatName || externalChatId.slice(-8)}`
+            : undefined;
         const hubThreadId = await this.resolveHubThread(connectorId, externalChatId, chatLabel);
         const stored = await this.storeCommandExchange(connectorId, hubThreadId, text, cmdResult.response);
         log.info(
@@ -329,6 +342,55 @@ export class ConnectorRouter {
           return { kind: 'routed', threadId: fwdThreadId, messageId: fwdStored.id };
         }
 
+        // F154: /ask one-shot routing — forward to current thread with explicit targetCatId.
+        // Unlike /thread, this stays in the same binding's thread (KD-4: normal routing pipeline).
+        if (cmdResult.forwardContent && cmdResult.targetCatId && !cmdResult.newActiveThreadId) {
+          const askBinding = await bindingStore.getByExternal(connectorId, externalChatId);
+          const askThreadId = askBinding?.threadId;
+          if (askThreadId) {
+            const askText = cmdResult.forwardContent;
+            const def2 = getConnectorDefinition(connectorId);
+            const askSource: ConnectorSource = {
+              connector: connectorId,
+              label: def2?.displayName ?? connectorId,
+              icon: def2?.icon ?? 'message',
+              ...(sender ? { sender } : {}),
+            };
+            const askCatId = cmdResult.targetCatId as CatId;
+            const askTimestamp = Date.now();
+            const askStored = await messageStore.append({
+              threadId: askThreadId,
+              userId: this.opts.defaultUserId,
+              catId: null,
+              content: askText,
+              source: askSource,
+              mentions: [askCatId],
+              timestamp: askTimestamp,
+            });
+            emitConnectorMessage(socketManager, askThreadId, {
+              id: askStored.id,
+              content: askText,
+              source: askSource,
+              timestamp: askTimestamp,
+            });
+            const triggerOutcome = invokeTrigger.trigger(
+              askThreadId,
+              askCatId,
+              this.opts.defaultUserId,
+              askText,
+              askStored.id,
+            );
+            log.info(
+              { connectorId, threadId: askThreadId, catId: askCatId, triggerOutcome },
+              '[ConnectorRouter] /ask message forwarded to current thread',
+            );
+            if (triggerOutcome === 'full' && adapter?.onDeliveryBatchDone) {
+              await adapter.onDeliveryBatchDone(externalChatId, true);
+            }
+            return { kind: 'routed', threadId: askThreadId, messageId: askStored.id };
+          }
+        }
+
         // F151: Close the A2A task after command response (non-forward path).
         // Placed after /thread check so forwarded invocations can still
         // deliver through the open task.
@@ -356,10 +418,9 @@ export class ConnectorRouter {
     let binding = await bindingStore.getByExternal(connectorId, externalChatId);
     if (!binding) {
       const def = getConnectorDefinition(connectorId);
+      const platformLabel = def?.displayName ?? connectorId;
       const title =
-        chatType === 'group'
-          ? `飞书群聊 · ${chatName || externalChatId.slice(-8)}`
-          : `${def?.displayName ?? connectorId} DM`;
+        chatType === 'group' ? `${platformLabel}群聊 · ${chatName || externalChatId.slice(-8)}` : `${platformLabel} DM`;
       const thread = await threadStore.create(this.opts.defaultUserId, title, findMonorepoRoot());
       binding = await bindingStore.bind(connectorId, externalChatId, thread.id, this.opts.defaultUserId);
       log.info(
@@ -379,7 +440,9 @@ export class ConnectorRouter {
     const source: ConnectorSource = {
       connector: connectorId,
       label:
-        chatType === 'group' ? `飞书群聊 · ${chatName || externalChatId.slice(-8)}` : (def?.displayName ?? connectorId),
+        chatType === 'group'
+          ? `${def?.displayName ?? connectorId}群聊 · ${chatName || externalChatId.slice(-8)}`
+          : (def?.displayName ?? connectorId),
       icon: def?.icon ?? 'message',
       ...(sender ? { sender } : {}),
     };
@@ -407,6 +470,7 @@ export class ConnectorRouter {
       source,
       mentions: [targetCatId],
       timestamp: storedTimestamp,
+      ...(contentBlocks ? { contentBlocks } : {}),
     });
 
     // 4. Broadcast to WebSocket

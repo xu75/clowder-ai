@@ -8,17 +8,14 @@
 
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import { CAT_CONFIGS, catRegistry } from '@cat-cafe/shared';
+import './helpers/setup-cat-registry.js';
 import Fastify from 'fastify';
 import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/InvocationQueue.js';
+import { registerCallbackAuthHook } from '../dist/routes/callback-auth-prehandler.js';
 import {
   getMultiMentionOrchestrator,
   resetMultiMentionOrchestrator,
 } from '../dist/routes/callback-multi-mention-routes.js';
-
-for (const [id, config] of Object.entries(CAT_CONFIGS)) {
-  if (!catRegistry.has(id)) catRegistry.register(id, config);
-}
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -31,10 +28,11 @@ function createMockRegistry() {
       records.set(id, { catId, threadId, userId, invocationId: id, callbackToken: token });
       return { invocationId: id, callbackToken: token };
     },
-    verify(invocationId, callbackToken) {
+    async verify(invocationId, callbackToken) {
       const r = records.get(invocationId);
-      if (!r || r.callbackToken !== callbackToken) return null;
-      return r;
+      if (!r) return { ok: false, reason: 'unknown_invocation' };
+      if (r.callbackToken !== callbackToken) return { ok: false, reason: 'invalid_token' };
+      return { ok: true, record: r };
     },
     isLatest: () => true,
     claimClientMessageId: () => true,
@@ -157,6 +155,7 @@ describe('B6: multi_mention queue dispatch', () => {
     creds = mockRegistry.register('opus', 'thread-1', 'user-1');
 
     app = Fastify({ logger: false });
+    registerCallbackAuthHook(app, mockRegistry);
     const { registerMultiMentionRoutes } = await import('../dist/routes/callback-multi-mention-routes.js');
     registerMultiMentionRoutes(app, {
       registry: mockRegistry,
@@ -179,9 +178,8 @@ describe('B6: multi_mention queue dispatch', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex'],
         question: 'What do you think?',
         callbackTo: 'opus',
@@ -206,9 +204,8 @@ describe('B6: multi_mention queue dispatch', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex'],
         question: 'Review this?',
         callbackTo: 'opus',
@@ -243,9 +240,8 @@ describe('B6: multi_mention queue dispatch', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex', 'gemini'],
         question: 'Thoughts?',
         callbackTo: 'opus',
@@ -282,9 +278,8 @@ describe('B6: multi_mention queue dispatch', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex'],
         question: 'Something?',
         callbackTo: 'opus',
@@ -308,9 +303,8 @@ describe('B6: multi_mention queue dispatch', () => {
     await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex'],
         question: 'Test queue entry fields',
         callbackTo: 'opus',
@@ -344,9 +338,8 @@ describe('B6: multi_mention queue dispatch', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex'],
         question: 'Should be blocked by depth',
         callbackTo: 'opus',
@@ -372,9 +365,8 @@ describe('B6: multi_mention queue dispatch', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex'],
         question: 'Should be skipped',
         callbackTo: 'opus',
@@ -389,6 +381,7 @@ describe('B6: multi_mention queue dispatch', () => {
   test('falls back to direct dispatch when queue deps are absent', async () => {
     // Create a new app WITHOUT queue deps
     const fallbackApp = Fastify({ logger: false });
+    registerCallbackAuthHook(fallbackApp, mockRegistry);
     resetMultiMentionOrchestrator();
     const fallbackRouter = createMockRouter();
     const { registerMultiMentionRoutes } = await import('../dist/routes/callback-multi-mention-routes.js');
@@ -408,9 +401,8 @@ describe('B6: multi_mention queue dispatch', () => {
     const res = await fallbackApp.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': fallbackCreds.invocationId, 'x-callback-token': fallbackCreds.callbackToken },
       payload: {
-        invocationId: fallbackCreds.invocationId,
-        callbackToken: fallbackCreds.callbackToken,
         targets: ['codex'],
         question: 'Fallback test',
         callbackTo: 'opus',
@@ -706,6 +698,7 @@ describe('B6: canceled hook skips recordResponse in dispatchViaQueue', () => {
     creds = mockRegistry.register('opus', 'thread-1', 'user-1');
 
     app = Fastify({ logger: false });
+    registerCallbackAuthHook(app, mockRegistry);
     const { registerMultiMentionRoutes } = await import('../dist/routes/callback-multi-mention-routes.js');
     registerMultiMentionRoutes(app, {
       registry: mockRegistry,
@@ -728,9 +721,8 @@ describe('B6: canceled hook skips recordResponse in dispatchViaQueue', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex'],
         question: 'Abort scenario?',
         callbackTo: 'opus',
@@ -751,13 +743,37 @@ describe('B6: canceled hook skips recordResponse in dispatchViaQueue', () => {
     assert.equal(orch.getStatus(requestId), 'running');
   });
 
+  test('canceled_by_user hook does not record response in orchestrator', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
+      payload: {
+        targets: ['codex'],
+        question: 'User canceled scenario?',
+        callbackTo: 'opus',
+      },
+    });
+
+    const body = res.json();
+    const requestId = body.requestId;
+    const orch = getMultiMentionOrchestrator();
+
+    assert.equal(orch.getStatus(requestId), 'running');
+
+    const hooks = mockQueueProcessor.getHooks();
+    const [entryId] = hooks.keys();
+    mockQueueProcessor.simulateComplete(entryId, 'canceled_by_user', '');
+
+    assert.equal(orch.getStatus(requestId), 'running');
+  });
+
   test('P2: unregisterEntryCompleteHook cleans up on entry removal', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/callbacks/multi-mention',
+      headers: { 'x-invocation-id': creds.invocationId, 'x-callback-token': creds.callbackToken },
       payload: {
-        invocationId: creds.invocationId,
-        callbackToken: creds.callbackToken,
         targets: ['codex'],
         question: 'Will be removed',
         callbackTo: 'opus',

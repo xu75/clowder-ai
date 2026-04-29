@@ -1,36 +1,47 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useAgentMessages } from '@/hooks/useAgentMessages';
 import { useAuthorization } from '@/hooks/useAuthorization';
 import { useCatData } from '@/hooks/useCatData';
 import { useChatHistory } from '@/hooks/useChatHistory';
 import { useChatSocketCallbacks } from '@/hooks/useChatSocketCallbacks';
+import { useConnectionStatus } from '@/hooks/useConnectionStatus';
 import { godAction, submitAction } from '@/hooks/useGameApi';
 import { reconnectGame } from '@/hooks/useGameReconnect';
 import { useGovernanceStatus } from '@/hooks/useGovernanceStatus';
+import { useIndexState } from '@/hooks/useIndexState';
 import { usePersistedState } from '@/hooks/usePersistedState';
 import { usePreviewAutoOpen } from '@/hooks/usePreviewAutoOpen';
 import { useSendMessage } from '@/hooks/useSendMessage';
 import { useSocket } from '@/hooks/useSocket';
 import { useSplitPaneKeys } from '@/hooks/useSplitPaneKeys';
+import { useThreadLiveness, useThreadMessages } from '@/hooks/useThreadScopedSelectors';
 import { useVadInterrupt } from '@/hooks/useVadInterrupt';
 import { useVoiceAutoPlay } from '@/hooks/useVoiceAutoPlay';
 import { useVoiceStream } from '@/hooks/useVoiceStream';
 import { useWorkspaceNavigate } from '@/hooks/useWorkspaceNavigate';
-import { type ChatMessage as ChatMessageData, useChatStore } from '@/stores/chatStore';
+import { type ChatMessage as ChatMessageData, type Thread, useChatStore } from '@/stores/chatStore';
 import { useGameStore } from '@/stores/gameStore';
+import { useGuideStore } from '@/stores/guideStore';
 import { useTaskStore } from '@/stores/taskStore';
 import { apiFetch } from '@/utils/api-client';
 import { computeScrollRecomputeSignal } from '@/utils/scrollRecomputeSignal';
 import { getUserId } from '@/utils/userId';
 import { AuthorizationCard } from './AuthorizationCard';
 import { BootcampListModal } from './BootcampListModal';
+import { BootstrapOrchestrator } from './BootstrapOrchestrator';
 import { CatCafeHub } from './CatCafeHub';
 import { ChatContainerHeader } from './ChatContainerHeader';
 import { ChatInput } from './ChatInput';
 import { ChatMessage } from './ChatMessage';
+import { ConnectionStatusBar } from './ConnectionStatusBar';
+import { FirstRunQuestWizard } from './FirstRunQuestWizard';
+import { BootcampGuideOverlay } from './first-run-quest/BootcampGuideOverlay';
+import { QuestBanner } from './first-run-quest/QuestBanner';
+import { syncLocalBootcampState } from './first-run-quest/syncLocalBootcampState';
+import { useFirstProjectMistakeTipGate } from './first-run-quest/useFirstProjectMistakeTipGate';
+import { useFirstProjectPreviewAutoOpen } from './first-run-quest/useFirstProjectPreviewAutoOpen';
 import { GameOverlayConnector } from './game/GameOverlayConnector';
 import { HubListModal } from './HubListModal';
 import { BootcampIcon } from './icons/BootcampIcon';
@@ -47,6 +58,7 @@ import { SplitPaneView } from './SplitPaneView';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ThreadExecutionBar } from './ThreadExecutionBar';
 import { ThreadSidebar } from './ThreadSidebar';
+import { assignDocumentRoute, pushThreadRouteWithHistory } from './ThreadSidebar/thread-navigation';
 import { VoteActiveBar } from './VoteActiveBar';
 import { type VoteConfig, VoteConfigModal } from './VoteConfigModal';
 import { WorkspacePanel } from './WorkspacePanel';
@@ -57,22 +69,38 @@ interface ChatContainerProps {
 }
 
 export function ChatContainer({ threadId }: ChatContainerProps) {
+  const bottomChromeRef = useRef<HTMLDivElement | null>(null);
+  const bottomChromeObserverRef = useRef<ResizeObserver | null>(null);
+  const bottomChromeObserverRafRef = useRef<number | null>(null);
   const {
-    messages,
-    hasActiveInvocation,
-    intentMode,
-    targetCats,
-    catStatuses,
-    catInvocations,
     setCurrentThread,
     viewMode,
     setViewMode,
+    isLoading: chatIsLoading,
     clearUnread,
     confirmUnreadAck,
     armUnreadSuppression,
     rightPanelMode,
   } = useChatStore();
+  // F173 Phase C Task 3 — full read-side migration. All thread liveness +
+  // messages now flow through thread-scoped selectors keyed off this
+  // component's `threadId` prop, not the flat current-thread mirror. Closes
+  // AC-C6 race window for the entire ChatContainer surface (Task 2 only
+  // covered hasActiveInvocation; this finishes the job).
+  const messages = useThreadMessages(threadId);
+  const {
+    hasActive: hasActiveInvocation,
+    activeInvocations,
+    catStatuses,
+    catInvocations,
+    intentMode,
+    targetCats,
+  } = useThreadLiveness(threadId);
+  const navigateToThread = useCallback((tid: string) => {
+    pushThreadRouteWithHistory(tid, typeof window !== 'undefined' ? window : undefined);
+  }, []);
   const uiThinkingExpandedByDefault = useChatStore((s) => s.uiThinkingExpandedByDefault);
+  const isOfflineSnapshot = useChatStore((s) => s.isOfflineSnapshot);
 
   // F101: Game state from Zustand store
   const gameView = useGameStore((s) => s.gameView);
@@ -99,15 +127,17 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // AC-6: research=multi hint from Signal study "多猫研究" button
   const isResearchMode = searchParams?.get('research') === 'multi';
   const { clearTasks } = useTaskStore();
-  const { getCatById, isLoading } = useCatData();
+  const { cats, getCatById, isLoading, hasFetched } = useCatData();
   const workspaceWorktreeId = useChatStore((s) => s.workspaceWorktreeId);
-  usePreviewAutoOpen(workspaceWorktreeId);
+  usePreviewAutoOpen(workspaceWorktreeId, threadId);
   useWorkspaceNavigate(workspaceWorktreeId, threadId);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [statusPanelOpen, setStatusPanelOpen] = useState(true);
   const [mobileStatusOpen, setMobileStatusOpen] = useState(false);
   const [showBootcampList, setShowBootcampList] = useState(false);
   const [showHubList, setShowHubList] = useState(false);
+  const [showFirstRunQuestPrompt, setShowFirstRunQuestPrompt] = useState(false);
+  const [showQuestWizard, setShowQuestWizard] = useState(false);
   // F106: fetch bootcamp count independently of sidebar lifecycle
   // refreshKey increments only on modal close → avoids duplicate fetch on open
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -270,12 +300,206 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // setCurrentThread saves old thread state to map, restores new thread state.
   const setCurrentProject = useChatStore((s) => s.setCurrentProject);
   const storeThreads = useChatStore((s) => s.threads);
+  const setThreads = useChatStore((s) => s.setThreads);
+  const handleSkipFirstRunQuest = useCallback(() => {
+    // Session-only skip — next refresh will re-check backend state
+    setShowFirstRunQuestPrompt(false);
+  }, []);
+  const handleStartFirstRunQuest = useCallback(() => {
+    setShowFirstRunQuestPrompt(false);
+    setShowQuestWizard(true);
+  }, []);
+  const currentBootcampState = storeThreads.find((thread) => thread.id === threadId)?.bootcampState;
+  const currentBootcampPhase = currentBootcampState?.phase;
+  const showFirstProjectMistakeTip = useFirstProjectMistakeTipGate({
+    threadId,
+    phase: currentBootcampPhase,
+    messageCount: messages.length,
+    hasActiveInvocation,
+  });
+  useFirstProjectPreviewAutoOpen({
+    threadId,
+    phase: currentBootcampPhase,
+    messageCount: messages.length,
+    hasActiveInvocation,
+    worktreeId: workspaceWorktreeId,
+  });
+  const mistakeTipAdvanceKeyRef = useRef<string | null>(null);
+  const handleMistakeTipVisible = useCallback(() => {
+    // Read threads fresh from store to keep callback ref stable (avoids resetting
+    // DelayedMistakeTip's 1500ms onVisible timer on every storeThreads change).
+    const currentThread = useChatStore.getState().threads.find((thread) => thread.id === threadId);
+    const raw = currentThread?.bootcampState;
+    if (!raw || raw.phase !== 'phase-7-dev') return;
+
+    const key = `${threadId}:${String(raw.startedAt ?? 'unknown')}:phase-4`;
+    if (mistakeTipAdvanceKeyRef.current === key) return;
+    const nextBootcampState: NonNullable<Thread['bootcampState']> = {
+      ...raw,
+      phase: 'phase-7.5-add-teammate',
+    };
+
+    void apiFetch(`/api/threads/${threadId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bootcampState: nextBootcampState,
+      }),
+    }).then((res) => {
+      if (res.ok) {
+        mistakeTipAdvanceKeyRef.current = key;
+        syncLocalBootcampState(threadId, nextBootcampState);
+      }
+      return res;
+    });
+  }, [threadId]);
+  // When gate fires (invocation ended with new Phase 4 output), advance immediately
+  useEffect(() => {
+    if (showFirstProjectMistakeTip) {
+      handleMistakeTipVisible();
+    }
+  }, [showFirstProjectMistakeTip, handleMistakeTipVisible]);
+  useEffect(() => {
+    if (currentBootcampPhase !== 'phase-7-dev') {
+      mistakeTipAdvanceKeyRef.current = null;
+    }
+  }, [currentBootcampPhase, threadId]);
+  useEffect(() => {
+    // Pure backend-driven: show prompt only when no cats AND no bootcamp thread
+    const isCurrentBootcamp = Boolean(storeThreads.find((thread) => thread.id === threadId)?.bootcampState);
+    const hasAnyBootcamp = storeThreads.some((t) => t.bootcampState);
+    if (isCurrentBootcamp || hasAnyBootcamp || cats.length > 0 || isLoading) {
+      setShowFirstRunQuestPrompt(false);
+      return;
+    }
+    // Wait for thread store to populate before deciding — prevents flash on page refresh
+    if (storeThreads.length === 0) return;
+    // Only show first-run prompt after a successful cat fetch — prevents false
+    // positives when /api/cats fails transiently (returns [] on network error).
+    if (!hasFetched) return;
+    setShowFirstRunQuestPrompt(true);
+  }, [cats.length, isLoading, hasFetched, storeThreads, threadId]);
+
+  // ── Data sync: re-fetch thread state ──
+  // MCP callbacks update Redis directly; the companion WebSocket `thread_updated`
+  // may not reach this frontend (e.g. worktree port isolation). Re-fetching the
+  // thread ensures the store stays in sync.
+  const syncThreadState = useCallback(() => {
+    apiFetch(`/api/threads/${threadId}`)
+      .then((res) =>
+        res.ok
+          ? (res.json() as Promise<{
+              bootcampState?: Thread['bootcampState'];
+              firstRunQuestState?: { phase: string; firstCatName?: string };
+            }>)
+          : null,
+      )
+      .then((thread) => {
+        if (!thread) return;
+        const local = useChatStore.getState().threads.find((t) => t.id === threadId);
+        if (thread.bootcampState || local?.bootcampState) {
+          syncLocalBootcampState(threadId, thread.bootcampState);
+        }
+        const localQuest = (local as Record<string, unknown> | undefined)?.firstRunQuestState;
+        if (thread.firstRunQuestState || localQuest) {
+          useChatStore.setState((state) => ({
+            threads: state.threads.map((t) =>
+              t.id === threadId ? { ...t, firstRunQuestState: thread.firstRunQuestState } : t,
+            ),
+          }));
+        }
+      })
+      .catch(() => {});
+  }, [threadId]);
+
+  // Sync on invocation end (active → inactive transition)
+  const prevInvocationRef = useRef(hasActiveInvocation);
+  useEffect(() => {
+    const wasActive = prevInvocationRef.current;
+    prevInvocationRef.current = hasActiveInvocation;
+    if (!wasActive || hasActiveInvocation) return;
+    syncThreadState();
+  }, [hasActiveInvocation, syncThreadState]);
+
+  // Sync on mount / thread switch — sidebar may not have loaded yet
+  useEffect(() => {
+    syncThreadState();
+  }, [syncThreadState]);
+
+  // ── Bootcamp add-teammate: trigger guide engine when user interacts with input ──
+  // Subscribe reactively so the effect re-runs when guide exits (session cleared).
+  const activeGuideFlowId = useGuideStore((s) => s.session?.flow.id ?? null);
+  useEffect(() => {
+    if (currentBootcampPhase !== 'phase-7.5-add-teammate') return;
+    // Guide already running — don't re-register
+    if (activeGuideFlowId === 'bootcamp-add-teammate') return;
+    // Prevent re-triggering a guide that already completed for this thread
+    if (useGuideStore.getState().completedGuides.has(`${threadId}::bootcamp-add-teammate`)) return;
+
+    const startGuide = () => {
+      const { session: s, completedGuides: cg } = useGuideStore.getState();
+      if (s?.flow.id === 'bootcamp-add-teammate') return;
+      if (cg.has(`${threadId}::bootcamp-add-teammate`)) return;
+      useGuideStore.getState().reduceServerEvent({
+        action: 'start',
+        guideId: 'bootcamp-add-teammate',
+        threadId,
+      });
+    };
+
+    // Wait for user to type in chat input before starting guide
+    const handler = (e: Event) => {
+      if ((e.target as HTMLElement)?.closest('[data-guide-id="chat.input"]')) {
+        startGuide();
+        document.removeEventListener('input', handler, true);
+      }
+    };
+    document.addEventListener('input', handler, true);
+    return () => {
+      document.removeEventListener('input', handler, true);
+    };
+  }, [currentBootcampPhase, threadId, activeGuideFlowId]);
+
+  // ── Bootcamp farewell: auto-trigger guide after agent finishes at phase-10-retro ──
+  // Guard with both hasActiveInvocation AND chatIsLoading:
+  // - hasActiveInvocation tracks per-slot presence (can briefly go false during A2A handoff)
+  // - chatIsLoading stays true for the entire serial chain (cleared only on isFinal=true)
+  const farewellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (farewellTimerRef.current) {
+      clearTimeout(farewellTimerRef.current);
+      farewellTimerRef.current = null;
+    }
+    if (currentBootcampPhase !== 'phase-10-retro') return;
+    if (hasActiveInvocation || chatIsLoading) return;
+    if (activeGuideFlowId === 'bootcamp-farewell') return;
+    if (useGuideStore.getState().completedGuides.has(`${threadId}::bootcamp-farewell`)) return;
+
+    farewellTimerRef.current = setTimeout(() => {
+      farewellTimerRef.current = null;
+      const s = useChatStore.getState();
+      if (s.hasActiveInvocation || s.isLoading) return;
+      useGuideStore.getState().reduceServerEvent({
+        action: 'start',
+        guideId: 'bootcamp-farewell',
+        threadId,
+      });
+    }, 800);
+    return () => {
+      if (farewellTimerRef.current) {
+        clearTimeout(farewellTimerRef.current);
+        farewellTimerRef.current = null;
+      }
+    };
+  }, [currentBootcampPhase, threadId, activeGuideFlowId, hasActiveInvocation, chatIsLoading]);
+
   const prevThreadRef = useRef(threadId);
   useEffect(() => {
     if (prevThreadRef.current !== threadId) {
       // Thread switch: store saves/restores per-thread state automatically
       setCurrentThread(threadId);
-      // Clean up non-thread-scoped refs
+      // F173 A.12 — resetRefs no longer touches suppression markers (invocation-driven cleanup).
+      // It still clears activeRefs / finalizedStreamRef / sawStreamData per the original purpose.
       resetRefs();
       clearTasks();
       prevThreadRef.current = threadId;
@@ -310,15 +534,28 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     (govStatus?.needsBootstrap || govStatus?.needsConfirmation || setupDone) &&
     messages.length === 0
   );
-  // Reset setupDone + refetch governance on thread switch (same project may have stale status)
+  // Reset setupDone on thread switch. Governance status already auto-refetches
+  // when projectPath changes inside useGovernanceStatus; same-project thread switches
+  // should not trigger an extra network round-trip.
   const prevThreadSetup = useRef(threadId);
   useEffect(() => {
     if (prevThreadSetup.current !== threadId) {
       prevThreadSetup.current = threadId;
       setSetupDone(false);
-      govRefetch();
     }
-  }, [threadId, govRefetch]);
+  }, [threadId]);
+
+  // F152 Phase B: memory bootstrap state
+  const {
+    state: indexState,
+    progress: bootstrapProgress,
+    summary: bootstrapSummary,
+    durationMs: bootstrapDurationMs,
+    isSnoozed,
+    startBootstrap,
+    snooze: snoozeBootstrap,
+    handleSocketEvent: handleIndexSocketEvent,
+  } = useIndexState(currentProjectPath);
 
   const socketCallbacks = useChatSocketCallbacks({
     threadId,
@@ -328,7 +565,8 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     clearDoneTimeout,
     handleAuthRequest,
     handleAuthResponse,
-    onNavigateToThread: (tid) => router.push(`/thread/${tid}`),
+    onNavigateToThread: navigateToThread,
+    onIndexEvent: handleIndexSocketEvent,
   });
 
   const renderSingleMessage = useCallback(
@@ -340,7 +578,17 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     [threadId, getCatById],
   );
 
-  const { cancelInvocation, syncRooms } = useSocket(socketCallbacks, threadId);
+  const { cancelInvocation, syncRooms, socketConnected } = useSocket(socketCallbacks, threadId);
+  const connectionStatus = useConnectionStatus(socketConnected);
+
+  // Single-slot execution can be recovered from queue truth even when the
+  // active-thread flat intentMode has not been restored yet (for example after
+  // queue hydration or a missed intent_mode event). In that case we still need
+  // the top cancel affordance — otherwise the thread looks active in the
+  // execution bar but offers no single-cat cancel control.
+  const showThinkingIndicator =
+    intentMode === 'execute' ||
+    (intentMode == null && hasActiveInvocation && Object.keys(activeInvocations).length === 1);
 
   useVoiceAutoPlay();
   useVoiceStream();
@@ -370,6 +618,47 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     clearUnread(threadId);
   }, [threadId, clearUnread]);
 
+  const disconnectBottomChromeObserver = useCallback(() => {
+    bottomChromeObserverRef.current?.disconnect();
+    bottomChromeObserverRef.current = null;
+    if (bottomChromeObserverRafRef.current !== null) {
+      cancelAnimationFrame(bottomChromeObserverRafRef.current);
+      bottomChromeObserverRafRef.current = null;
+    }
+  }, []);
+
+  const attachBottomChromeRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      bottomChromeRef.current = node;
+      disconnectBottomChromeObserver();
+
+      if (typeof window === 'undefined' || typeof window.ResizeObserver !== 'function' || !node) return;
+
+      let lastHeight = node.getBoundingClientRect().height;
+      const observer = new window.ResizeObserver(([entry]) => {
+        const nextHeight = entry?.contentRect.height ?? node.getBoundingClientRect().height;
+        if (Math.abs(nextHeight - lastHeight) <= 1) return;
+        lastHeight = nextHeight;
+
+        if (bottomChromeObserverRafRef.current !== null) {
+          cancelAnimationFrame(bottomChromeObserverRafRef.current);
+        }
+        bottomChromeObserverRafRef.current = requestAnimationFrame(() => {
+          bottomChromeObserverRafRef.current = null;
+          window.dispatchEvent(new Event('catcafe:chat-layout-changed'));
+        });
+      });
+
+      observer.observe(node);
+      bottomChromeObserverRef.current = observer;
+    },
+    [disconnectBottomChromeObserver],
+  );
+
+  useEffect(() => {
+    return disconnectBottomChromeObserver;
+  }, [disconnectBottomChromeObserver]);
+
   // F069-R5: Ack read cursor server-side. The backend finds the latest real message
   // and acks it atomically — no frontend ID guessing, no timing races with fetchHistory.
   // Fires on thread entry AND when new messages arrive (messages.length changes),
@@ -383,6 +672,8 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     armUnreadSuppression(threadId);
     apiFetch(`/api/threads/${encodeURIComponent(threadId)}/read/latest`, {
       method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
     })
       .then((res) => {
         if (res.ok) {
@@ -402,15 +693,40 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     [stopHandler, cancelInvocation, threadId],
   );
 
-  const router = useRouter();
-
   const handleZoomToThread = useCallback(
     (tid: string) => {
       setViewMode('single');
-      router.push(`/thread/${tid}`);
+      navigateToThread(tid);
     },
-    [setViewMode, router],
+    [setViewMode, navigateToThread],
   );
+
+  const handleQuestCreated = useCallback(
+    async (questThreadId: string) => {
+      setShowQuestWizard(false);
+      try {
+        const res = await apiFetch('/api/threads');
+        if (res.ok) {
+          const data = (await res.json()) as { threads: Thread[] };
+          setThreads(data.threads);
+        }
+      } catch {
+        // Ignore refresh errors — navigation is the priority
+      }
+      navigateToThread(questThreadId);
+    },
+    [navigateToThread, setThreads],
+  );
+
+  const handleSearchKnowledge = useCallback(() => {
+    const fromParam = threadId ? `?from=${encodeURIComponent(threadId)}` : '';
+    assignDocumentRoute(`/memory/search${fromParam}`, typeof window !== 'undefined' ? window : undefined);
+  }, [threadId]);
+
+  const handleGoToMemoryHub = useCallback(() => {
+    const fromParam = threadId ? `?from=${encodeURIComponent(threadId)}` : '';
+    assignDocumentRoute(`/memory${fromParam}`, typeof window !== 'undefined' ? window : undefined);
+  }, [threadId]);
 
   if (viewMode === 'split') {
     return (
@@ -486,17 +802,27 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
           defaultCatId={targetCats[0] || 'opus'}
         />
 
-        {intentMode === 'ideate' && <ParallelStatusBar onStop={handleStop} />}
-        {intentMode === 'execute' && <ThinkingIndicator onCancel={cancelInvocation} />}
+        {intentMode === 'ideate' && <ParallelStatusBar onStop={handleStop} threadId={threadId} />}
+        {showThinkingIndicator && <ThinkingIndicator onCancel={cancelInvocation} />}
 
         <div className="flex-1 relative overflow-hidden">
           <main
             ref={scrollContainerRef}
             onScroll={handleScroll}
             className="h-full overflow-y-auto p-4"
+            data-guide-id="bootcamp.preview-result"
+            data-bootcamp-host="chat-messages"
             data-chat-container
           >
             {isLoadingHistory && <div className="text-center py-3 text-sm text-cafe-muted">加载历史消息...</div>}
+            <ConnectionStatusBar
+              api={connectionStatus.api}
+              socket={connectionStatus.socket}
+              upstream={connectionStatus.upstream}
+              isReadonly={connectionStatus.isReadonly}
+              checkedAt={connectionStatus.checkedAt}
+              isOfflineSnapshot={isOfflineSnapshot}
+            />
             {!hasMore && messages.length > 0 && (
               <div className="text-center py-3 text-xs text-cafe-muted">没有更多消息了</div>
             )}
@@ -504,7 +830,9 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
               <div className="text-center mt-20">
                 <PawIcon className="w-12 h-12 text-cocreator-light mx-auto mb-4" />
                 <p className="text-lg text-cafe-secondary mb-1">欢迎来到 Clowder AI!</p>
-                <p className="text-sm text-cafe-muted">输入 @布偶 召唤布偶猫开始聊天</p>
+                <p className="text-sm text-cafe-muted">
+                  {cats.length > 0 ? '输入 @布偶 召唤布偶猫开始聊天' : '还没有可用成员，先开始新手教程创建第一只猫猫'}
+                </p>
                 {showSetupCard && govStatus && (
                   <div className="mt-6 text-left">
                     <ProjectSetupCard
@@ -520,6 +848,30 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
                     />
                   </div>
                 )}
+                {/* F152 Phase B: memory bootstrap orchestrator */}
+                {!showSetupCard &&
+                  currentProjectPath &&
+                  currentProjectPath !== 'default' &&
+                  currentProjectPath !== 'lobby' && (
+                    <div className="mt-4 text-left">
+                      <BootstrapOrchestrator
+                        projectPath={currentProjectPath}
+                        indexState={indexState}
+                        isSnoozed={isSnoozed}
+                        progress={bootstrapProgress}
+                        summary={bootstrapSummary}
+                        durationMs={bootstrapDurationMs}
+                        isNewProject={setupDone}
+                        governanceDone={
+                          setupDone || !!(govStatus && !govStatus.needsBootstrap && !govStatus.needsConfirmation)
+                        }
+                        onStartBootstrap={startBootstrap}
+                        onSnooze={snoozeBootstrap}
+                        onSearchKnowledge={handleSearchKnowledge}
+                        onGoToMemoryHub={handleGoToMemoryHub}
+                      />
+                    </div>
+                  )}
                 {(() => {
                   const isCurrentBootcamp = storeThreads.find((t) => t.id === threadId)?.bootcampState;
                   if (isCurrentBootcamp) return null; // already in bootcamp thread
@@ -563,45 +915,83 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
           {messages.length > 5 && <MessageNavigator messages={messages} scrollContainerRef={scrollContainerRef} />}
         </div>
 
-        {authPending.length > 0 && (
-          <div className="border-t border-amber-200 bg-amber-50/40 py-2">
-            {authPending.map((req) => (
-              <AuthorizationCard key={req.requestId} request={req} onRespond={authRespond} />
-            ))}
-          </div>
-        )}
+        <div ref={attachBottomChromeRef}>
+          {authPending.length > 0 && (
+            <div className="border-t border-amber-200 bg-amber-50/40 py-2">
+              {authPending.map((req) => (
+                <AuthorizationCard key={req.requestId} request={req} onRespond={authRespond} />
+              ))}
+            </div>
+          )}
 
-        <ThreadExecutionBar />
-        <QueuePanel threadId={threadId} />
-        <VoteActiveBar threadId={threadId} onEnd={() => {}} />
+          <ThreadExecutionBar />
+          <QueuePanel threadId={threadId} />
+          <VoteActiveBar threadId={threadId} onEnd={() => {}} />
 
-        {isResearchMode && (
-          <div className="mx-4 mb-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
-            多猫研究模式 — 文章上下文已注入。请输入研究问题，猫猫会自动调用 multi_mention 邀请其他猫参与分析。
-          </div>
-        )}
-        <ChatInput
-          key={threadId}
-          threadId={threadId}
-          onSend={(content, images, whisper, deliveryMode) =>
-            handleSend(content, images, undefined, whisper, deliveryMode)
-          }
-          onStop={handleStop}
-          disabled={false}
-          hasActiveInvocation={hasActiveInvocation}
-          uploadStatus={uploadStatus}
-          uploadError={uploadError}
-        />
+          {!showFirstRunQuestPrompt &&
+            !showQuestWizard &&
+            (() => {
+              const currentThread = storeThreads.find((t) => t.id === threadId);
+              const questState = (currentThread as Record<string, unknown> | undefined)?.firstRunQuestState as
+                | { phase: string; firstCatName?: string }
+                | undefined;
+              if (!questState) return null;
+              return (
+                <QuestBanner
+                  phase={questState.phase}
+                  firstCatName={questState.firstCatName}
+                  onAddSecondCat={() => setShowQuestWizard(true)}
+                  onStartBootcamp={() => setShowBootcampList(true)}
+                  onComplete={() => assignDocumentRoute('/hub', typeof window !== 'undefined' ? window : undefined)}
+                />
+              );
+            })()}
 
-        {/* F101: "Return to game" banner when overlay is minimized */}
-        {isGameActive && overlayMinimized && gameView?.threadId === threadId && (
-          <button
-            onClick={() => useGameStore.getState().restoreOverlay()}
-            className="mx-4 mb-2 flex items-center justify-center gap-2 rounded-lg border border-purple-300 bg-purple-50 px-3 py-2 text-sm text-purple-700 hover:bg-purple-100 transition-colors"
+          {isResearchMode && (
+            <div className="mx-4 mb-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+              多猫研究模式 — 文章上下文已注入。请输入研究问题，猫猫会自动调用 multi_mention 邀请其他猫参与分析。
+            </div>
+          )}
+          <div
+            className={(() => {
+              if (showFirstRunQuestPrompt || showQuestWizard) return '';
+              const ct = storeThreads.find((t) => t.id === threadId);
+              // Bootcamp phase-1 with no messages: highlight + punch through overlay
+              const bs = ct?.bootcampState as { phase: string } | undefined;
+              if (bs?.phase === 'phase-1-intro' && messages.length === 0) {
+                return 'relative z-[70] quest-input-highlight rounded-xl mx-1';
+              }
+              // Legacy quest support
+              const qs = (ct as Record<string, unknown> | undefined)?.firstRunQuestState as
+                | { phase: string }
+                | undefined;
+              return qs?.phase === 'quest-2-cat-intro' ? 'quest-input-highlight rounded-xl mx-1' : '';
+            })()}
           >
-            🎮 返回游戏
-          </button>
-        )}
+            <ChatInput
+              key={threadId}
+              threadId={threadId}
+              onSend={(content, images, whisper, deliveryMode) =>
+                handleSend(content, images, undefined, whisper, deliveryMode)
+              }
+              onStop={handleStop}
+              disabled={connectionStatus.isReadonly}
+              hasActiveInvocation={hasActiveInvocation}
+              uploadStatus={uploadStatus}
+              uploadError={uploadError}
+            />
+          </div>
+
+          {/* F101: "Return to game" banner when overlay is minimized */}
+          {isGameActive && overlayMinimized && gameView?.threadId === threadId && (
+            <button
+              onClick={() => useGameStore.getState().restoreOverlay()}
+              className="mx-4 mb-2 flex items-center justify-center gap-2 rounded-lg border border-purple-300 bg-purple-50 px-3 py-2 text-sm text-purple-700 hover:bg-purple-100 transition-colors"
+            >
+              🎮 返回游戏
+            </button>
+          )}
+        </div>
 
         {/* F101: Game overlay — renders when a game is active */}
         <GameOverlayConnector
@@ -673,6 +1063,8 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
             targetCats={targetCats}
             catStatuses={catStatuses}
             catInvocations={catInvocations}
+            activeInvocations={activeInvocations}
+            hasActiveInvocation={hasActiveInvocation}
             threadId={threadId}
             messageSummary={messageSummary}
             width={statusPanelWidth}
@@ -692,13 +1084,65 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
         targetCats={targetCats}
         catStatuses={catStatuses}
         catInvocations={catInvocations}
+        activeInvocations={activeInvocations}
+        hasActiveInvocation={hasActiveInvocation}
         threadId={threadId}
         messageSummary={messageSummary}
       />
+      {showFirstRunQuestPrompt && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-4">
+          <div
+            className="w-full max-w-md rounded-2xl border border-amber-200 bg-white p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-gray-900">开始猫猫新手教程？</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              当前还没有可用成员。我们可以先带你创建第一只猫猫，再开始首个协作任务。
+            </p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={handleSkipFirstRunQuest}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                跳过
+              </button>
+              <button
+                type="button"
+                onClick={handleStartFirstRunQuest}
+                className="rounded-lg bg-amber-500 px-3 py-2 text-sm font-medium text-white hover:bg-amber-600"
+              >
+                开始教程
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <CatCafeHub />
+      <FirstRunQuestWizard
+        open={showQuestWizard}
+        onClose={() => setShowQuestWizard(false)}
+        onCreated={handleQuestCreated}
+      />
       <BootcampListModal open={showBootcampList} onClose={handleBootcampModalClose} currentThreadId={threadId} />
       <HubListModal open={showHubList} onClose={() => setShowHubList(false)} currentThreadId={threadId} />
       {showVoteModal && <VoteConfigModal onSubmit={handleVoteSubmit} onCancel={() => setShowVoteModal(false)} />}
+      {/* Bootcamp guide overlay: intro phase tips + lifecycle tips (phase-7.5 uses guide engine) */}
+      {(() => {
+        if (showFirstRunQuestPrompt || showQuestWizard) return null;
+        const bt = storeThreads.find((t) => t.id === threadId);
+        const raw = bt?.bootcampState;
+        if (!raw) return null;
+        const phase = raw.phase;
+        // Guide engine handles phase-7.5 and phase-10 — no custom overlay needed
+        if (phase === 'phase-7.5-add-teammate' || phase === 'phase-10-retro') return null;
+        const isLifecyclePhase = /^phase-(5|6|7|8|9|10|11)-/.test(phase);
+        if (!isLifecyclePhase && messages.length > 0) return null;
+        const leadCat = cats.find((c) => c.id === raw.leadCat) ?? cats[0];
+        const catName = leadCat?.displayName ?? leadCat?.nickname ?? leadCat?.name;
+        if (!catName) return null;
+        return <BootcampGuideOverlay phase={phase} catName={catName} hasMessages={messages.length > 0} />;
+      })()}
     </div>
   );
 }

@@ -321,6 +321,26 @@ describe('InvocationTracker: startAll registers all target cats', () => {
     assert.equal(tracker.has('t1'), false);
   });
 
+  it('completeSlot releases one finished cat from a batch via batchController', () => {
+    const tracker = new InvocationTracker();
+    const controller = tracker.startAll('t1', ['opus', 'codex'], 'user1');
+
+    tracker.completeSlot('t1', 'opus', controller);
+
+    assert.equal(tracker.has('t1', 'opus'), false, 'finished cat should be released immediately');
+    assert.equal(tracker.has('t1', 'codex'), true, 'still-running cat must keep its slot');
+  });
+
+  it('completeSlot with wrong controller does not remove the slot', () => {
+    const tracker = new InvocationTracker();
+    tracker.startAll('t1', ['opus', 'codex'], 'user1');
+
+    tracker.completeSlot('t1', 'opus', new AbortController());
+
+    assert.equal(tracker.has('t1', 'opus'), true);
+    assert.equal(tracker.has('t1', 'codex'), true);
+  });
+
   it('completeAll with wrong controller does not remove slots', () => {
     const tracker = new InvocationTracker();
     tracker.startAll('t1', ['opus', 'codex'], 'user1');
@@ -402,6 +422,50 @@ describe('InvocationTracker: per-cat cancel isolation (AC-B9 regression)', () =>
     tracker.cancel('t1', 'codex');
     assert.equal(primaryController.signal.aborted, false, 'primary survives non-primary cancel');
     assert.equal(tracker.has('t1', 'opus'), true);
+  });
+});
+
+// F156 Phase B-2: cancelAll with userId authorization
+describe('InvocationTracker: cancelAll userId guard (F156 B-2)', () => {
+  it('cancelAll with matching userId only cancels that user invocations', () => {
+    const tracker = new InvocationTracker();
+    tracker.start('t1', 'opus', 'alice', ['opus']);
+    tracker.start('t1', 'codex', 'bob', ['codex']);
+    tracker.cancelAll('t1', 'alice');
+    assert.equal(tracker.has('t1', 'opus'), false, 'alice opus should be cancelled');
+    assert.equal(tracker.has('t1', 'codex'), true, 'bob codex should survive');
+  });
+
+  it('cancelAll without userId cancels all (backward compat / admin)', () => {
+    const tracker = new InvocationTracker();
+    const ctrl1 = tracker.start('t1', 'opus', 'alice', ['opus']);
+    const ctrl2 = tracker.start('t1', 'codex', 'bob', ['codex']);
+    tracker.cancelAll('t1');
+    assert.equal(ctrl1.signal.aborted, true);
+    assert.equal(ctrl2.signal.aborted, true);
+    assert.equal(tracker.has('t1'), false);
+  });
+
+  it('cancelAll returns cancelled catIds for orchestrator scoping', () => {
+    const tracker = new InvocationTracker();
+    tracker.start('t1', 'opus', 'alice', ['opus']);
+    tracker.start('t1', 'codex', 'bob', ['codex']);
+    tracker.start('t1', 'gemini', 'alice', ['gemini']);
+
+    const cancelled = tracker.cancelAll('t1', 'alice');
+    assert.ok(Array.isArray(cancelled), 'cancelAll must return an array');
+    assert.deepStrictEqual(cancelled.sort(), ['gemini', 'opus'], 'should return only alice catIds');
+    assert.equal(tracker.has('t1', 'codex'), true, 'bob codex untouched');
+  });
+
+  it('cancelAll without userId returns all cancelled catIds', () => {
+    const tracker = new InvocationTracker();
+    tracker.start('t1', 'opus', 'alice', ['opus']);
+    tracker.start('t1', 'codex', 'bob', ['codex']);
+
+    const cancelled = tracker.cancelAll('t1');
+    assert.ok(Array.isArray(cancelled), 'cancelAll must return an array');
+    assert.deepStrictEqual(cancelled.sort(), ['codex', 'opus']);
   });
 });
 

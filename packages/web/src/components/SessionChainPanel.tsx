@@ -2,11 +2,13 @@
 
 // biome-ignore lint/correctness/noUnusedImports: React needed for JSX in vitest environment
 import React, { useEffect, useState } from 'react';
+import { useCatData } from '@/hooks/useCatData';
 import type { CatInvocationInfo, ContextHealthData } from '@/stores/chat-types';
 import { apiFetch } from '@/utils/api-client';
 import { BindNewSessionSection } from './BindNewSessionSection';
 import { ContextHealthBar } from './ContextHealthBar';
 import { BindSessionInput, SessionIdTag } from './SessionChainInputs';
+import { deriveSessionColors, type SessionColors } from './session-chain-colors';
 
 /** Minimal session record from API GET /api/threads/:id/sessions */
 interface SessionSummary {
@@ -34,10 +36,16 @@ interface SessionSummary {
   };
 }
 
+const sessionCache = new Map<string, SessionSummary[]>();
+
+export function __resetSessionChainCacheForTest() {
+  sessionCache.clear();
+}
+
 export interface SessionChainPanelProps {
   threadId: string;
   catInvocations: Record<string, CatInvocationInfo>;
-  onViewSession?: (sessionId: string) => void;
+  onViewSession?: (sessionId: string, catId?: string) => void;
 }
 
 function timeAgo(ts: number): string {
@@ -77,51 +85,52 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-const CAT_SESSION_COLORS: Record<string, { border: string; badgeBg: string; badgeText: string }> = {
-  opus: { border: 'border-opus-primary/40', badgeBg: 'bg-opus-light', badgeText: 'text-opus-dark' },
-  codex: { border: 'border-codex-primary/40', badgeBg: 'bg-codex-light', badgeText: 'text-codex-dark' },
-  gemini: { border: 'border-gemini-primary/40', badgeBg: 'bg-gemini-light', badgeText: 'text-gemini-dark' },
-  dare: { border: 'border-dare-primary/40', badgeBg: 'bg-dare-light', badgeText: 'text-dare-dark' },
-  // Maine-coon variants: green family, different shades
-  gpt52: { border: 'border-[#66BB6A66]', badgeBg: 'bg-[#C8E6C9]', badgeText: 'text-[#2E7D32]' },
-  // Ragdoll variants: purple family, different shades
-  'opus-45': { border: 'border-[#7E57C266]', badgeBg: 'bg-[#E1D5F0]', badgeText: 'text-[#5E35B1]' },
-  sonnet: { border: 'border-[#B39DDB66]', badgeBg: 'bg-[#EDE7F6]', badgeText: 'text-[#6A1B9A]' },
-};
-
-const DEFAULT_SESSION_COLORS = { border: 'border-cafe/40', badgeBg: 'bg-gray-200', badgeText: 'text-cafe-secondary' };
-
 export function SessionChainPanel({ threadId, catInvocations, onViewSession }: SessionChainPanelProps) {
+  const { getCatById } = useCatData();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadedThreadId, setLoadedThreadId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [unsealingSessionId, setUnsealingSessionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const colorsForCat = (catId: string): SessionColors => {
+    const cat = getCatById(catId);
+    return deriveSessionColors(cat?.color?.primary, cat?.color?.secondary);
+  };
+
+  // Data is stale when it belongs to a different thread than the one we're viewing
+  const isStale = loadedThreadId !== threadId;
 
   // Re-fetch when any cat's sessionSealed changes
   const sealSignal = Object.values(catInvocations)
     .map((inv) => `${inv.sessionSeq ?? ''}:${inv.sessionSealed ?? ''}`)
     .join(',');
 
-  // Fetch sessions with stale-response guard: if threadId or sealSignal
-  // changes before the response arrives, discard the stale result.
+  // Fetch sessions — stale-while-revalidate: keep old data visible until
+  // the new response arrives, preventing blank flashes on thread switch / F5.
   // biome-ignore lint/correctness/useExhaustiveDependencies: sealSignal+refreshKey intentionally trigger re-fetch
   useEffect(() => {
     let cancelled = false;
-    setSessions([]);
+    const cached = sessionCache.get(threadId);
+    if (cached) {
+      setSessions(cached);
+      setLoadedThreadId(threadId);
+    }
     setLoading(true);
     apiFetch(`/api/threads/${threadId}/sessions`)
       .then(async (res) => {
         if (cancelled) return;
-        if (!res.ok) {
-          setSessions([]);
-          return;
-        }
+        if (!res.ok) return;
         const data = (await res.json()) as { sessions: SessionSummary[] };
-        if (!cancelled) setSessions(data.sessions);
+        if (!cancelled) {
+          sessionCache.set(threadId, data.sessions);
+          setSessions(data.sessions);
+          setLoadedThreadId(threadId);
+        }
       })
       .catch(() => {
-        if (!cancelled) setSessions([]);
+        // Keep stale data visible on transient errors
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -208,7 +217,7 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
         const usage = inv?.usage ?? session.lastUsage;
         const cachePct = cachePercent(usage?.cacheReadTokens, usage?.inputTokens);
 
-        const colors = CAT_SESSION_COLORS[session.catId] ?? DEFAULT_SESSION_COLORS;
+        const colors = colorsForCat(session.catId);
 
         return (
           <div key={session.id} className="mb-2">
@@ -216,14 +225,22 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
               <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
               <span className="text-[9px] font-bold text-green-600 uppercase tracking-wider">Active</span>
             </div>
-            <div className={`rounded-md border-[1.5px] ${colors.border} bg-cafe-surface p-2.5 shadow-sm`}>
+            <div
+              data-testid="session-card-active"
+              data-cat-id={session.catId}
+              className="rounded-md border-[1.5px] bg-cafe-surface p-2.5 shadow-sm"
+              style={{ borderColor: colors.border }}
+            >
               <div className="flex items-center justify-between mb-1">
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs font-semibold text-cafe">Session #{session.seq + 1}</span>
                   <SessionIdTag id={session.cliSessionId ?? session.id} />
                 </div>
                 <span
-                  className={`text-[9px] px-1.5 py-0.5 rounded-full ${colors.badgeBg} ${colors.badgeText} font-medium`}
+                  data-testid="session-badge-active"
+                  data-cat-id={session.catId}
+                  className="text-[9px] px-1.5 py-0.5 rounded-full font-medium"
+                  style={{ backgroundColor: colors.badgeBg, color: colors.badgeText }}
                 >
                   {session.catId}
                 </span>
@@ -261,6 +278,7 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
                   threadId={threadId}
                   catId={session.catId}
                   onBound={() => setRefreshKey((k) => k + 1)}
+                  disabled={isStale}
                 />
               )}
             </div>
@@ -276,11 +294,14 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
           </div>
           <div className="space-y-1">
             {sealedSessions.map((session) => {
-              const sealedColors = CAT_SESSION_COLORS[session.catId] ?? DEFAULT_SESSION_COLORS;
+              const sealedColors = colorsForCat(session.catId);
               return (
                 <div
                   key={session.id}
-                  className={`flex items-center gap-2 rounded border ${sealedColors.border} bg-cafe-surface px-2.5 py-1.5`}
+                  data-testid="session-card-sealed"
+                  data-cat-id={session.catId}
+                  className="flex items-center gap-2 rounded border bg-cafe-surface px-2.5 py-1.5"
+                  style={{ borderColor: sealedColors.border }}
                 >
                   <div
                     className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center ${
@@ -299,7 +320,10 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
                     <div className="flex items-center gap-1.5">
                       <span className="text-[11px] font-medium text-cafe-secondary">Session #{session.seq + 1}</span>
                       <span
-                        className={`text-[9px] px-1 py-0.5 rounded-full ${sealedColors.badgeBg} ${sealedColors.badgeText} font-medium`}
+                        data-testid="session-badge-sealed"
+                        data-cat-id={session.catId}
+                        className="text-[9px] px-1 py-0.5 rounded-full font-medium"
+                        style={{ backgroundColor: sealedColors.badgeBg, color: sealedColors.badgeText }}
                       >
                         {session.catId}
                       </span>
@@ -320,7 +344,7 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
                         <button
                           type="button"
                           className="text-[10px] px-2 py-0.5 rounded border border-cafe text-cafe-secondary hover:bg-cafe-surface-elevated"
-                          onClick={() => onViewSession(session.id)}
+                          onClick={() => onViewSession(session.id, session.catId)}
                         >
                           查看
                         </button>
@@ -331,7 +355,7 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
                         onClick={() => {
                           void handleUnseal(session.id);
                         }}
-                        disabled={unsealingSessionId != null}
+                        disabled={unsealingSessionId != null || isStale}
                       >
                         {unsealingSessionId === session.id ? '解封中…' : '解封'}
                       </button>
@@ -350,7 +374,12 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
           threadId={threadId}
           activeCatIds={activeCatIds}
           onBound={() => setRefreshKey((k) => k + 1)}
+          disabled={isStale}
         />
+      )}
+
+      {isStale && sessions.length > 0 && (
+        <div className="text-[10px] text-cafe-muted text-center py-1 animate-pulse">Refreshing...</div>
       )}
 
       {loading && sessions.length === 0 && (

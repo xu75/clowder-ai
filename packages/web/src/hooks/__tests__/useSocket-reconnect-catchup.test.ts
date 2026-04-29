@@ -6,7 +6,7 @@
  * "server done but local had active invocations" and should trigger
  * requestStreamCatchUp so the user sees the response without F5.
  */
-import EventEmitter from 'node:events';
+import EventEmitter from 'events';
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +36,7 @@ const mockSetIntentMode = vi.fn();
 const mockClearCatStatuses = vi.fn();
 const mockSetStreaming = vi.fn();
 const mockRequestStreamCatchUp = vi.fn();
+const mockClearThreadActiveInvocation = vi.fn();
 const mockGetThreadState = vi.fn(() => ({
   messages: [],
   isLoading: false,
@@ -58,8 +59,10 @@ const mockStoreState = {
   setLoading: mockSetLoading,
   setIntentMode: mockSetIntentMode,
   clearCatStatuses: mockClearCatStatuses,
+  clearThreadCatStatuses: vi.fn(),
   setStreaming: mockSetStreaming,
   requestStreamCatchUp: mockRequestStreamCatchUp,
+  clearThreadActiveInvocation: mockClearThreadActiveInvocation,
   getThreadState: mockGetThreadState,
   // Stubs for other store methods used during connect
   addMessageToThread: vi.fn(),
@@ -77,17 +80,26 @@ const mockStoreState = {
   setThreadIntentMode: vi.fn(),
   setThreadTargetCats: vi.fn(),
   updateThreadCatStatus: vi.fn(),
-  clearThreadActiveInvocation: vi.fn(),
   replaceThreadTargetCats: vi.fn(),
   addActiveInvocation: vi.fn(),
   addThreadActiveInvocation: vi.fn(),
 };
 
+(globalThis as { __mockUseSocketStoreState?: typeof mockStoreState }).__mockUseSocketStoreState = mockStoreState;
+
 vi.mock('@/stores/chatStore', () => {
-  const store = {
-    getState: () => mockStoreState,
-  };
-  return { useChatStore: store };
+  const getState = () =>
+    (globalThis as { __mockUseSocketStoreState?: typeof mockStoreState }).__mockUseSocketStoreState!;
+  const useChatStore = Object.assign(
+    <T>(selector?: (state: typeof mockStoreState) => T) => {
+      const state = getState();
+      return selector ? selector(state) : state;
+    },
+    {
+      getState,
+    },
+  );
+  return { useChatStore };
 });
 
 vi.mock('@/stores/toastStore', () => ({
@@ -136,6 +148,7 @@ describe('useSocket reconnect catch-up (#276 intake)', () => {
     vi.useRealTimers();
     delete (globalThis as { React?: typeof React }).React;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+    delete (globalThis as { __mockUseSocketStoreState?: typeof mockStoreState }).__mockUseSocketStoreState;
   });
 
   beforeEach(() => {
@@ -185,12 +198,14 @@ describe('useSocket reconnect catch-up (#276 intake)', () => {
 
     // Advance past RECONNECT_RECONCILE_DELAY_MS (2000ms)
     await act(async () => {
-      vi.advanceTimersByTime(2500);
-      // Let async apiFetch resolve
-      await vi.runAllTimersAsync();
+      // Bounded advance past RECONNECT_RECONCILE_DELAY_MS (2000ms).
+      // runAllTimersAsync would infinite-loop on the stale-watchdog setInterval.
+      await vi.advanceTimersByTimeAsync(2500);
     });
 
     // Server had no active invocations → stale state cleared → catch-up triggered
+    expect(mockClearThreadActiveInvocation).toHaveBeenCalledWith('thread-1');
+    expect(mockClearAllActiveInvocations).not.toHaveBeenCalled();
     expect(mockRequestStreamCatchUp).toHaveBeenCalledWith('thread-1');
   });
 
@@ -218,8 +233,7 @@ describe('useSocket reconnect catch-up (#276 intake)', () => {
     });
 
     await act(async () => {
-      vi.advanceTimersByTime(2500);
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(2500);
     });
 
     // Server still active → re-hydrate, don't catch-up

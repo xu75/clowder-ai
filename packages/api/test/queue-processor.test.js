@@ -104,6 +104,25 @@ describe('QueueProcessor', () => {
     assert.equal(pausedCall.arguments[2].reason, 'canceled');
   });
 
+  it('canceled_by_user → auto-dequeues and does not emit queue_paused', async () => {
+    deps.queue.enqueue({
+      threadId: 't1',
+      userId: 'u1',
+      content: 'resume after cancel',
+      source: 'user',
+      targetCats: ['opus'],
+      intent: 'execute',
+    });
+
+    await processor.onInvocationComplete('t1', 'opus', 'canceled_by_user');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.ok(deps.invocationTracker.startAll.mock.calls.length > 0, 'user cancel should auto-resume queued work');
+    const emitCalls = deps.socketManager.emitToUser.mock.calls;
+    const pausedCall = emitCalls.find((c) => c.arguments[1] === 'queue_paused');
+    assert.equal(pausedCall, undefined, 'user cancel should not pause the queue');
+  });
+
   it('canceled with processing-only queue → does not emit queue_paused', async () => {
     enqueueEntry(deps.queue);
     // Simulate steer immediate: queued entry is promoted to processing before the canceled cleanup runs.
@@ -115,6 +134,47 @@ describe('QueueProcessor', () => {
     const emitCalls = deps.socketManager.emitToUser.mock.calls;
     const pausedCall = emitCalls.find((c) => c.arguments[1] === 'queue_paused');
     assert.equal(pausedCall, undefined);
+  });
+
+  it('user cancel during queued execution stops broadcasting late agent events', async () => {
+    let controller;
+    deps.invocationTracker.startAll.mock.mockImplementation(() => {
+      controller = new AbortController();
+      return controller;
+    });
+    deps.router.routeExecution = mock.fn(async function* () {
+      yield { type: 'text', catId: 'opus', content: 'before cancel', timestamp: Date.now() };
+      controller.abort('user_cancel');
+      yield { type: 'text', catId: 'opus', content: 'after cancel', timestamp: Date.now() };
+      yield { type: 'done', catId: 'opus', isFinal: true, timestamp: Date.now() };
+    });
+
+    enqueueEntry(deps.queue);
+
+    const result = await processor.processNext('t1', 'u1');
+    assert.equal(result.started, true);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const broadcasts = deps.socketManager.broadcastAgentMessage.mock.calls.map((call) => call.arguments[0]);
+    assert.ok(
+      broadcasts.some((msg) => msg.type === 'text' && msg.content === 'before cancel'),
+      'pre-cancel text should be broadcast',
+    );
+    assert.equal(
+      broadcasts.some((msg) => msg.type === 'text' && msg.content === 'after cancel'),
+      false,
+      'post-cancel text must not be broadcast',
+    );
+    assert.equal(
+      broadcasts.some((msg) => msg.type === 'done' && msg.catId === 'opus'),
+      false,
+      'post-cancel done from the stale producer must not be broadcast',
+    );
+
+    const canceledUpdate = deps.invocationRecordStore.update.mock.calls.find(
+      (call) => call.arguments[1]?.status === 'canceled',
+    );
+    assert.ok(canceledUpdate, 'aborted queued invocation should be recorded as canceled');
   });
 
   it('failed → pauses queue, emits queue_paused', async () => {
@@ -222,6 +282,19 @@ describe('QueueProcessor', () => {
     assert.ok(createCalls.length > 0);
     const createArg = createCalls[0].arguments[0];
     assert.ok(createArg.idempotencyKey.startsWith('queue-'));
+  });
+
+  it('connector-sourced entry uses connector-${messageId} idempotency key', async () => {
+    const entry = enqueueEntry(deps.queue, { source: 'connector' });
+    deps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-conn-1');
+
+    await processor.processNext('t1', 'u1');
+    await new Promise((r) => setTimeout(r, 50));
+
+    const createCalls = deps.invocationRecordStore.create.mock.calls;
+    assert.ok(createCalls.length > 0);
+    const createArg = createCalls[0].arguments[0];
+    assert.strictEqual(createArg.idempotencyKey, 'connector-msg-conn-1');
   });
 
   // ── P1-2 fix: isPaused state tracking ──
@@ -358,19 +431,16 @@ describe('QueueProcessor', () => {
 
   // ── F039 remaining bugfix: queue execution should include contentBlocks ──
 
-  it('executeEntry passes aggregated contentBlocks (messageId + mergedMessageIds) to routeExecution', async () => {
-    const contentBlocks1 = [{ type: 'image', url: 'https://example.com/1.png' }];
-    const contentBlocks2 = [{ type: 'image', url: 'https://example.com/2.png' }];
+  it('executeEntry passes contentBlocks from messageId to routeExecution', async () => {
+    const contentBlocks = [{ type: 'image', url: 'https://example.com/1.png' }];
 
     deps.messageStore.getById = mock.fn(async (id) => {
-      if (id === 'm1') return { id: 'm1', contentBlocks: contentBlocks1 };
-      if (id === 'm2') return { id: 'm2', contentBlocks: contentBlocks2 };
+      if (id === 'm1') return { id: 'm1', contentBlocks };
       return null;
     });
 
     const entry = enqueueEntry(deps.queue);
     deps.queue.backfillMessageId('t1', 'u1', entry.id, 'm1');
-    deps.queue.appendMergedMessageId('t1', 'u1', entry.id, 'm2');
 
     await processor.processNext('t1', 'u1');
     await new Promise((r) => setTimeout(r, 50));
@@ -379,7 +449,7 @@ describe('QueueProcessor', () => {
     const call = deps.router.routeExecution.mock.calls[0];
     const opts = call.arguments[6];
     assert.ok(opts && typeof opts === 'object', 'expected opts object');
-    assert.deepEqual(opts.contentBlocks, [...contentBlocks1, ...contentBlocks2]);
+    assert.deepEqual(opts.contentBlocks, contentBlocks);
   });
 
   it('degrades when messageStore.getById throws: still executes without contentBlocks', async () => {
@@ -881,6 +951,56 @@ describe('QueueProcessor', () => {
       );
     });
 
+    it('replace-mode text overwrites server-side aggregated outbound and streaming content', async () => {
+      const deliverCalls = [];
+      const outboundHook = {
+        deliver: mock.fn(async (threadId, content, catId) => {
+          deliverCalls.push({ threadId, content, catId });
+        }),
+      };
+      const streamingHook = {
+        onStreamStart: mock.fn(async () => {}),
+        onStreamChunk: mock.fn(async () => {}),
+        onStreamEnd: mock.fn(async () => {}),
+        cleanupPlaceholders: mock.fn(async () => {}),
+      };
+
+      const hookDeps = stubDeps({
+        router: {
+          routeExecution: mock.fn(async function* () {
+            yield { type: 'text', catId: 'opus', content: '第一段。第二段。', timestamp: Date.now() };
+            yield {
+              type: 'text',
+              catId: 'opus',
+              content: '第一段。插入一句。第二段。',
+              textMode: 'replace',
+              timestamp: Date.now(),
+            };
+            yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+          }),
+          ackCollectedCursors: mock.fn(async () => {}),
+        },
+        outboundHook,
+        streamingHook,
+        threadMetaLookup: mock.fn(async () => undefined),
+      });
+      const hookProcessor = new QueueProcessor(hookDeps);
+
+      const entry = enqueueEntry(hookDeps.queue);
+      hookDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+      await hookProcessor.processNext('t1', 'u1');
+      await waitFor(() => deliverCalls.length >= 1);
+
+      assert.equal(deliverCalls[0].content, '第一段。插入一句。第二段。');
+      const lastChunkCall = streamingHook.onStreamChunk.mock.calls.at(-1);
+      assert.ok(lastChunkCall, 'streaming hook should receive chunks');
+      assert.equal(lastChunkCall.arguments[1], '第一段。插入一句。第二段。');
+      const endCall = streamingHook.onStreamEnd.mock.calls.at(-1);
+      assert.ok(endCall, 'streaming hook should receive final end');
+      assert.equal(endCall.arguments[1], '第一段。插入一句。第二段。');
+    });
+
     it('multi-cat execution: outboundHook.deliver called per-turn with each catId', async () => {
       const deliverCalls = [];
       const outboundHook = {
@@ -1172,6 +1292,205 @@ describe('QueueProcessor', () => {
 
       assert.equal(batchDoneCalls.length, 1, 'reject callback must also fire notifyDeliveryBatchDone');
       assert.equal(batchDoneCalls[0].threadId, 't1');
+    });
+  });
+
+  // ── F175 Task 5: user-message batching at dequeue ──
+
+  describe('user-message batching (F175)', () => {
+    async function waitForQueue(queue, threadId, userId, predicate, timeoutMs = 2000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (predicate(queue.list(threadId, userId))) return;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error(`waitForQueue timed out after ${timeoutMs}ms`);
+    }
+
+    it('combines adjacent user entries into single routeExecution call', async () => {
+      enqueueEntry(deps.queue, { content: 'msg-a' });
+      enqueueEntry(deps.queue, { content: 'msg-b' });
+      enqueueEntry(deps.queue, { content: 'msg-c' });
+
+      await processor.processNext('t1', 'u1');
+      await waitForQueue(deps.queue, 't1', 'u1', (q) => deps.router.routeExecution.mock.calls.length >= 1);
+
+      assert.equal(deps.router.routeExecution.mock.calls.length, 1, 'should call routeExecution once');
+      const calledContent = deps.router.routeExecution.mock.calls[0].arguments[1];
+      assert.equal(calledContent, 'msg-a\nmsg-b\nmsg-c', 'content should be combined');
+    });
+
+    it('marks all batched entries as processing', async () => {
+      enqueueEntry(deps.queue, { content: 'a' });
+      enqueueEntry(deps.queue, { content: 'b' });
+
+      await processor.processNext('t1', 'u1');
+
+      const remaining = deps.queue.list('t1', 'u1').filter((e) => e.status === 'queued');
+      assert.equal(remaining.length, 0, 'no queued entries should remain after batch');
+    });
+
+    it('does not batch connector entries', async () => {
+      enqueueEntry(deps.queue, { content: 'conn-a', source: 'connector' });
+      enqueueEntry(deps.queue, { content: 'conn-b', source: 'connector' });
+
+      await processor.processNext('t1', 'u1');
+      await waitForQueue(deps.queue, 't1', 'u1', () => deps.router.routeExecution.mock.calls.length >= 1);
+
+      const calledContent = deps.router.routeExecution.mock.calls[0].arguments[1];
+      assert.equal(calledContent, 'conn-a', 'connector entries should not be batched');
+      assert.equal(deps.queue.list('t1', 'u1').filter((e) => e.status === 'queued').length, 1);
+    });
+
+    it('stops batch at different intent', async () => {
+      enqueueEntry(deps.queue, { content: 'exec-a', intent: 'execute' });
+      enqueueEntry(deps.queue, { content: 'search-b', intent: 'search' });
+
+      await processor.processNext('t1', 'u1');
+      await waitForQueue(deps.queue, 't1', 'u1', () => deps.router.routeExecution.mock.calls.length >= 1);
+
+      const calledContent = deps.router.routeExecution.mock.calls[0].arguments[1];
+      assert.equal(calledContent, 'exec-a', 'should only include matching-intent entries');
+    });
+
+    it('removes all batched entries after successful execution', async () => {
+      enqueueEntry(deps.queue, { content: 'a' });
+      enqueueEntry(deps.queue, { content: 'b' });
+      enqueueEntry(deps.queue, { content: 'c' });
+
+      await processor.processNext('t1', 'u1');
+      await waitForQueue(deps.queue, 't1', 'u1', (q) => q.length === 0);
+
+      const all = deps.queue.list('t1', 'u1');
+      assert.equal(all.length, 0, 'all batched entries should be removed after completion');
+    });
+
+    it('P1: failed execution rolls back batched entries instead of dropping them', async () => {
+      const failDeps = stubDeps({
+        router: {
+          routeExecution: mock.fn(async function* () {
+            throw new Error('CLI spawn failed');
+          }),
+          ackCollectedCursors: mock.fn(async () => {}),
+        },
+      });
+      const failProcessor = new QueueProcessor(failDeps);
+
+      enqueueEntry(failDeps.queue, { content: 'primary' });
+      enqueueEntry(failDeps.queue, { content: 'batched-a' });
+      enqueueEntry(failDeps.queue, { content: 'batched-b' });
+
+      await failProcessor.processNext('t1', 'u1');
+      await new Promise((r) => setTimeout(r, 100));
+
+      const remaining = failDeps.queue.list('t1', 'u1');
+      const queued = remaining.filter((e) => e.status === 'queued');
+      assert.ok(queued.length >= 2, `batched entries should be rolled back to queued, got ${queued.length}`);
+      const contents = queued.map((e) => e.content);
+      assert.ok(contents.includes('batched-a'), 'batched-a should be preserved');
+      assert.ok(contents.includes('batched-b'), 'batched-b should be preserved');
+    });
+
+    it('P1-1: batched entries messageIds are markDelivered-ed', async () => {
+      deps.messageStore.markDelivered = mock.fn(async (id) => ({
+        id,
+        content: 'c',
+        catId: null,
+        timestamp: Date.now(),
+        mentions: [],
+        userId: 'u1',
+      }));
+
+      const e1 = enqueueEntry(deps.queue, { content: 'first' });
+      deps.queue.backfillMessageId('t1', 'u1', e1.id, 'm1');
+      const e2 = enqueueEntry(deps.queue, { content: 'second' });
+      deps.queue.backfillMessageId('t1', 'u1', e2.id, 'm2');
+
+      await processor.processNext('t1', 'u1');
+      await waitForQueue(deps.queue, 't1', 'u1', () => deps.messageStore.markDelivered.mock.calls.length >= 2);
+
+      const deliveredIds = deps.messageStore.markDelivered.mock.calls.map((c) => c.arguments[0]);
+      assert.ok(deliveredIds.includes('m1'), 'primary entry messageId should be delivered');
+      assert.ok(deliveredIds.includes('m2'), 'batched entry messageId should be delivered');
+    });
+
+    it('P1-2: connector entry is NOT absorbed into user batch', async () => {
+      enqueueEntry(deps.queue, { content: 'user-msg', source: 'user' });
+      enqueueEntry(deps.queue, { content: 'connector-msg', source: 'connector' });
+
+      await processor.processNext('t1', 'u1');
+      await waitForQueue(deps.queue, 't1', 'u1', () => deps.router.routeExecution.mock.calls.length >= 1);
+
+      const calledContent = deps.router.routeExecution.mock.calls[0].arguments[1];
+      assert.equal(calledContent, 'user-msg', 'connector entry must not be batched into user content');
+      assert.equal(
+        deps.queue.list('t1', 'u1').filter((e) => e.status === 'queued').length,
+        1,
+        'connector entry should remain queued',
+      );
+    });
+
+    it('P2: urgent entry for busy slot does not block lower-priority entry for free slot', async () => {
+      const slowDeps = stubDeps({
+        invocationTracker: {
+          start: mock.fn(() => new AbortController()),
+          startAll: mock.fn(() => new AbortController()),
+          complete: mock.fn(),
+          completeAll: mock.fn(),
+          has: mock.fn((tid, catId) => catId === 'codex'),
+        },
+      });
+      const slowProcessor = new QueueProcessor(slowDeps);
+
+      // urgent entry for codex (slot busy), normal entry for opus (slot free)
+      enqueueEntry(slowDeps.queue, { content: 'urgent-codex', targetCats: ['codex'], priority: 'urgent' });
+      enqueueEntry(slowDeps.queue, { content: 'normal-opus', targetCats: ['opus'], priority: 'normal' });
+
+      // Trigger across-users chain (simulates codex slot completing, then scanning queue)
+      // codex is still busy (has() returns true), opus is free
+      await slowProcessor.onInvocationComplete('t1', 'opus', 'succeeded');
+      await new Promise((r) => setTimeout(r, 100));
+
+      // opus entry should execute despite urgent codex being first in sort order
+      const routeCalls = slowDeps.router.routeExecution.mock.calls;
+      assert.ok(routeCalls.length >= 1, 'should execute free-slot entry');
+      const calledContent = routeCalls[0].arguments[1];
+      assert.equal(calledContent, 'normal-opus', 'should execute opus entry, skipping busy codex');
+
+      // codex entry should remain queued
+      const codexEntries = slowDeps.queue.list('t1', 'u1').filter((e) => e.content === 'urgent-codex');
+      assert.equal(codexEntries.length, 1, 'codex entry should remain');
+      assert.equal(codexEntries[0].status, 'queued', 'codex entry should still be queued');
+    });
+
+    it('P1: duplicate primary does not mark batched entries as processing', async () => {
+      let callCount = 0;
+      const dupeDeps = stubDeps({
+        invocationRecordStore: {
+          create: mock.fn(async () => {
+            callCount++;
+            if (callCount === 1) return { outcome: 'duplicate', invocationId: 'inv-dupe' };
+            return { outcome: 'created', invocationId: `inv-${callCount}` };
+          }),
+          update: mock.fn(async () => {}),
+        },
+      });
+      const dupeProcessor = new QueueProcessor(dupeDeps);
+
+      enqueueEntry(dupeDeps.queue, { content: 'a' });
+      enqueueEntry(dupeDeps.queue, { content: 'b' });
+      enqueueEntry(dupeDeps.queue, { content: 'c' });
+
+      await dupeProcessor.processNext('t1', 'u1');
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Entry 'a' hits duplicate → returns early. With the fix, b and c are NOT
+      // marked processing on the duplicate path. The chain then dequeues b (non-duplicate),
+      // which batches c. So routeExecution sees b+c content, not a+b+c.
+      const routeCalls = dupeDeps.router.routeExecution.mock.calls;
+      assert.ok(routeCalls.length >= 1, 'chain should process remaining entries');
+      const calledContent = routeCalls[0].arguments[1];
+      assert.ok(!calledContent.includes('a'), 'duplicate entry content must not appear in batched execution');
     });
   });
 });

@@ -7,7 +7,14 @@
  * - processNext（用户级）：铲屎官手动触发处理自己的下一条
  */
 
+import { resolveCliTimeoutMs } from '../../../../../utils/cli-timeout.js';
 import type { IMessageStore } from '../../stores/ports/MessageStore.js';
+import {
+  accumulateTextAggregate,
+  accumulateTextParts,
+  flattenTextParts,
+  flattenTurnTextParts,
+} from '../text-aggregation.js';
 import type { InvocationQueue, QueueEntry } from './InvocationQueue.js';
 
 /** Minimal interfaces for deps — avoid importing full types for testability */
@@ -16,7 +23,15 @@ interface TrackerLike {
   start(threadId: string, catId: string, userId: string, catIds?: string[]): AbortController;
   startAll(threadId: string, catIds: string[], userId?: string): AbortController;
   complete(threadId: string, catId: string, controller?: AbortController): void;
+  completeSlot?(threadId: string, catId: string, controller?: AbortController): void;
   completeAll(threadId: string, catIds: string[], controller?: AbortController): void;
+  trackExternalSlot?(
+    threadId: string,
+    catId: string,
+    controller: AbortController,
+    userId?: string,
+    catIds?: string[],
+  ): boolean;
   has(threadId: string, catId?: string): boolean;
 }
 
@@ -65,7 +80,12 @@ export interface OutboundDeliveryHookLike {
 
 /** Minimal streaming outbound interface — avoids importing full StreamingOutboundHook. */
 export interface StreamingOutboundHookLike {
-  onStreamStart(threadId: string, catId: string, invocationId: string): Promise<void>;
+  onStreamStart(
+    threadId: string,
+    catId: string,
+    invocationId: string,
+    senderHint?: { id: string; name?: string },
+  ): Promise<void>;
   onStreamChunk(threadId: string, accumulatedText: string, invocationId: string): Promise<void>;
   onStreamEnd(threadId: string, finalText: string, invocationId: string): Promise<void>;
   cleanupPlaceholders?(threadId: string, invocationId: string): Promise<void>;
@@ -99,21 +119,25 @@ export interface QueueProcessorDeps {
 /** F122B B6: Completion hook — called when a queue entry finishes execution. */
 export type EntryCompleteHook = (
   entryId: string,
-  status: 'succeeded' | 'failed' | 'canceled',
+  status: 'succeeded' | 'failed' | 'canceled' | 'canceled_by_user',
   responseText: string,
 ) => void;
 
 export class QueueProcessor {
   private deps: QueueProcessorDeps;
-  /** F108: Per-slot mutex — prevents concurrent double-start per (thread, cat) pair */
-  private processingSlots = new Set<string>();
+  /** F108: Per-slot mutex — prevents concurrent double-start per (thread, cat) pair.
+   *  F118 D4: Map value = processingStartedAt for zombie detection. */
+  private processingSlots = new Map<string, number>();
   /** F108: Per-slot pause tracking (set on canceled/failed, cleared on next execution) */
   private pausedSlots = new Map<string, 'canceled' | 'failed'>();
   /** F122B B6: Per-entry completion hooks (for multi-mention response aggregation). */
   private entryCompleteHooks = new Map<string, EntryCompleteHook>();
+  /** F118 D4: max age before a processingSlot is considered zombie (default 2.5× CLI timeout = 75min) */
+  private processingSlotTtlMs: number;
 
-  constructor(deps: QueueProcessorDeps) {
+  constructor(deps: QueueProcessorDeps, opts?: { processingSlotTtlMs?: number }) {
     this.deps = deps;
+    this.processingSlotTtlMs = opts?.processingSlotTtlMs ?? 2.5 * resolveCliTimeoutMs(undefined);
   }
 
   /** F088 fix: Late-bind outbound hook (set after gateway bootstrap). */
@@ -151,6 +175,28 @@ export class QueueProcessor {
     return `${threadId}:${catId}`;
   }
 
+  /**
+   * F118 D4: Sweep zombie processingSlots.
+   * A slot is zombie when: age > TTL AND invocationTracker has no active slot for the same key.
+   * The tracker check prevents false-positive cleanup of genuinely slow invocations.
+   */
+  private sweepZombieSlots(threadId: string): void {
+    const prefix = `${threadId}:`;
+    const now = Date.now();
+    const ttl = this.processingSlotTtlMs;
+    for (const [key, startedAt] of this.processingSlots) {
+      if (!key.startsWith(prefix)) continue;
+      if (now - startedAt <= ttl) continue;
+      // Only release if tracker also has no active invocation — double-confirm zombie
+      const parts = key.split(':');
+      const catId = parts.slice(1).join(':');
+      if (!this.deps.invocationTracker.has(threadId, catId)) {
+        this.processingSlots.delete(key);
+        this.deps.log.warn({ threadId, catId, ageMs: now - startedAt }, '[F118 D4] zombie processingSlot released');
+      }
+    }
+  }
+
   /** Check if a slot's queue is paused (canceled/failed AND has queued entries). */
   isPaused(threadId: string, catId?: string): boolean {
     if (catId) {
@@ -186,11 +232,18 @@ export class QueueProcessor {
     return this.deps.queue.hasActiveOrQueuedAgentForCat(threadId, catId);
   }
 
+  /** #555: Cat-specific busy check — covers processingSlots + queue entries for this cat. */
+  isCatBusy(threadId: string, catId: string): boolean {
+    const startedAt = this.processingSlots.get(QueueProcessor.slotKey(threadId, catId));
+    if (startedAt !== undefined && Date.now() - startedAt < this.processingSlotTtlMs) return true;
+    return this.deps.queue.hasQueuedOrProcessingForCat(threadId, catId);
+  }
+
   /** F151: Check if thread has any queued or processing entries (used by delivery-batch-done signal). */
   isThreadBusy(threadId: string): boolean {
     if (this.deps.queue.hasQueuedForThread(threadId)) return true;
     const prefix = `${threadId}:`;
-    for (const key of this.processingSlots) {
+    for (const key of this.processingSlots.keys()) {
       if (key.startsWith(prefix)) return true;
     }
     return false;
@@ -229,14 +282,17 @@ export class QueueProcessor {
   async onInvocationComplete(
     threadId: string,
     catId: string,
-    status: 'succeeded' | 'failed' | 'canceled',
+    status: 'succeeded' | 'failed' | 'canceled' | 'canceled_by_user',
   ): Promise<void> {
     const sk = QueueProcessor.slotKey(threadId, catId);
-    if (status === 'succeeded') {
+    if (status === 'succeeded' || status === 'canceled_by_user') {
       this.pausedSlots.delete(sk);
       if (this.deps.queue.hasQueuedForThread(threadId)) {
         await this.tryExecuteNextAcrossUsers(threadId, catId);
         await this.tryAutoExecute(threadId);
+        if (status === 'canceled_by_user') {
+          this.deps.log.info({ threadId, catId }, 'Auto-resumed queued entry after user cancel');
+        }
       }
     } else {
       // canceled or failed → pause ONLY if there are queued entries to manage.
@@ -304,6 +360,7 @@ export class QueueProcessor {
    * Per-cat slot mutex (processingSlots + invocationTracker) prevents conflicts.
    */
   async tryAutoExecute(threadId: string): Promise<void> {
+    this.sweepZombieSlots(threadId);
     const entries = (this.deps.queue.listAutoExecute?.(threadId) ?? []).sort((a, b) => a.createdAt - b.createdAt);
     if (entries.length > 0) {
       const now = Date.now();
@@ -331,7 +388,7 @@ export class QueueProcessor {
 
       // Guard: markProcessingById may fail if entry was consumed between snapshot and now
       if (!this.deps.queue.markProcessingById(threadId, entry.id)) continue;
-      this.processingSlots.add(sk);
+      this.processingSlots.set(sk, Date.now());
       void this.executeEntry(entry).then(
         (status) => {
           this.processingSlots.delete(sk);
@@ -354,54 +411,46 @@ export class QueueProcessor {
     threadId: string,
     catId: string,
   ): Promise<{ started: boolean; entry?: QueueEntry }> {
-    const sk = QueueProcessor.slotKey(threadId, catId);
-    // Mutex check — per-slot
-    if (this.processingSlots.has(sk)) {
-      return { started: false };
+    this.sweepZombieSlots(threadId);
+
+    // F175: scan by comparator order, skip entries whose target slot is busy
+    const busyCats = new Set<string>();
+    for (;;) {
+      const entry = this.deps.queue.markProcessingAcrossUsers(threadId, busyCats);
+      if (!entry) return { started: false };
+
+      const entryCat = entry.targetCats[0] ?? catId;
+      const entrySk = QueueProcessor.slotKey(threadId, entryCat);
+
+      if (this.processingSlots.has(entrySk) || this.deps.invocationTracker.has(threadId, entryCat)) {
+        this.deps.queue.rollbackProcessing(threadId, entry.id);
+        busyCats.add(entryCat);
+        continue;
+      }
+
+      this.processingSlots.set(entrySk, Date.now());
+      void this.executeEntry(entry).then(
+        (status) => {
+          this.processingSlots.delete(entrySk);
+          this.onInvocationComplete(threadId, entryCat, status).catch(() => {});
+          this.signalDeliveryBatchDone(threadId, status);
+        },
+        () => {
+          this.processingSlots.delete(entrySk);
+          this.onInvocationComplete(threadId, entryCat, 'failed').catch(() => {});
+          this.signalDeliveryBatchDone(threadId, 'failed');
+        },
+      );
+
+      return { started: true, entry };
     }
-
-    const entry = this.deps.queue.markProcessingAcrossUsers(threadId);
-    if (!entry) return { started: false };
-
-    const entryCat = entry.targetCats[0] ?? catId;
-    const entrySk = QueueProcessor.slotKey(threadId, entryCat);
-
-    // F108 P1-2 fix: check the *entry's* cat slot, not just the completing cat's slot
-    if (this.processingSlots.has(entrySk)) {
-      this.deps.queue.rollbackProcessing(threadId, entry.id);
-      return { started: false };
-    }
-    // Fix: skip if cat already has an active invocation via CLI/messages.ts (not in processingSlots).
-    // Without this, the completion chain would start a duplicate executeEntry that preempts the
-    // CLI's invocation (InvocationTracker.start aborts old controller + InvocationRegistry.create
-    // overwrites latestByThreadCat), causing all subsequent CLI callbacks to return stale_ignored.
-    if (this.deps.invocationTracker.has(threadId, entryCat)) {
-      this.deps.queue.rollbackProcessing(threadId, entry.id);
-      return { started: false };
-    }
-
-    this.processingSlots.add(entrySk);
-    // Fire-and-forget execution — chain onInvocationComplete AFTER mutex release
-    void this.executeEntry(entry).then(
-      (status) => {
-        this.processingSlots.delete(entrySk);
-        this.onInvocationComplete(threadId, entryCat, status).catch(() => {});
-        this.signalDeliveryBatchDone(threadId, status);
-      },
-      () => {
-        this.processingSlots.delete(entrySk);
-        this.onInvocationComplete(threadId, entryCat, 'failed').catch(() => {});
-        this.signalDeliveryBatchDone(threadId, 'failed');
-      },
-    );
-
-    return { started: true, entry };
   }
 
   private async tryExecuteNextForUser(
     threadId: string,
     userId: string,
   ): Promise<{ started: boolean; entry?: QueueEntry }> {
+    this.sweepZombieSlots(threadId);
     // F108 P1-3 fix: peek at next entry's target cat to check slot mutex BEFORE marking processing.
     // This prevents entries from getting stuck as 'processing' when the slot is busy.
     const nextEntry = this.deps.queue.peekNextQueued(threadId, userId);
@@ -423,7 +472,7 @@ export class QueueProcessor {
     const entry = this.deps.queue.markProcessing(threadId, userId);
     if (!entry) return { started: false };
 
-    this.processingSlots.add(sk);
+    this.processingSlots.set(sk, Date.now());
     // Fire-and-forget execution — chain onInvocationComplete AFTER mutex release
     void this.executeEntry(entry).then(
       (status) => {
@@ -446,24 +495,32 @@ export class QueueProcessor {
    * Creates InvocationRecord → tracker.start → route execution → complete → cleanup.
    * Returns final status for chain auto-dequeue (called by tryExecuteNext*).
    */
-  private async executeEntry(entry: QueueEntry): Promise<'succeeded' | 'failed' | 'canceled'> {
+  private async executeEntry(entry: QueueEntry): Promise<'succeeded' | 'failed' | 'canceled' | 'canceled_by_user'> {
     const { queue, invocationTracker, invocationRecordStore, router, socketManager, messageStore, log } = this.deps;
-    const { threadId, userId, content, targetCats, intent, messageId } = entry;
+    const { threadId, userId, targetCats, intent, messageId } = entry;
     const primaryCat = targetCats[0] ?? 'unknown';
+
+    const batchedEntryIds: string[] = [];
+    const batchedMessageIds: string[] = [];
+    let content = entry.content;
 
     let controller: AbortController | undefined;
     let invocationId: string | undefined;
-    let finalStatus: 'succeeded' | 'failed' | 'canceled' = 'failed';
+    let finalStatus: 'succeeded' | 'failed' | 'canceled' | 'canceled_by_user' = 'failed';
     let responseText = '';
+    const cursorBoundaries = new Map<string, string>();
 
     try {
-      // 1. Create InvocationRecord
+      // 1. Create InvocationRecord (before batching — avoid claiming entries on duplicate)
+      // Connector-sourced entries use connector-${messageId} to match the direct-execution
+      // idempotency path, so retries after queue processing are also caught persistently.
+      const idempotencyKey = entry.source === 'connector' && messageId ? `connector-${messageId}` : `queue-${entry.id}`;
       const createResult = await invocationRecordStore.create({
         threadId,
         userId,
         targetCats,
         intent,
-        idempotencyKey: `queue-${entry.id}`,
+        idempotencyKey,
       });
 
       if (createResult.outcome === 'duplicate') {
@@ -472,6 +529,26 @@ export class QueueProcessor {
         return 'succeeded';
       }
       invocationId = createResult.invocationId;
+
+      // F175: user-message batching — collect adjacent matching entries
+      // Placed after idempotency check so batched entries aren't dropped on duplicate
+      if (entry.source === 'user') {
+        const batch = queue.collectUserBatch(threadId, userId);
+        const sortedTargets = [...entry.targetCats].sort();
+        const matching = batch.filter(
+          (e) =>
+            e.source === 'user' &&
+            e.intent === entry.intent &&
+            e.targetCats.length === sortedTargets.length &&
+            [...e.targetCats].sort().every((t, i) => t === sortedTargets[i]),
+        );
+        for (const be of matching) {
+          if (!queue.markProcessingById(threadId, be.id)) continue;
+          batchedEntryIds.push(be.id);
+          if (be.messageId) batchedMessageIds.push(be.messageId);
+          content = content + '\n' + be.content;
+        }
+      }
 
       // 2. Start tracking ALL target cats (shared controller for F5/reconnect recovery)
       controller = invocationTracker.startAll(threadId, targetCats, userId);
@@ -500,7 +577,9 @@ export class QueueProcessor {
 
       // F098-D: Mark queued messages as delivered (set deliveredAt = now)
       // F117: Collect full message objects for frontend bubble rendering
-      const allMessageIds: string[] = [messageId ?? '', ...(entry.mergedMessageIds ?? [])].filter(Boolean);
+      const allMessageIds: string[] = [messageId ?? '', ...(entry.mergedMessageIds ?? []), ...batchedMessageIds].filter(
+        Boolean,
+      );
       const deliveredNow = Date.now();
       const deliveredIds: string[] = [];
       const deliveredMessages: Array<{
@@ -543,7 +622,6 @@ export class QueueProcessor {
       }
 
       // 7. Route execution
-      const cursorBoundaries = new Map<string, string>();
       const persistenceContext: { richBlocks?: Array<{ kind: string; [key: string]: unknown }> } = {};
       const collectedTextParts: string[] = [];
 
@@ -557,7 +635,9 @@ export class QueueProcessor {
 
       // F039 remaining: queued image messages must be visible to cats.
       // Aggregate contentBlocks from the stored user messages (messageId + merged).
-      const messageIds: string[] = [messageId ?? '', ...(entry.mergedMessageIds ?? [])].filter(Boolean);
+      const messageIds: string[] = [messageId ?? '', ...(entry.mergedMessageIds ?? []), ...batchedMessageIds].filter(
+        Boolean,
+      );
       const contentBlocks: unknown[] = [];
       for (const id of messageIds) {
         try {
@@ -579,9 +659,11 @@ export class QueueProcessor {
       // F088 fix: start streaming placeholder on external platforms
       let streamStartPromise: Promise<void> | undefined;
       if (this.deps.streamingHook) {
-        streamStartPromise = this.deps.streamingHook.onStreamStart(threadId, primaryCat, invocationId).catch((err) => {
-          log.warn({ err, threadId }, '[QueueProcessor] StreamingHook.onStreamStart failed');
-        });
+        streamStartPromise = this.deps.streamingHook
+          .onStreamStart(threadId, primaryCat, invocationId, entry.senderMeta)
+          .catch((err) => {
+            log.warn({ err, threadId }, '[QueueProcessor] StreamingHook.onStreamStart failed');
+          });
       }
 
       // F151: Mid-loop delivery to preserve ordering (same fix as ConnectorInvokeTrigger)
@@ -609,17 +691,27 @@ export class QueueProcessor {
         threadId,
         messageId,
         targetCats,
-        { intent },
+        { intent, ...(entry.suggestedSkill ? { promptTags: [`skill:${entry.suggestedSkill}`] } : {}) },
         {
           ...(contentBlocks.length > 0 ? { contentBlocks } : {}),
           ...(controller.signal ? { signal: controller.signal } : {}),
           queueHasQueuedMessages: (tid: string) => queue.hasQueuedUserMessagesForThread(tid),
           hasQueuedOrActiveAgentForCat: (tid: string, catId: string) => queue.hasActiveOrQueuedAgentForCat(tid, catId),
+          invocationController: controller,
+          trackA2ASlot: (tid: string, catId: string, uid: string, ctrl: AbortController) => {
+            invocationTracker.trackExternalSlot?.(tid, catId, ctrl, uid, [catId]);
+          },
+          completeA2ASlots: (tid: string, catIds: readonly string[], ctrl: AbortController) => {
+            for (const catId of catIds) invocationTracker.completeSlot?.(tid, catId, ctrl);
+          },
           cursorBoundaries,
           persistenceContext,
           ...(invocationId ? { parentInvocationId: invocationId } : {}),
         },
       )) {
+        if (controller.signal.aborted) {
+          break;
+        }
         // #768: Broadcast intent_mode on first CLI event — proves CLI is alive.
         if (!intentModeBroadcast) {
           socketManager.broadcastToRoom(`thread:${threadId}`, 'intent_mode', {
@@ -631,7 +723,14 @@ export class QueueProcessor {
           intentModeBroadcast = true;
         }
         if (hook && msg.catId === primaryCat && msg.type === 'text' && (msg as { content?: string }).content) {
-          responseText += (msg as { content?: string }).content;
+          responseText = accumulateTextAggregate(
+            responseText,
+            (msg as { content?: string }).content!,
+            (msg as { textMode?: 'append' | 'replace' }).textMode,
+          );
+        }
+        if ((msg.type === 'done' || msg.type === 'error') && msg.catId) {
+          invocationTracker.completeSlot?.(threadId, msg.catId, controller);
         }
 
         // F088 fix: collect per-turn content for outbound delivery
@@ -685,20 +784,26 @@ export class QueueProcessor {
         }
         if (msg.type === 'text' && typeof (msg as Record<string, unknown>).content === 'string') {
           const textContent = (msg as Record<string, unknown>).content as string;
-          collectedTextParts.push(textContent);
+          const textMode = (msg as { textMode?: 'append' | 'replace' }).textMode;
+          accumulateTextParts(collectedTextParts, textContent, textMode);
           if (msg.catId) {
             if (msg.catId !== currentTurnCatId) {
               outboundTurns.push({ catId: msg.catId, textParts: [] });
               currentTurnCatId = msg.catId;
             }
-            outboundTurns[outboundTurns.length - 1].textParts.push(textContent);
+            const turn = outboundTurns[outboundTurns.length - 1];
+            accumulateTextParts(turn.textParts, textContent, textMode);
           }
           if (this.deps.streamingHook) {
-            const accumulated = collectedTextParts.join('');
+            const accumulated =
+              outboundTurns.length > 0 ? flattenTurnTextParts(outboundTurns) : flattenTextParts(collectedTextParts);
             this.deps.streamingHook.onStreamChunk(threadId, accumulated, invocationId).catch((err) => {
               log.warn({ err, threadId }, '[QueueProcessor] StreamingHook.onStreamChunk failed');
             });
           }
+        }
+        if (controller.signal.aborted) {
+          break;
         }
 
         socketManager.broadcastAgentMessage({ ...msg, ...(invocationId ? { invocationId } : {}) }, threadId);
@@ -707,9 +812,13 @@ export class QueueProcessor {
       // 8. Check abort before marking succeeded (F122B B6 P1: abort→succeeded bug fix)
       if (controller.signal.aborted) {
         log.info({ threadId, entryId: entry.id }, '[QueueProcessor] Entry aborted during execution');
+        // F148 fix: ack cursors for cats that completed before abort (monotonic CAS, safe to call)
+        if (cursorBoundaries.size > 0) {
+          await router.ackCollectedCursors(userId, threadId, cursorBoundaries);
+        }
         await invocationRecordStore.update(invocationId, { status: 'canceled' });
-        finalStatus = 'canceled';
-        return 'canceled';
+        finalStatus = controller.signal.reason === 'user_cancel' ? 'canceled_by_user' : 'canceled';
+        return finalStatus;
       }
 
       // 9. Ack cursors + mark succeeded
@@ -738,6 +847,14 @@ export class QueueProcessor {
       return 'succeeded';
     } catch (err) {
       log.error({ threadId, entryId: entry.id, err }, '[QueueProcessor] executeEntry failed');
+      // F148 fix: ack cursors for cats that completed before the exception
+      if (cursorBoundaries.size > 0) {
+        try {
+          await router.ackCollectedCursors(userId, threadId, cursorBoundaries);
+        } catch {
+          /* best-effort — don't mask the original error */
+        }
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       // Best-effort: mark record failed + broadcast error
       try {
@@ -766,6 +883,16 @@ export class QueueProcessor {
       // Always cleanup tracker + queue (all target cat slots)
       invocationTracker.completeAll(threadId, targetCats, controller);
       queue.removeProcessedAcrossUsers(threadId, entry.id);
+      // F175: on success remove batched entries; on failure/cancel rollback so they can retry
+      if (finalStatus === 'succeeded') {
+        for (const bid of batchedEntryIds) {
+          queue.removeProcessedAcrossUsers(threadId, bid);
+        }
+      } else {
+        for (const bid of batchedEntryIds) {
+          queue.rollbackProcessing(threadId, bid);
+        }
+      }
       socketManager.emitToUser(userId, 'queue_updated', {
         threadId,
         queue: queue.list(threadId, userId),
@@ -807,7 +934,8 @@ export class QueueProcessor {
     deliveredTurnIndices?: Set<number>,
     preResolvedMeta?: ThreadMetaLike | undefined,
   ): Promise<void> {
-    const finalContent = collectedTextParts.join('');
+    const finalContent =
+      outboundTurns.length > 0 ? flattenTurnTextParts(outboundTurns) : flattenTextParts(collectedTextParts);
 
     // Finalize streaming — ensure start completed before ending
     if (this.deps.streamingHook) {

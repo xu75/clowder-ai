@@ -1,7 +1,6 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import type { CatData } from '@/hooks/useCatData';
+import { type CatData, formatCatName } from '@/hooks/useCatData';
 import { useCoCreatorConfig } from '@/hooks/useCoCreatorConfig';
 import { useTts } from '@/hooks/useTts';
 import { hexToRgba, tintedLight } from '@/lib/color-utils';
@@ -9,20 +8,23 @@ import { getMentionRe, getMentionToCat } from '@/lib/mention-highlight';
 import { parseDirection } from '@/lib/parse-direction';
 import { type ChatMessage as ChatMessageType, resolveBubbleExpanded, useChatStore } from '@/stores/chatStore';
 import { CatAvatar } from './CatAvatar';
+import { CollapsibleMarkdown } from './CollapsibleMarkdown';
 import { ConnectorBubble } from './ConnectorBubble';
 import { ContentBlocks } from './ContentBlocks';
+import { CopyIdButton } from './CopyIdButton';
 import { CliOutputBlock } from './cli-output/CliOutputBlock';
 import { toCliEvents } from './cli-output/toCliEvents';
 import { DirectionPill } from './DirectionPill';
 import { EvidencePanel } from './EvidencePanel';
 import { GovernanceBlockedCard } from './GovernanceBlockedCard';
-import { MarkdownContent } from './MarkdownContent';
 import { MetadataBadge } from './MetadataBadge';
 import { ReplyPill } from './ReplyPill';
 import { BriefingCard } from './rich/BriefingCard';
 import { RichBlocks } from './rich/RichBlocks';
 import { SummaryCard } from './SummaryCard';
+import { SystemNoticeBar } from './SystemNoticeBar';
 import { ThinkingContent } from './ThinkingContent';
+import { pushThreadRouteWithHistory } from './ThreadSidebar/thread-navigation';
 import { TimeoutDiagnosticsPanel } from './TimeoutDiagnosticsPanel';
 import { TtsPlayButton } from './TtsPlayButton';
 
@@ -33,10 +35,14 @@ const BREED_STYLES: Record<string, { radius: string; font?: string }> = {
   'dragon-li': { radius: 'rounded-lg rounded-tl-sm', font: 'font-mono' },
 };
 const DEFAULT_BREED_STYLE = { radius: 'rounded-2xl' };
+const SCHEDULER_ACCENT_BADGE_CLASS =
+  'inline-flex w-fit items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 shadow-sm';
+const SCHEDULER_ACCENT_BUBBLE_CLASS =
+  'border-amber-300 bg-amber-50/70 ring-1 ring-amber-200 shadow-[0_10px_24px_rgba(217,119,6,0.16)] bg-gradient-to-b from-amber-50/60 to-transparent';
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
-  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 const DELIVERED_AT_GAP_THRESHOLD = 5000;
@@ -48,6 +54,15 @@ function formatDualTime(timestamp: number, deliveredAt?: number): string {
   return `发送 ${formatTime(timestamp)} · 收到 ${formatTime(deliveredAt)}`;
 }
 
+function isSchedulerReplyPreview(replyPreview?: ChatMessageType['replyPreview']): boolean {
+  return replyPreview?.senderCatId === 'system' && replyPreview.kind === 'scheduler_trigger';
+}
+
+function isConnectorSystemNotice(message: ChatMessageType): boolean {
+  if (message.type !== 'connector' || !message.source?.meta) return false;
+  return (message.source.meta as Record<string, unknown>).presentation === 'system_notice';
+}
+
 interface ChatMessageProps {
   message: ChatMessageType;
   getCatById: (id: string) => CatData | undefined;
@@ -55,9 +70,11 @@ interface ChatMessageProps {
 
 export function ChatMessage({ message, getCatById }: ChatMessageProps) {
   const coCreator = useCoCreatorConfig();
-  const router = useRouter();
   const { state: ttsState, synthesize: ttsSynthesize, activeMessageId } = useTts();
+  const currentThreadId = useChatStore((s) => s.currentThreadId);
+  const isLoadingThreads = useChatStore((s) => s.isLoadingThreads);
   const threads = useChatStore((s) => s.threads);
+  const threadMessages = useChatStore((s) => s.messages);
   const globalBubbleDefaults = useChatStore((s) => s.globalBubbleDefaults);
   const isUser = message.type === 'user' && !message.catId;
   const isSystem = message.type === 'system';
@@ -68,10 +85,7 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
   const catStyle = catData
     ? (() => {
         const breed = BREED_STYLES[catData.breedId ?? ''] ?? DEFAULT_BREED_STYLE;
-        const idLabel = catData.id.charAt(0).toUpperCase() + catData.id.slice(1);
-        const label = catData.variantLabel
-          ? `${catData.displayName}（${catData.variantLabel}）`
-          : `${catData.displayName}（${idLabel}）`;
+        const label = formatCatName(catData);
         const isCallback = message.origin === 'callback';
         return {
           label,
@@ -83,10 +97,24 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
       })()
     : null;
   const currentThread = useChatStore((s) => s.threads.find((t) => t.id === s.currentThreadId));
+  const bubbleRestorePending = isLoadingThreads && !!currentThreadId && !currentThread;
   const hasBlocks = message.contentBlocks && message.contentBlocks.length > 0;
   const hasTextContent = message.content.trim().length > 0;
   const isWhisper = message.visibility === 'whisper';
   const isRevealed = isWhisper && !!message.revealedAt;
+  const isSchedulerReply = isSchedulerReplyPreview(message.replyPreview);
+  const showSchedulerAccent =
+    isSchedulerReply &&
+    !threadMessages.some((candidate) => {
+      if (candidate.id === message.id) return false;
+      if (candidate.replyTo !== message.replyTo) return false;
+      if (candidate.catId !== message.catId) return false;
+      if (!isSchedulerReplyPreview(candidate.replyPreview)) return false;
+      if (candidate.timestamp !== message.timestamp) {
+        return candidate.timestamp < message.timestamp;
+      }
+      return candidate.id < message.id;
+    });
 
   const direction = catData ? parseDirection(message, () => ({ toCat: getMentionToCat(), re: getMentionRe() })) : null;
 
@@ -171,6 +199,9 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
   }
 
   if (isConnector && message.source) {
+    if (isConnectorSystemNotice(message)) {
+      return <SystemNoticeBar message={message} />;
+    }
     return <ConnectorBubble message={message} />;
   }
 
@@ -178,7 +209,7 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
     const coCreatorPrimary = coCreator.color?.primary ?? '#815b5b';
     const coCreatorSecondary = coCreator.color?.secondary ?? '#FFDDD2';
     return (
-      <div data-message-id={message.id} className="flex justify-end gap-2 mb-4 items-start">
+      <div data-message-id={message.id} className="group flex justify-end gap-2 mb-4 items-start">
         <div className="max-w-[75%]">
           <div className="flex justify-end items-center gap-2 mb-1">
             {isWhisper && (
@@ -188,10 +219,11 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
                 {isRevealed ? '已揭秘' : `悄悄话 → ${message.whisperTo?.join(', ') ?? ''}`}
               </span>
             )}
-            {message.replyTo && message.replyPreview && (
+            {message.replyTo && message.replyPreview && !isSchedulerReply && (
               <ReplyPill replyPreview={message.replyPreview} replyToId={message.replyTo} getCatById={getCatById} />
             )}
             <span className="text-xs text-cafe-muted">{formatDualTime(message.timestamp, message.deliveredAt)}</span>
+            <CopyIdButton messageId={message.id} />
             <span className="text-xs font-semibold" style={{ color: coCreatorPrimary }}>
               {coCreator.name}
             </span>
@@ -212,7 +244,7 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
             {hasBlocks ? (
               <ContentBlocks blocks={message.contentBlocks!} />
             ) : (
-              <MarkdownContent content={message.content} />
+              <CollapsibleMarkdown content={message.content} />
             )}
           </div>
         </div>
@@ -266,6 +298,7 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
                 {catStyle.label}
               </span>
               <span className="text-xs text-cafe-muted">{formatTime(message.timestamp)}</span>
+              <CopyIdButton messageId={message.id} />
               {isWhisper && (
                 <span
                   className={`text-xs px-1.5 py-0.5 rounded ${isRevealed ? 'bg-cafe-surface-elevated text-cafe-secondary' : 'bg-amber-100 text-amber-600'}`}
@@ -283,7 +316,7 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
                 </span>
               )}
               {!isWhisper && direction && <DirectionPill direction={direction} getCatById={getCatById} />}
-              {message.replyTo && message.replyPreview && (
+              {message.replyTo && message.replyPreview && !isSchedulerReply && (
                 <ReplyPill replyPreview={message.replyPreview} replyToId={message.replyTo} getCatById={getCatById} />
               )}
               {hasTextContent && !message.isStreaming && (
@@ -297,6 +330,12 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
                 />
               )}
             </div>
+            {showSchedulerAccent && (
+              <div className={SCHEDULER_ACCENT_BADGE_CLASS}>
+                <span aria-hidden>⏰</span>
+                <span>定时提醒</span>
+              </div>
+            )}
             {message.extra?.crossPost &&
               (() => {
                 const sourceId = message.extra.crossPost?.sourceThreadId;
@@ -309,7 +348,7 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      router.push(`/thread/${sourceId}`);
+                      pushThreadRouteWithHistory(sourceId, typeof window !== 'undefined' ? window : undefined);
                     }}
                     className="inline-flex items-center gap-1.5 border px-3 py-1 rounded-full bg-[#FDF6ED] border-[#E8DCCF] text-[#8D6E63] hover:bg-[#F5EDE0] transition-colors cursor-pointer w-fit max-w-full"
                     title={sourceId}
@@ -330,12 +369,12 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
         <div
           className={`border px-4 py-3 transition-transform hover:-translate-y-0.5 overflow-hidden ${
             catStyle ? `${catStyle.radius} ${catStyle.font ?? ''}` : 'bg-cafe-surface border-cafe rounded-2xl'
-          }`}
+          } ${showSchedulerAccent ? SCHEDULER_ACCENT_BUBBLE_CLASS : ''}`}
           style={
             catStyle
               ? {
                   backgroundColor: catStyle.bgColor,
-                  borderColor: catStyle.borderColor,
+                  ...(!showSchedulerAccent ? { borderColor: catStyle.borderColor } : {}),
                 }
               : undefined
           }
@@ -343,7 +382,7 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
           {hasCliBlock && isStreamOrigin ? null : !isStreamOrigin && hasBlocks ? (
             <ContentBlocks blocks={message.contentBlocks!} />
           ) : !isStreamOrigin && hasTextContent ? (
-            <MarkdownContent content={message.content} className={catStyle?.font} />
+            <CollapsibleMarkdown content={message.content} className={catStyle?.font} />
           ) : message.isStreaming ? (
             <span className="text-xs text-cafe-secondary">Thinking...</span>
           ) : null}
@@ -352,7 +391,11 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
               content={message.thinking}
               className={catStyle?.font}
               label="Thinking"
-              defaultExpanded={resolveBubbleExpanded(currentThread?.bubbleThinking, globalBubbleDefaults.thinking)}
+              defaultExpanded={
+                bubbleRestorePending
+                  ? false
+                  : resolveBubbleExpanded(currentThread?.bubbleThinking, globalBubbleDefaults.thinking)
+              }
               expandInExport={false}
               breedColor={catData?.color.primary}
             />
@@ -362,12 +405,21 @@ export function ChatMessage({ message, getCatById }: ChatMessageProps) {
               events={cliEvents}
               status={cliStatus}
               thinkingMode={currentThread?.thinkingMode}
-              defaultExpanded={resolveBubbleExpanded(currentThread?.bubbleCli, globalBubbleDefaults.cliOutput)}
+              defaultExpanded={
+                bubbleRestorePending
+                  ? false
+                  : resolveBubbleExpanded(currentThread?.bubbleCli, globalBubbleDefaults.cliOutput)
+              }
               breedColor={catData?.color.primary}
             />
           )}
           {message.extra?.rich?.blocks && message.extra.rich.blocks.length > 0 && (
-            <RichBlocks blocks={message.extra.rich.blocks} catId={message.catId} messageId={message.id} />
+            <RichBlocks
+              blocks={message.extra.rich.blocks}
+              catId={message.catId}
+              messageId={message.id}
+              messageSource={message.source}
+            />
           )}
           {message.isStreaming && !isStreamOrigin && (
             <span className="inline-block w-1.5 h-4 bg-current animate-pulse ml-0.5 rounded-full opacity-50" />

@@ -1,6 +1,7 @@
 'use client';
 
 import type { CatStatusType, ThreadState } from '@/stores/chat-types';
+import { PawIcon } from './icons/PawIcon';
 
 /**
  * ASCII cat status indicator for thread sidebar.
@@ -11,7 +12,7 @@ function aggregateStatus(ts: ThreadState): 'idle' | 'working' | 'done' | 'error'
   const statuses = Object.values(ts.catStatuses);
   if (statuses.length === 0) return 'idle';
   if (statuses.some((s) => s === 'error')) return 'error';
-  if (statuses.some((s) => s === 'streaming' || s === 'pending')) return 'working';
+  if (statuses.some((s) => s === 'streaming' || s === 'pending' || s === 'spawning')) return 'working';
   if (statuses.some((s) => s === 'done')) return 'done';
   return 'idle';
 }
@@ -45,8 +46,8 @@ export function ThreadCatStatus({
       )}
       {status === 'done' && <span className="text-green-500 text-[10px]">&#10003;</span>}
       {hasUserMention && (
-        <span className="text-[11px]" title="猫猫 @ 了你">
-          🐾
+        <span title="猫猫 @ 了你">
+          <PawIcon className="text-xs" />
         </span>
       )}
       {unreadCount > 0 && (
@@ -67,7 +68,7 @@ export function getCatStatusType(catStatuses: Record<string, CatStatusType>): 'i
   const statuses = Object.values(catStatuses);
   if (statuses.length === 0) return 'idle';
   if (statuses.some((s) => s === 'error')) return 'error';
-  if (statuses.some((s) => s === 'streaming' || s === 'pending')) return 'working';
+  if (statuses.some((s) => s === 'streaming' || s === 'pending' || s === 'spawning')) return 'working';
   if (statuses.some((s) => s === 'done')) return 'done';
   return 'idle';
 }

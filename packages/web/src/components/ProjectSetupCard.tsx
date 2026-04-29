@@ -4,8 +4,11 @@
  * Three options: clone repo / git init / skip git.
  * Separate from GovernanceBlockedCard (which handles dispatch-failure retry).
  */
+import Image from 'next/image';
 import { useCallback, useState } from 'react';
+import { useIMEGuard } from '@/hooks/useIMEGuard';
 import { apiFetch } from '@/utils/api-client';
+import { HubIcon } from './hub-icons';
 
 /* Anime-style cat illustrations generated via Gemini */
 
@@ -39,6 +42,7 @@ export function ProjectSetupCard({
   const [state, setState] = useState<CardState>('idle');
   const [cloneUrl, setCloneUrl] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const ime = useIMEGuard();
 
   const dirName = projectPath.split(/[/\\]/).pop() ?? projectPath;
 
@@ -87,11 +91,12 @@ export function ProjectSetupCard({
           className={`max-w-[85%] w-full rounded-lg border p-4 ${state === 'done' ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'}`}
         >
           <div className="flex items-center gap-4">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
+            <Image
               src={state === 'done' ? '/images/setup-cat-done.png' : '/images/setup-cat-working.png'}
               alt={state === 'done' ? '完成' : '工作中'}
-              className="w-20 h-20 flex-shrink-0 object-contain"
+              width={80}
+              height={80}
+              className="flex-shrink-0 object-contain"
             />
             <div className="flex-1 min-w-0">
               <p className={`text-sm font-medium ${state === 'done' ? 'text-green-800' : 'text-amber-800'}`}>
@@ -124,8 +129,13 @@ export function ProjectSetupCard({
       <div className="max-w-[85%] w-full rounded-lg border border-cocreator-primary/20 bg-cocreator-bg/30 p-5">
         {/* Header */}
         <div className="flex items-center gap-4 mb-4">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/images/setup-cat-idle.png" alt="设置" className="w-20 h-20 flex-shrink-0 object-contain" />
+          <Image
+            src="/images/setup-cat-idle.png"
+            alt="设置"
+            width={80}
+            height={80}
+            className="flex-shrink-0 object-contain"
+          />
           <div>
             <p className="text-sm font-medium text-cafe-black">发现了一片新大陆！</p>
             <p className="text-xs text-gray-500 mt-0.5">
@@ -152,7 +162,7 @@ export function ProjectSetupCard({
             {isEmptyDir && gitAvailable && !isGitRepo && (
               <div className="rounded-xl ring-1 ring-cocreator-primary/30 p-4 hover:bg-cocreator-primary/[0.03] transition-colors">
                 <div className="flex items-center gap-3 mb-2.5">
-                  <span className="text-lg">🐱</span>
+                  <HubIcon name="folder" className="h-5 w-5 text-cocreator-primary" />
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-semibold text-cafe-black">克隆 Git 仓库</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-cocreator-primary/10 text-cocreator-primary font-medium">
@@ -166,10 +176,16 @@ export function ProjectSetupCard({
                     type="text"
                     value={cloneUrl}
                     onChange={(e) => setCloneUrl(e.target.value)}
+                    onCompositionStart={ime.onCompositionStart}
+                    onCompositionEnd={ime.onCompositionEnd}
                     placeholder="https:// 或 git@..."
                     className="flex-1 text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-1 focus:ring-cocreator-primary"
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.nativeEvent.isComposing && cloneUrl.trim()) handleSetup('clone');
+                      if (e.key === 'Enter' && ime.isComposing()) {
+                        e.preventDefault();
+                        return;
+                      }
+                      if (e.key === 'Enter' && cloneUrl.trim()) handleSetup('clone');
                     }}
                   />
                   <button
@@ -178,7 +194,7 @@ export function ProjectSetupCard({
                     disabled={!cloneUrl.trim()}
                     className="min-w-[6.5rem] px-4 py-2 rounded-lg bg-cocreator-primary hover:bg-cocreator-dark text-white text-xs font-medium transition-colors disabled:opacity-40"
                   >
-                    🐾 立即拉取
+                    立即拉取
                   </button>
                 </div>
               </div>
@@ -188,7 +204,7 @@ export function ProjectSetupCard({
             {gitAvailable && !isGitRepo && (
               <div className="rounded-xl ring-1 ring-cocreator-primary/30 p-4 hover:bg-cocreator-primary/[0.03] transition-colors">
                 <div className="flex items-center gap-3">
-                  <span className="text-lg">🐾</span>
+                  <HubIcon name="terminal" className="h-5 w-5 text-cocreator-primary" />
                   <div className="flex-1">
                     <span className="text-sm font-semibold text-cafe-black">初始化全新项目</span>
                     <p className="text-[11px] text-gray-500 mt-0.5">从零开始，为你铺设标准的协作规则和猫砂盆。</p>
@@ -198,7 +214,7 @@ export function ProjectSetupCard({
                     onClick={() => handleSetup('init')}
                     className="min-w-[6.5rem] px-4 py-2 rounded-lg bg-cocreator-primary hover:bg-cocreator-dark text-white text-xs font-medium transition-colors"
                   >
-                    🐾 初始化
+                    初始化
                   </button>
                 </div>
               </div>
@@ -207,7 +223,7 @@ export function ProjectSetupCard({
             {/* Option 3: Skip git */}
             <div className="rounded-xl ring-1 ring-cocreator-primary/30 p-4 hover:bg-cocreator-primary/[0.03] transition-colors">
               <div className="flex items-center gap-3">
-                <span className="text-lg">😺</span>
+                <HubIcon name="settings" className="h-5 w-5 text-cocreator-primary" />
                 <div className="flex-1">
                   <span className="text-sm font-semibold text-cafe-black">
                     {isGitRepo ? '初始化协作配置' : '跳过 Git，仅初始化协作'}
@@ -221,7 +237,7 @@ export function ProjectSetupCard({
                   onClick={() => handleSetup('skip')}
                   className="min-w-[6.5rem] px-4 py-2 rounded-lg bg-cocreator-primary hover:bg-cocreator-dark text-white text-xs font-medium transition-colors"
                 >
-                  🐾 {isGitRepo ? '初始化' : '跳过'}
+                  {isGitRepo ? '初始化' : '跳过'}
                 </button>
               </div>
             </div>

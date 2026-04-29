@@ -1,7 +1,7 @@
 import type { GameView } from '@cat-cafe/shared';
 import { useMemo } from 'react';
 import type { SocketCallbacks } from '@/hooks/useSocket';
-import { useChatStore } from '@/stores/chatStore';
+import { type Thread, useChatStore } from '@/stores/chatStore';
 import { useGameStore } from '@/stores/gameStore';
 import { type TaskItem, useTaskStore } from '@/stores/taskStore';
 
@@ -14,6 +14,7 @@ interface ExternalDeps {
   handleAuthRequest: NonNullable<SocketCallbacks['onAuthorizationRequest']>;
   handleAuthResponse: NonNullable<SocketCallbacks['onAuthorizationResponse']>;
   onNavigateToThread?: (threadId: string) => void;
+  onIndexEvent?: SocketCallbacks['onIndexEvent'];
 }
 
 /**
@@ -29,6 +30,7 @@ export function useChatSocketCallbacks({
   handleAuthRequest,
   handleAuthResponse,
   onNavigateToThread,
+  onIndexEvent,
 }: ExternalDeps): SocketCallbacks {
   const {
     updateThreadTitle,
@@ -52,6 +54,13 @@ export function useChatSocketCallbacks({
       onThreadUpdated: (data) => {
         if (data.title !== undefined) updateThreadTitle(data.threadId, data.title);
         if (data.participants !== undefined) updateThreadParticipants(data.threadId, data.participants);
+        if (data.bootcampState !== undefined) {
+          useChatStore.setState((state) => ({
+            threads: state.threads.map((t) =>
+              t.id === data.threadId ? { ...t, bootcampState: data.bootcampState as Thread['bootcampState'] } : t,
+            ),
+          }));
+        }
       },
       onIntentMode: (data) => {
         // Socket layer (useSocket) already applies dual-pointer guard + background routing.
@@ -60,6 +69,13 @@ export function useChatSocketCallbacks({
         setHasActiveInvocation(true);
         setIntentMode(data.mode as 'ideate' | 'execute');
         setTargetCats((data as { targetCats?: string[] }).targetCats ?? []);
+      },
+      onSpawnStarted: (data) => {
+        // F118 D2: Earliest signal — fires before intent_mode.
+        // Per-cat setCatStatus('spawning') is handled by the socket layer.
+        setLoading(true);
+        setHasActiveInvocation(true);
+        setTargetCats(data.targetCats ?? []);
       },
       onTaskCreated: (task) => {
         const t = task as Record<string, unknown>;
@@ -97,6 +113,9 @@ export function useChatSocketCallbacks({
           onNavigateToThread?.(data.gameThreadId);
         }
       },
+      // B-5: Guide events now flow directly from useSocket → guideStore.reduceServerEvent
+      // (CustomEvent bridge removed — no onGuideStart/onGuideControl/onGuideComplete needed)
+      onIndexEvent,
     }),
     [
       handleAgentMessage,
@@ -115,6 +134,7 @@ export function useChatSocketCallbacks({
       handleAuthRequest,
       handleAuthResponse,
       onNavigateToThread,
+      onIndexEvent,
       threadId,
       userId,
     ],

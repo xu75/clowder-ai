@@ -1,12 +1,18 @@
 'use client';
 
-import { useCallback, useEffect, useRef } from 'react';
+import type { ReplyPreview, SchedulerMessageExtra } from '@cat-cafe/shared';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { getBubbleInvocationId, shouldForceReplaceHydrationForCachedMessages } from '@/debug/bubbleIdentity';
 import { recordDebugEvent } from '@/debug/invocationEventDebug';
 import type { QueueEntry, TaskProgressItem } from '@/stores/chat-types';
 import { type CatInvocationInfo, type ChatMessage as ChatMessageData, useChatStore } from '@/stores/chatStore';
+import type { TaskItem } from '@/stores/taskStore';
 import { useTaskStore } from '@/stores/taskStore';
 import { apiFetch } from '@/utils/api-client';
+import {
+  loadThreadMessages as loadCachedMessages,
+  saveThreadMessages as saveMessagesSnapshot,
+} from '@/utils/offline-store';
 
 type SavedScrollState = {
   top: number;
@@ -16,8 +22,14 @@ type SavedScrollState = {
 // clowder-ai#27: route navigation remounts the page, so scroll memory must live
 // outside React refs to survive /thread/A → /thread/B → /thread/A.
 const scrollPositionsByThread = new Map<string, SavedScrollState>();
+const taskCacheByThread = new Map<string, TaskItem[]>();
 const SCROLL_BOTTOM_THRESHOLD_PX = 24;
 const MAX_RESTORE_FRAMES = 90;
+const CHAT_LAYOUT_CHANGED_EVENT = 'catcafe:chat-layout-changed';
+
+export function __resetTaskCacheForTest() {
+  taskCacheByThread.clear();
+}
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.clientHeight - el.scrollTop <= SCROLL_BOTTOM_THRESHOLD_PX;
@@ -34,9 +46,6 @@ const HISTORY_PAGE_SIZE = 50;
 // In export mode (?export=true), load all messages in one request for screenshot capture.
 // Normal browsing still uses 50-per-page pagination.
 const EXPORT_LIMIT = 10000;
-// Keep first-screen message priority, but don't let secondary hydration stall indefinitely.
-const SECONDARY_HYDRATION_FALLBACK_MS = 300;
-
 function isAbortError(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'name' in err && (err as { name?: string }).name === 'AbortError';
 }
@@ -51,6 +60,9 @@ type ReplaceHydrationMergeResult = {
   messages: ChatMessageData[];
   stats: ReplaceHydrationMergeStats;
 };
+
+type MessageExtra = NonNullable<ChatMessageData['extra']>;
+type MessageRichPayload = MessageExtra['rich'];
 
 function getHistoryInvocationId(msg: ChatMessageData): string | undefined {
   return getBubbleInvocationId(msg);
@@ -83,6 +95,61 @@ function getMessagePhasePriority(msg: ChatMessageData): number {
   return 0;
 }
 
+function pickLongerText(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a.length >= b.length ? a : b;
+}
+
+function pickRicherToolEvents(
+  a: ChatMessageData['toolEvents'],
+  b: ChatMessageData['toolEvents'],
+): ChatMessageData['toolEvents'] {
+  if (!a?.length) return b;
+  if (!b?.length) return a;
+  return a.length >= b.length ? a : b;
+}
+
+function mergeRichPayload(
+  preferred: MessageRichPayload | undefined,
+  fallback: MessageRichPayload | undefined,
+): MessageRichPayload | undefined {
+  if (!preferred && !fallback) return undefined;
+  const blocks = [...(preferred?.blocks ?? [])];
+  const seen = new Set(blocks.map((block) => block.id));
+  for (const block of fallback?.blocks ?? []) {
+    if (seen.has(block.id)) continue;
+    seen.add(block.id);
+    blocks.push(block);
+  }
+  return { v: 1 as const, blocks };
+}
+
+function mergeMessageExtra(
+  preferred: ChatMessageData['extra'],
+  fallback: ChatMessageData['extra'],
+): ChatMessageData['extra'] | undefined {
+  const rich = mergeRichPayload(preferred?.rich, fallback?.rich);
+  const crossPost = preferred?.crossPost ?? fallback?.crossPost;
+  const stream = preferred?.stream ?? fallback?.stream;
+  const targetCats = preferred?.targetCats ?? fallback?.targetCats;
+  const scheduler = preferred?.scheduler ?? fallback?.scheduler;
+  const timeoutDiagnostics = preferred?.timeoutDiagnostics ?? fallback?.timeoutDiagnostics;
+  const governanceBlocked = preferred?.governanceBlocked ?? fallback?.governanceBlocked;
+  if (!rich && !crossPost && !stream && !targetCats && !scheduler && !timeoutDiagnostics && !governanceBlocked) {
+    return undefined;
+  }
+  return {
+    ...(rich ? { rich } : {}),
+    ...(crossPost ? { crossPost } : {}),
+    ...(stream ? { stream } : {}),
+    ...(targetCats ? { targetCats } : {}),
+    ...(scheduler ? { scheduler } : {}),
+    ...(timeoutDiagnostics ? { timeoutDiagnostics } : {}),
+    ...(governanceBlocked ? { governanceBlocked } : {}),
+  };
+}
+
 function getMessageOrderTimestamp(msg: ChatMessageData): number {
   return msg.deliveredAt ?? msg.timestamp;
 }
@@ -108,6 +175,60 @@ function shouldPreferCurrentMessage(current: ChatMessageData, history: ChatMessa
     return currentRichness[i]! > historyRichness[i]!;
   }
   return false;
+}
+
+function mergeSameIdHydrationMessage(history: ChatMessageData, current: ChatMessageData): ChatMessageData {
+  const preferCurrent = shouldPreferCurrentMessage(current, history);
+  const preferred = preferCurrent ? current : history;
+  const fallback = preferCurrent ? history : current;
+  const toolEvents = pickRicherToolEvents(preferred.toolEvents, fallback.toolEvents);
+  const thinking = pickLongerText(preferred.thinking, fallback.thinking);
+  const getConsistentThinkingChunks = (message: ChatMessageData): string[] | undefined => {
+    if (!message.thinkingChunks || message.thinkingChunks.length === 0) return undefined;
+    const rendered = message.thinkingChunks.join('\n\n---\n\n');
+    if (!message.thinking || rendered === message.thinking) {
+      return message.thinkingChunks;
+    }
+    return undefined;
+  };
+  const preferredThinkingChunks = getConsistentThinkingChunks(preferred);
+  const fallbackThinkingChunks = getConsistentThinkingChunks(fallback);
+  const thinkingChunks =
+    (thinking && thinking === preferred.thinking ? preferredThinkingChunks : undefined) ??
+    (thinking && thinking === fallback.thinking ? fallbackThinkingChunks : undefined);
+  const extra = mergeMessageExtra(preferred.extra, fallback.extra);
+
+  return {
+    ...fallback,
+    ...preferred,
+    content: preferred.content || fallback.content,
+    ...((preferred.contentBlocks ?? fallback.contentBlocks)
+      ? { contentBlocks: preferred.contentBlocks ?? fallback.contentBlocks }
+      : {}),
+    ...(toolEvents ? { toolEvents } : {}),
+    ...((preferred.metadata ?? fallback.metadata) ? { metadata: preferred.metadata ?? fallback.metadata } : {}),
+    ...(thinking ? { thinking } : {}),
+    ...(thinkingChunks ? { thinkingChunks } : {}),
+    ...(extra ? { extra } : {}),
+    ...((preferred.summary ?? fallback.summary) ? { summary: preferred.summary ?? fallback.summary } : {}),
+    ...((preferred.source ?? fallback.source) ? { source: preferred.source ?? fallback.source } : {}),
+    ...((preferred.visibility ?? fallback.visibility)
+      ? { visibility: preferred.visibility ?? fallback.visibility }
+      : {}),
+    ...((preferred.whisperTo ?? fallback.whisperTo) ? { whisperTo: preferred.whisperTo ?? fallback.whisperTo } : {}),
+    ...((preferred.revealedAt ?? fallback.revealedAt)
+      ? { revealedAt: preferred.revealedAt ?? fallback.revealedAt }
+      : {}),
+    ...((preferred.deliveredAt ?? fallback.deliveredAt)
+      ? { deliveredAt: preferred.deliveredAt ?? fallback.deliveredAt }
+      : {}),
+    ...((preferred.replyTo ?? fallback.replyTo) ? { replyTo: preferred.replyTo ?? fallback.replyTo } : {}),
+    ...((preferred.replyPreview ?? fallback.replyPreview)
+      ? { replyPreview: preferred.replyPreview ?? fallback.replyPreview }
+      : {}),
+    ...(preferred.mentionsUser || fallback.mentionsUser ? { mentionsUser: true } : {}),
+    ...(preferred.isStreaming !== undefined ? { isStreaming: preferred.isStreaming } : {}),
+  };
 }
 
 function mergeReplaceHydrationMessages(
@@ -138,7 +259,13 @@ function mergeReplaceHydrationMessages(
   let replacedHistoryCount = 0;
 
   for (const msg of currentMsgs) {
-    if (historyIds.has(msg.id)) continue;
+    if (historyIds.has(msg.id)) {
+      const historyIndex = mergedMsgs.findIndex((candidate) => candidate.id === msg.id);
+      if (historyIndex !== -1) {
+        mergedMsgs[historyIndex] = mergeSameIdHydrationMessage(mergedMsgs[historyIndex]!, msg);
+      }
+      continue;
+    }
 
     const invocationId = msg.catId ? getLocalPlaceholderInvocationId(msg, currentCatInvocations) : undefined;
     const streamKey = msg.catId && invocationId ? `${msg.catId}:${invocationId}` : undefined;
@@ -157,6 +284,28 @@ function mergeReplaceHydrationMessages(
       }
     }
 
+    // F173 Phase C Task 9 — narrow ghost-tolerance guard (cloud Codex P1).
+    // Drop only the precise orphan-draft shape: id startsWith 'draft-' AND
+    // no live invocation in catInvocations claims its invocationId.
+    //
+    // Why narrow to draft-*:
+    //   - IDB-cached orphan drafts (hotfix3-filtered) always carry id
+    //     'draft-{invocationId}' (DraftStore write path).
+    //   - Just-completed live bubbles use 'msg-{inv}-{cat}' shape and may
+    //     have catInvocations cleared by the done handler before the server
+    //     persists them. An overly broad guard would drop those legitimate
+    //     bubbles on a fast thread switch — Codex P1 caught this.
+    //
+    // Result: orphan IDB drafts dropped; live just-completed bubbles preserved
+    // until server GET returns authoritative replacement.
+    if (invocationId && msg.id.startsWith('draft-')) {
+      const knownToLiveInvocation = Object.values(currentCatInvocations).some(
+        (info) => info.invocationId === invocationId,
+      );
+      if (!knownToLiveInvocation) {
+        continue;
+      }
+    }
     mergedMsgs.push(msg);
     preservedLocalCount++;
   }
@@ -189,6 +338,7 @@ export function useChatHistory(threadId: string) {
     hasMore,
     prependHistory,
     replaceMessages,
+    hydrateThread,
     setLoadingHistory,
     clearMessages,
     setCatInvocation,
@@ -222,6 +372,21 @@ export function useChatHistory(threadId: string) {
       cancelAnimationFrame(restoreFrameRef.current);
       restoreFrameRef.current = null;
     }
+  }, []);
+
+  const followBottomAnchor = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const currentThread = threadIdRef.current;
+    const el = scrollContainerRef.current;
+    if (!el || useChatStore.getState().currentThreadId !== currentThread) return;
+
+    const saved = scrollPositionsByThread.get(currentThread);
+    if (saved?.anchor !== 'bottom') return;
+
+    messagesEndRef.current?.scrollIntoView({ behavior });
+    scrollPositionsByThread.set(currentThread, {
+      top: Math.max(0, el.scrollHeight - el.clientHeight),
+      anchor: 'bottom',
+    });
   }, []);
 
   const scheduleRestore = useCallback(
@@ -307,6 +472,7 @@ export function useChatHistory(threadId: string) {
               rich?: { v: number; blocks: unknown[] };
               crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
               stream?: { invocationId?: string };
+              scheduler?: SchedulerMessageExtra['scheduler'];
             };
             timestamp: number;
             summary?: { id: string; topic: string; conclusions: string[]; openQuestions: string[]; createdBy: string };
@@ -318,7 +484,7 @@ export function useChatHistory(threadId: string) {
             mentionsUser?: boolean;
             deliveredAt?: number;
             replyTo?: string;
-            replyPreview?: { senderCatId: string | null; content: string; deleted?: true };
+            replyPreview?: ReplyPreview;
           }) =>
             ({
               id: m.id,
@@ -338,12 +504,13 @@ export function useChatHistory(threadId: string) {
               ...(m.metadata ? { metadata: m.metadata } : {}),
               ...(m.origin ? { origin: m.origin } : {}),
               ...(m.thinking ? { thinking: m.thinking } : {}),
-              ...(m.extra?.rich || m.extra?.crossPost || m.extra?.stream
+              ...(m.extra?.rich || m.extra?.crossPost || m.extra?.stream || m.extra?.scheduler
                 ? {
                     extra: {
                       ...(m.extra.rich ? { rich: m.extra.rich } : {}),
                       ...(m.extra.crossPost ? { crossPost: m.extra.crossPost } : {}),
                       ...(m.extra.stream ? { stream: m.extra.stream } : {}),
+                      ...(m.extra.scheduler ? { scheduler: m.extra.scheduler } : {}),
                     },
                   }
                 : {}),
@@ -393,13 +560,25 @@ export function useChatHistory(threadId: string) {
               `replacedHistory=${mergeResult.stats.replacedHistoryCount}`,
             ].join(','),
           });
-          replaceMessages(mergedMsgs, data.hasMore ?? false);
-          return;
+          // F173 Phase C Task 5+6+7 — single hydration entry. Atomic
+          // server-authoritative replace + IDB overwrite via writer
+          // (instead of bare replaceMessages + saveMessagesSnapshot pair).
+          // AC-C10: server GET 是 authoritative，IDB snapshot 必须被 GET
+          // 响应覆盖而不是合并。
+          hydrateThread(fetchForThread, mergedMsgs, data.hasMore ?? false);
+          return true;
         }
         prependHistory(historyMsgs, data.hasMore ?? false);
+        // F164: Snapshot fetched messages to IndexedDB (fire-and-forget)
+        const snapshotState = useChatStore.getState();
+        if (snapshotState.currentThreadId === fetchForThread) {
+          void saveMessagesSnapshot(fetchForThread, snapshotState.messages, data.hasMore ?? false).catch(() => {});
+        }
+        return true;
       } catch (err) {
         // AbortError is expected during thread switch — ignore silently
-        if (isAbortError(err)) return;
+        if (isAbortError(err)) return false;
+        return false;
       } finally {
         // Do not let stale/aborted request clear loading state for a newer thread request.
         if (abortRef.current === controller && threadIdRef.current === fetchForThread) {
@@ -408,7 +587,7 @@ export function useChatHistory(threadId: string) {
         }
       }
     },
-    [setLoadingHistory, prependHistory, replaceMessages, threadId],
+    [setLoadingHistory, prependHistory, replaceMessages, hydrateThread, threadId],
   );
 
   const fetchTasks = useCallback(async () => {
@@ -424,7 +603,9 @@ export function useChatHistory(threadId: string) {
       if (abortRef.current !== controller) return;
       if (threadIdRef.current !== fetchForThread) return;
       const data = await res.json();
-      setTasks(data.tasks ?? []);
+      const tasks = data.tasks ?? [];
+      taskCacheByThread.set(fetchForThread, tasks);
+      setTasks(tasks);
     } catch (err) {
       if (isAbortError(err)) return;
     }
@@ -557,6 +738,12 @@ export function useChatHistory(threadId: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, setQueue, setQueuePaused, updateThreadCatStatus]);
 
+  // Restore per-thread tasks before paint so revisiting a thread does not show
+  // an empty secondary panel while revalidation is still in flight.
+  useLayoutEffect(() => {
+    setTasks(taskCacheByThread.get(threadId) ?? []);
+  }, [threadId, setTasks]);
+
   // Load history + tasks when threadId changes (handles initial mount and navigation)
   useEffect(() => {
     // PR #794: ChatContainer no longer unmounts on thread switch, so tracking
@@ -583,7 +770,6 @@ export function useChatHistory(threadId: string) {
     const cached = state.threadStates[threadId];
     const hasCachedMessages = cached && cached.messages.length > 0;
     const isThreadSynced = state.currentThreadId === threadId;
-
     // #80 fix-A: If the thread has an active invocation, force-refresh from API
     // so that DraftStore drafts are merged into the response. Without this,
     // switching away and back shows stale cached messages (no streaming draft).
@@ -600,44 +786,55 @@ export function useChatHistory(threadId: string) {
       void fetchQueue();
     };
 
-    const secondaryFallbackTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
-      hydrateSecondaryPanels();
-    }, SECONDARY_HYDRATION_FALLBACK_MS);
+    // F164: Reset offline badge on every thread switch so stale state from
+    // a previous thread's aborted fetch never leaks to the new thread.
+    useChatStore.getState().setOfflineSnapshot(false);
 
     const bootstrap = async () => {
-      try {
-        if (!hasCachedMessages) {
-          // During route thread switches, this effect can run before setCurrentThread.
-          // Clearing too early would wipe the previous thread snapshot in the store.
-          if (isThreadSynced) {
+      if (!hasCachedMessages) {
+        // F164: Try IndexedDB snapshot before API fetch
+        let restoredFromIdb = false;
+        try {
+          const idbSnapshot = await loadCachedMessages(threadId);
+          if (idbSnapshot && idbSnapshot.messages.length > 0) {
+            replaceMessages(idbSnapshot.messages, idbSnapshot.hasMore);
+            useChatStore.getState().setOfflineSnapshot(true);
+            restoredFromIdb = true;
+          } else if (isThreadSynced) {
             clearMessages();
           }
-          await fetchHistory();
-        } else if (hasActiveInvocation || (cached && cached.unreadCount > 0) || hasUnstableBubbleIdentity) {
-          // #80 fix-A P1: Force-refresh with replace mode — the async response handler
-          // will clear stale cache after setCurrentThread has run, then set fresh data
-          // including DraftStore drafts in correct timestamp order.
-          // F069-R4: Also force-refresh when the thread has unread messages. Without this,
-          // the cached message list may lack the server's latest real messages, causing
-          // the read-ack in ChatContainer to send an old sortable ID — the server still
-          // counts messages after that ID as unread, and the badge reappears.
-          // F123: If the cached snapshot already contains unstable bubble identity
-          // (duplicate same-invocation bubbles or local-only draft/stream state),
-          // thread switch must reconcile against authoritative history instead of
-          // trusting the cached timeline until a later F5.
-          await fetchHistory(undefined, { replace: true });
+        } catch {
+          if (isThreadSynced) clearMessages();
         }
-      } finally {
-        // Prioritize first-screen messages, then hydrate secondary panels.
-        hydrateSecondaryPanels();
+        // Always fetch fresh data from API (replace snapshot)
+        const fetchOk = await fetchHistory(undefined, { replace: true });
+        // F164: Clear offline badge only after successful API fetch
+        if (restoredFromIdb && fetchOk) {
+          useChatStore.getState().setOfflineSnapshot(false);
+        }
+      } else if (hasActiveInvocation || (cached && cached.unreadCount > 0) || hasUnstableBubbleIdentity) {
+        // #80 fix-A P1: Force-refresh with replace mode — the async response handler
+        // will clear stale cache after setCurrentThread has run, then set fresh data
+        // including DraftStore drafts in correct timestamp order.
+        // F069-R4: Also force-refresh when the thread has unread messages. Without this,
+        // the cached message list may lack the server's latest real messages, causing
+        // the read-ack in ChatContainer to send an old sortable ID — the server still
+        // counts messages after that ID as unread, and the badge reappears.
+        // F123: If the cached snapshot already contains unstable bubble identity
+        // (duplicate same-invocation bubbles or local-only draft/stream state),
+        // thread switch must reconcile against authoritative history instead of
+        // trusting the cached timeline until a later F5.
+        await fetchHistory(undefined, { replace: true });
       }
     };
 
+    // AC-4: secondary panels should hydrate in parallel with message history,
+    // not wait for fetchHistory() to settle before the first request starts.
+    hydrateSecondaryPanels();
     void bootstrap();
 
     return () => {
       // Scroll save is now done during render (before DOM commit), not here.
-      clearTimeout(secondaryFallbackTimer);
       cancelPendingRestore();
       abortRef.current?.abort();
     };
@@ -719,6 +916,23 @@ export function useChatHistory(threadId: string) {
       }
     }
   }, [messages, scheduleRestore, threadId]);
+
+  useEffect(() => {
+    let rafId: number | null = null;
+    const handler = () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        followBottomAnchor('auto');
+      });
+    };
+
+    window.addEventListener(CHAT_LAYOUT_CHANGED_EVENT, handler);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener(CHAT_LAYOUT_CHANGED_EVENT, handler);
+    };
+  }, [followBottomAnchor]);
 
   // Load more when scrolled to top + clowder-ai#27 continuous scroll save
   const handleScroll = useCallback(() => {

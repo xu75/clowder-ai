@@ -6,7 +6,7 @@
 
 import type { CatId, ConnectorSource, MessageContent, RichMessageExtra } from '@cat-cafe/shared';
 import type { MessageMetadata } from '../../types.js';
-import type { StoredToolEvent } from '../ports/MessageStore.js';
+import type { StoredMessage, StoredToolEvent } from '../ports/MessageStore.js';
 
 export function safeParseMentions(raw: string | undefined): readonly CatId[] {
   if (!raw) return [];
@@ -44,6 +44,18 @@ export function safeParseExtra(raw: string | undefined):
       rich?: RichMessageExtra;
       stream?: { invocationId: string };
       crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
+      scheduler?: {
+        hiddenTrigger?: boolean;
+        toast?: {
+          type: 'success' | 'error' | 'info';
+          title: string;
+          message: string;
+          duration: number;
+          lifecycleEvent: 'registered' | 'paused' | 'resumed' | 'deleted' | 'succeeded' | 'failed' | 'missed_window';
+        };
+      };
+      targetCats?: string[];
+      tracing?: { traceId: string; spanId: string; parentSpanId?: string };
     }
   | undefined {
   if (!raw) return undefined;
@@ -55,6 +67,18 @@ export function safeParseExtra(raw: string | undefined):
       rich?: RichMessageExtra;
       stream?: { invocationId: string };
       crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
+      scheduler?: {
+        hiddenTrigger?: boolean;
+        toast?: {
+          type: 'success' | 'error' | 'info';
+          title: string;
+          message: string;
+          duration: number;
+          lifecycleEvent: 'registered' | 'paused' | 'resumed' | 'deleted' | 'succeeded' | 'failed' | 'missed_window';
+        };
+      };
+      targetCats?: string[];
+      tracing?: { traceId: string; spanId: string; parentSpanId?: string };
     } = {};
     let hasField = false;
 
@@ -85,10 +109,56 @@ export function safeParseExtra(raw: string | undefined):
       hasField = true;
     }
 
+    // #481: Preserve scheduler sub-field (hiddenTrigger, toast) through Redis round-trip
+    if (parsed.scheduler && typeof parsed.scheduler === 'object') {
+      const sched: NonNullable<typeof result.scheduler> = {};
+      if (parsed.scheduler.hiddenTrigger === true) sched.hiddenTrigger = true;
+      if (parsed.scheduler.toast && typeof parsed.scheduler.toast === 'object') {
+        sched.toast = parsed.scheduler.toast;
+      }
+      result.scheduler = sched;
+      hasField = true;
+    }
+
+    // #481: Preserve targetCats sub-field through Redis round-trip
+    if (Array.isArray(parsed.targetCats)) {
+      result.targetCats = parsed.targetCats;
+      hasField = true;
+    }
+
+    // F153-F: Preserve tracing pointer sub-field through Redis round-trip.
+    // Stored as compact keys (t/s/p) to stay within AC-F6 100-byte budget.
+    if (parsed.tracing && typeof parsed.tracing === 'object') {
+      const tr = parsed.tracing;
+      const t = tr.t ?? tr.traceId;
+      const s = tr.s ?? tr.spanId;
+      const p = tr.p ?? tr.parentSpanId;
+      if (typeof t === 'string' && typeof s === 'string') {
+        result.tracing = {
+          traceId: t,
+          spanId: s,
+          ...(typeof p === 'string' ? { parentSpanId: p } : {}),
+        };
+        hasField = true;
+      }
+    }
+
     return hasField ? result : undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * F153-F: Serialize extra field with compact tracing keys (t/s/p)
+ * to stay within AC-F6 100-byte budget per pointer.
+ */
+export function serializeExtra(extra: NonNullable<StoredMessage['extra']>): string {
+  const { tracing, ...rest } = extra;
+  if (!tracing) return JSON.stringify(extra);
+  const compact: Record<string, string> = { t: tracing.traceId, s: tracing.spanId };
+  if (tracing.parentSpanId) compact.p = tracing.parentSpanId;
+  return JSON.stringify({ ...rest, tracing: compact });
 }
 
 /** F97: Parse connector source field */

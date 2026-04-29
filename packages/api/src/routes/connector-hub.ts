@@ -1,9 +1,11 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { applyConnectorSecretUpdates } from '../config/connector-secret-updater.js';
 import { DEFAULT_THREAD_ID, type IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
+import type { WeComBotAdapter } from '../infrastructure/connectors/adapters/WeComBotAdapter.js';
 import type { WeixinAdapter } from '../infrastructure/connectors/adapters/WeixinAdapter.js';
 import type { IConnectorPermissionStore } from '../infrastructure/connectors/ConnectorPermissionStore.js';
 import { DefaultFeishuQrBindClient, type FeishuQrBindClient } from '../infrastructure/connectors/FeishuQrBindClient.js';
+import { normalizeTelegramBotToken } from '../infrastructure/connectors/telegram-token.js';
 import { resolveHeaderUserId } from '../utils/request-identity.js';
 
 export interface ConnectorHubRoutesOptions {
@@ -16,6 +18,12 @@ export interface ConnectorHubRoutesOptions {
   weixinAdapter?: WeixinAdapter | null;
   /** Called after successful QR login to start the WeChat polling loop */
   startWeixinPolling?: () => void;
+  /** F132 Phase E: dynamically start WeCom Bot adapter after credential validation */
+  startWeComBotStream?: (botId: string, secret: string) => Promise<void>;
+  /** F132 Phase E: stop running WeCom Bot adapter (for disconnect) */
+  stopWeComBot?: () => Promise<void>;
+  /** Live WeCom Bot adapter getter for health reporting (instance changes on reconnect) */
+  getWeComBotAdapter?: () => WeComBotAdapter | null;
   /** F134 Phase D: Permission store for group whitelist + admin management */
   permissionStore?: IConnectorPermissionStore | null;
   envFilePath?: string;
@@ -128,11 +136,11 @@ export const CONNECTOR_PLATFORMS: PlatformDef[] = [
       { envName: 'WECOM_BOT_ID', label: 'Bot ID', sensitive: false },
       { envName: 'WECOM_BOT_SECRET', label: 'Bot Secret', sensitive: true },
     ],
-    docsUrl: 'https://developer.work.weixin.qq.com/document/path/105120',
+    docsUrl: 'https://work.weixin.qq.com/wework_admin/frame#/aiHelper/create',
     steps: [
-      { text: '在企业微信管理后台创建智能机器人，获取 Bot ID 和 Bot Secret' },
-      { text: '启用「长连接」模式（WebSocket），无需公网 URL' },
-      { text: '填写以下配置并保存，重启 API 服务后生效' },
+      { text: '点击上方链接直接进入创建页 → 选「API 模式」→ 连接方式选「使用长连接」' },
+      { text: '填写名称和可见范围，保存后获取 Bot ID 和 Secret' },
+      { text: '粘贴到下方并点击「测试并连接」，验证成功后自动生效' },
     ],
   },
   {
@@ -146,9 +154,9 @@ export const CONNECTOR_PLATFORMS: PlatformDef[] = [
       { envName: 'WECOM_TOKEN', label: '回调 Token', sensitive: true },
       { envName: 'WECOM_ENCODING_AES_KEY', label: 'EncodingAESKey (43 字符)', sensitive: true },
     ],
-    docsUrl: 'https://developer.work.weixin.qq.com/document/path/90238',
+    docsUrl: 'https://work.weixin.qq.com/wework_admin/frame#/app',
     steps: [
-      { text: '在企业微信管理后台创建自建应用，获取 AgentId 和 Secret' },
+      { text: '点击上方链接登录企微管理后台 → 创建自建应用，获取 AgentId 和 Secret' },
       { text: '在「API 接收消息」中设置回调 URL、Token 和 EncodingAESKey' },
       { text: '回调 URL 需通过公网访问（可使用 Cloudflare Tunnel）' },
       { text: '填写以下配置并保存，重启 API 服务后生效' },
@@ -212,11 +220,27 @@ export interface PlatformStatus {
   steps: PlatformStepStatus[];
 }
 
+function isConfiguredFieldValue(field: ConnectorFieldDef, raw: string | undefined): boolean {
+  if (raw == null || raw === '' || raw.startsWith('(未设置')) return false;
+  if (field.envName === 'TELEGRAM_BOT_TOKEN') return normalizeTelegramBotToken(raw) != null;
+  return true;
+}
+
+function isRequiredFieldSatisfied(field: ConnectorFieldDef, env: Record<string, string | undefined>): boolean {
+  if (field.optional) return true;
+  if (field.requiredWhen) {
+    const rawCondition = env[field.requiredWhen.envName];
+    const conditionValue = rawCondition === 'websocket' ? 'websocket' : 'webhook';
+    if (conditionValue !== field.requiredWhen.value) return true;
+  }
+  return isConfiguredFieldValue(field, env[field.envName]);
+}
+
 export function buildConnectorStatus(env: Record<string, string | undefined> = process.env): PlatformStatus[] {
   return CONNECTOR_PLATFORMS.map((platform) => {
     const fields: PlatformFieldStatus[] = platform.fields.map((f) => {
       const raw = env[f.envName];
-      const isSet = raw != null && raw !== '' && !raw.startsWith('(未设置');
+      const isSet = isConfiguredFieldValue(f, raw);
       const effectiveValue = isSet ? raw : (f.defaultValue ?? null);
       return {
         envName: f.envName,
@@ -230,17 +254,7 @@ export function buildConnectorStatus(env: Record<string, string | undefined> = p
     if (platform.fields.length === 0) {
       configured = false;
     } else {
-      configured = platform.fields.every((f) => {
-        if (f.optional) return true;
-        if (f.requiredWhen) {
-          // Normalize to match runtime: only 'websocket' passes through, everything else → 'webhook'
-          const rawCondition = env[f.requiredWhen.envName];
-          const conditionValue = rawCondition === 'websocket' ? 'websocket' : 'webhook';
-          if (conditionValue !== f.requiredWhen.value) return true;
-        }
-        const raw = env[f.envName];
-        return raw != null && raw !== '' && !raw.startsWith('(未设置');
-      });
+      configured = platform.fields.every((f) => isRequiredFieldSatisfied(f, env));
     }
 
     return {
@@ -291,6 +305,14 @@ export const connectorHubRoutes: FastifyPluginAsync<ConnectorHubRoutesOptions> =
     if (weixinStatus) {
       const adapter = opts.weixinAdapter;
       weixinStatus.configured = adapter != null && adapter.hasBotToken() && adapter.isPolling();
+    }
+    // F132 bugfix: WeCom Bot live health — override "configured" with actual connection state.
+    // When getter is wired (gateway started) but returns null (adapter stopped/not started),
+    // force configured=false to avoid false green light from env var check.
+    const wecomBotStatus = status.find((p) => p.id === 'wecom-bot');
+    if (wecomBotStatus && opts.getWeComBotAdapter) {
+      const adapter = opts.getWeComBotAdapter();
+      wecomBotStatus.configured = adapter?.getConnectionState() === 'connected';
     }
     return { platforms: status };
   });
@@ -454,6 +476,89 @@ export const connectorHubRoutes: FastifyPluginAsync<ConnectorHubRoutesOptions> =
       envFilePath: opts.envFilePath,
     });
     app.log.info({ userId }, '[WeChat] Disconnected by user — token cleared from .env');
+
+    return { ok: true };
+  });
+
+  // ── F132 Phase E: WeCom Bot guided setup — validate + connect + disconnect ──
+
+  app.post('/api/connector/wecom-bot/validate', async (request, reply) => {
+    const userId = requireTrustedHubIdentity(request, reply);
+    if (!userId) return { error: 'Identity required' };
+
+    const { botId, secret } = (request.body ?? {}) as { botId?: string; secret?: string };
+    if (!botId || !secret) {
+      reply.status(400);
+      return { error: 'botId and secret are required' };
+    }
+
+    try {
+      // Note: we intentionally do NOT stop the existing adapter before validation.
+      // The validate probe may kick the running WS via disconnected_event, but the
+      // adapter's scheduleReconnect() handles recovery. Stopping here would kill
+      // a working connection on validation failure with no way to restore it.
+      // On success, startWeComBotStream() stops the old adapter before starting new.
+      const { WeComBotAdapter } = await import('../infrastructure/connectors/adapters/WeComBotAdapter.js');
+      const result = await WeComBotAdapter.validateCredentials(botId, secret);
+
+      if (!result.valid) {
+        reply.status(422);
+        return { valid: false, error: result.error };
+      }
+
+      // AC-E3: Save credentials and activate adapter without restart
+      // P1 fix: save → start → if start fails, rollback credentials
+      await applyConnectorSecretUpdates(
+        [
+          { name: 'WECOM_BOT_ID', value: botId },
+          { name: 'WECOM_BOT_SECRET', value: secret },
+        ],
+        { envFilePath: opts.envFilePath },
+      );
+
+      if (opts.startWeComBotStream) {
+        try {
+          await opts.startWeComBotStream(botId, secret);
+        } catch (startErr) {
+          // Rollback: credentials saved but adapter failed to start
+          await applyConnectorSecretUpdates(
+            [
+              { name: 'WECOM_BOT_ID', value: null },
+              { name: 'WECOM_BOT_SECRET', value: null },
+            ],
+            { envFilePath: opts.envFilePath },
+          );
+          app.log.error({ err: startErr }, '[WeCom Bot] Adapter start failed — credentials rolled back');
+          reply.status(502);
+          return { valid: false, error: 'Credentials valid but adapter failed to start' };
+        }
+      }
+
+      app.log.info({ userId }, '[WeCom Bot] Validated + activated via guided setup');
+      return { valid: true };
+    } catch (err) {
+      app.log.error({ err }, '[WeCom Bot] Validation failed');
+      reply.status(502);
+      return { valid: false, error: 'Failed to validate WeCom Bot credentials' };
+    }
+  });
+
+  app.post('/api/connector/wecom-bot/disconnect', async (request, reply) => {
+    const userId = requireTrustedHubIdentity(request, reply);
+    if (!userId) return { error: 'Identity required' };
+
+    if (opts.stopWeComBot) {
+      await opts.stopWeComBot();
+    }
+
+    await applyConnectorSecretUpdates(
+      [
+        { name: 'WECOM_BOT_ID', value: null },
+        { name: 'WECOM_BOT_SECRET', value: null },
+      ],
+      { envFilePath: opts.envFilePath },
+    );
+    app.log.info({ userId }, '[WeCom Bot] Disconnected by user — credentials cleared');
 
     return { ok: true };
   });

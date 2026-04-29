@@ -60,28 +60,23 @@ docs/prompts/YYYY-MM-DD-{topic}-research-prompt.md
 
 ## Prompt 模板（Step 1）
 
-```markdown
-# {Topic} 调研
+**使用 8 槽位骨架模板**：`cat-cafe-skills/refs/research-prompt-template.md`
 
-> 委托人：{who}  日期：YYYY-MM-DD
+8 个槽位：
+1. `Problem Frame` — 任务边界 + 非目标
+2. `Current Hypotheses` — 我们的假设 + 证据缺口
+3. `Disconfirm First` — 先找反例（反确认偏误）
+4. `Source Mix Quota` — 来源配额（论文/工程/开源/竞品）
+5. `Local Constraints` — 我们的约束（多引擎/人在环/知识在 repo）
+6. `Output Schema` — 支持/反对/未定 + 置信度
+7. `Decision Interface` — 映射到 采纳/试点/搁置
+8. `Risk Register` — 如果结论错了炸在哪
 
-## 背景
-{为什么需要这个调研，哪些项目上下文是相关的}
+**发送前自动注入**（模板底部有清单）：当前 Feature spec、相关 ADR、最近教训、BACKLOG 上下文。
 
-## 需要调研的问题
-1. {具体问题 + 范围}
-2. {具体问题}
+**收到后 Quality Gate**（模板底部有标准）：反例覆盖、来源多样性、约束对齐、可行动、风险意识。
 
-## 输出要求
-- 每个结论标注信息来源（URL 或文档名）
-- 区分"已确认"和"推测"
-- 给出推荐方向 + 风险
-
-## 参考资料
-{相关项目文档链接或已有代码路径}
-```
-
-详细模板见 `../refs/` 目录。
+实战范例：*(internal reference removed)*
 
 ## Quota 意识
 
@@ -161,16 +156,14 @@ docs/prompts/YYYY-MM-DD-{topic}-research-prompt.md
 | 忽略三方分歧 | 分歧 = 最有价值的信号，必须分析 |
 | Coder 猫盲信 web 报告 | 必须对照实际 codebase 验证 |
 
-## Step 5 — 持久化产出（2026-04-09 教训）
+## Step 5 — 在交接前持久化调研产出
 
-**调研产出必须 commit，Write ≠ 持久化。**
-
-产出文档写完后，立刻 `git add` + `git commit`。
-- 在 worktree 里：commit 到分支
-- 在 main 上：commit + push（确保其他猫能看到）
+如果调研结果需要被后续 session、其他猫、或人类继续使用，就在结束该流程前 commit。
+- 在 worktree 里：commit 到当前分支
+- 在共享 main worktree：commit + push，确保其他 session 能看到
 - 多次 Edit 更新：每次重大更新后追加 commit
 
-**验证**：`git log --oneline -1` 显示刚才的 commit。没有 commit SHA = 没有完成。
+**验证**：在总结 / handoff 里记录 commit SHA。`git log --oneline -1` 显示刚才的 commit。
 
 ## Next Step
 

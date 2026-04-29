@@ -51,6 +51,22 @@ Write-Host "Cat Cafe - Windows Startup" -ForegroundColor Cyan
 Write-Host "=========================="
 if ($Profile_) { Write-Host "  Profile: $Profile_" -ForegroundColor Cyan }
 
+# -- Clear inherited profile env (mirrors start-dev.sh clear_inherited_profile_env) --
+# When strict mode is on, clear ambient profile-controlled vars before loading .env,
+# so only .env overrides and profile defaults take effect -- not leaked shell exports.
+$profileControlledVars = @(
+    'ANTHROPIC_PROXY_ENABLED', 'ASR_ENABLED', 'TTS_ENABLED',
+    'LLM_POSTPROCESS_ENABLED', 'EMBED_ENABLED',
+    'MESSAGE_TTL_SECONDS', 'THREAD_TTL_SECONDS',
+    'TASK_TTL_SECONDS', 'SUMMARY_TTL_SECONDS',
+    'REDIS_PROFILE'
+)
+if ($env:CAT_CAFE_STRICT_PROFILE_DEFAULTS -eq "1" -and $Profile_) {
+    foreach ($var in $profileControlledVars) {
+        [System.Environment]::SetEnvironmentVariable($var, $null, "Process")
+    }
+}
+
 # -- Load .env -----------------------------------------------
 $envFile = Join-Path $ProjectRoot ".env"
 if (Test-Path $envFile) {
@@ -68,6 +84,55 @@ if (Test-Path $envFile) {
     Write-Ok ".env loaded"
 } else {
     Write-Warn ".env not found - using defaults"
+}
+
+# -- Apply profile defaults (mirrors start-dev.sh apply_profile_defaults) --
+# Profile defaults are fallbacks: .env value wins if set, otherwise profile default applies.
+$profileDefaults = @{}
+switch ($Profile_) {
+    'opensource' {
+        $profileDefaults = @{
+            ANTHROPIC_PROXY_ENABLED = '0'; ASR_ENABLED = '0'
+            TTS_ENABLED = '0'; LLM_POSTPROCESS_ENABLED = '0'
+            MESSAGE_TTL_SECONDS = '0'; THREAD_TTL_SECONDS = '0'
+            TASK_TTL_SECONDS = '0'; SUMMARY_TTL_SECONDS = '0'
+            REDIS_PROFILE = 'opensource'
+        }
+    }
+    'production' {
+        $profileDefaults = @{
+            ANTHROPIC_PROXY_ENABLED = '0'; ASR_ENABLED = '0'
+            TTS_ENABLED = '0'; LLM_POSTPROCESS_ENABLED = '0'
+            MESSAGE_TTL_SECONDS = '0'; THREAD_TTL_SECONDS = '0'
+            TASK_TTL_SECONDS = '0'; SUMMARY_TTL_SECONDS = '0'
+            REDIS_PROFILE = 'opensource'
+        }
+    }
+    'dev' {
+        $profileDefaults = @{
+            ANTHROPIC_PROXY_ENABLED = '1'; ASR_ENABLED = '1'
+            TTS_ENABLED = '1'; LLM_POSTPROCESS_ENABLED = '1'
+            MESSAGE_TTL_SECONDS = '0'; THREAD_TTL_SECONDS = '0'
+            TASK_TTL_SECONDS = '0'; SUMMARY_TTL_SECONDS = '0'
+            REDIS_PROFILE = 'dev'
+        }
+    }
+    default {
+        if ($Profile_) {
+            Write-Err "Unknown profile '$Profile_'. Valid: dev, production, opensource"
+            exit 1
+        }
+    }
+}
+# resolve_config: env override > profile default
+foreach ($entry in $profileDefaults.GetEnumerator()) {
+    $current = [System.Environment]::GetEnvironmentVariable($entry.Key, "Process")
+    if (-not $current) {
+        [System.Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+    }
+}
+if ($Profile_ -and $profileDefaults.Count -gt 0) {
+    Write-Ok "Profile defaults applied ($Profile_)"
 }
 
 $pnpmCommand = Resolve-ToolCommand -Name "pnpm"
@@ -154,9 +219,79 @@ function Stop-PortProcess {
     }
 }
 
+function Get-LoopbackHttpPort {
+    param([string]$Url, [int]$DefaultPort)
+
+    if (-not $Url) {
+        return $null
+    }
+
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$uri)) {
+        return $null
+    }
+
+    $isLoopbackHost = $uri.Host -eq "localhost"
+    $ipAddress = $null
+    if (-not $isLoopbackHost -and [System.Net.IPAddress]::TryParse($uri.Host, [ref]$ipAddress)) {
+        $isLoopbackHost = [System.Net.IPAddress]::IsLoopback($ipAddress)
+    }
+
+    if (-not $isLoopbackHost) {
+        return $null
+    }
+
+    if ($uri.Port -gt 0) {
+        return $uri.Port
+    }
+
+    return $DefaultPort
+}
+
+function Wait-ForListeningPort {
+    param([int]$Port, [int]$TimeoutSec = 60)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($listener) {
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+$embedMode = if ($env:EMBED_MODE) { $env:EMBED_MODE.Trim().ToLowerInvariant() } else { "off" }
+$embedEnabledRaw = [System.Environment]::GetEnvironmentVariable("EMBED_ENABLED", "Process")
+$embedEnabled = if ($null -ne $embedEnabledRaw -and $embedEnabledRaw -ne "") {
+    @("1", "true", "yes", "on") -contains $embedEnabledRaw.Trim().ToLowerInvariant()
+} else {
+    @("on", "shadow") -contains $embedMode
+}
+$env:EMBED_ENABLED = if ($embedEnabled) { "1" } else { "0" }
+
+$embedPortDefault = if ($env:EMBED_PORT) { [int]$env:EMBED_PORT } else { 9880 }
+$configuredEmbedUrl = if ($env:EMBED_URL) { $env:EMBED_URL.Trim() } else { "" }
+$localEmbedPort = Get-LoopbackHttpPort -Url $configuredEmbedUrl -DefaultPort $embedPortDefault
+$useLocalEmbedSidecar = $embedEnabled -and ((-not $configuredEmbedUrl) -or ($null -ne $localEmbedPort))
+$EmbedPort = if ($useLocalEmbedSidecar) {
+    if ($null -ne $localEmbedPort) { [int]$localEmbedPort } else { $embedPortDefault }
+} else {
+    $embedPortDefault
+}
+$EmbedPidFile = Join-Path $RunDir "embed-$EmbedPort.pid"
+$EmbedLauncher = Join-Path $ProjectRoot "scripts\embed-server.ps1"
+if ($useLocalEmbedSidecar) {
+    $env:EMBED_URL = "http://127.0.0.1:$EmbedPort"
+}
+
 Write-Step "Check ports"
 Stop-PortProcess -Port ([int]$ApiPort) -Name "API" -PidFile $ApiPidFile -ProjectRoot $ProjectRoot
 Stop-PortProcess -Port ([int]$WebPort) -Name "Frontend" -PidFile $WebPidFile -ProjectRoot $ProjectRoot
+if ($useLocalEmbedSidecar) {
+    Stop-PortProcess -Port ([int]$EmbedPort) -Name "Embedding" -PidFile $EmbedPidFile -ProjectRoot $ProjectRoot
+}
 
 # -- Storage (Redis or Memory) -------------------------------
 Write-Step "Storage"
@@ -168,6 +303,7 @@ $redisCliPath = $null
 $redisServerPath = $null
 $redisSource = $null
 $redisAuthArgs = @()
+$redisJob = $null
 $redisLogFile = Join-Path $redisLayout.Logs "redis-$RedisPort.log"
 $redisPidFile = Join-Path $redisLayout.Data "redis-$RedisPort.pid"
 $configuredRedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL.Trim() } else { "" }
@@ -237,7 +373,12 @@ if ($useExternalRedis) {
                     "--pidfile", (Quote-WindowsProcessArgument -Value $redisPidFile)
                 ) + $redisServerAuthArgs
                 Write-Host "  Starting Redis on port $RedisPort ($redisSource)..."
-                Start-Process -FilePath $redisServerPath -ArgumentList $redisArgs -WindowStyle Hidden
+                $redisJob = Start-Job -Name "redis-bootstrap" -ScriptBlock {
+                    param($launcherPath, $launcherArgs)
+                    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+                    $OutputEncoding = [System.Text.Encoding]::UTF8
+                    & $launcherPath @launcherArgs 2>&1
+                } -ArgumentList $redisServerPath, $redisArgs
                 Start-Sleep -Seconds 2
                 $redisPing = & $redisCliPath -p $RedisPort @redisAuthArgs ping 2>$null
                 if ($redisPing -eq "PONG") {
@@ -338,12 +479,45 @@ try {
 
     # Track background jobs for cleanup
     $jobs = @()
+    # NODE_ENV is driven by launch mode (-Dev), not by profile.
+    # Profile controls data isolation (Redis, TTLs, sidecar features);
+    # -Dev controls whether the API runs in development or production mode.
+    $apiNodeEnv = if ($Dev) { 'development' } else { 'production' }
     $runtimeEnvOverrides = @{
         REDIS_URL = $env:REDIS_URL
         MEMORY_STORE = $env:MEMORY_STORE
         CAT_CAFE_MCP_SERVER_PATH = $env:CAT_CAFE_MCP_SERVER_PATH
         API_SERVER_PORT = $ApiPort
         FRONTEND_PORT = $WebPort
+        NODE_ENV = $apiNodeEnv
+        EMBED_URL = $env:EMBED_URL
+        EMBED_PORT = $EmbedPort
+        EMBED_ENABLED = $env:EMBED_ENABLED
+        EMBED_MODE = $env:EMBED_MODE
+    }
+
+    $embedJob = $null
+    if ($useLocalEmbedSidecar) {
+        if (Test-Path $EmbedLauncher) {
+            Write-Host "  Starting Embedding sidecar (port $EmbedPort)..."
+            $embedJob = Start-Job -Name "embed" -ScriptBlock {
+                param($launcherPath, $port)
+                [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+                $OutputEncoding = [System.Text.Encoding]::UTF8
+                & powershell -ExecutionPolicy Bypass -File $launcherPath -Port $port 2>&1
+            } -ArgumentList $EmbedLauncher, $EmbedPort
+            $jobs += $embedJob
+
+            $embedTimeout = if ($env:EMBED_TIMEOUT) { [int]$env:EMBED_TIMEOUT } else { 60 }
+            if (Wait-ForListeningPort -Port ([int]$EmbedPort) -TimeoutSec $embedTimeout) {
+                Set-ManagedProcessId -Port ([int]$EmbedPort) -PidFile $EmbedPidFile
+                Write-Ok "Embedding sidecar ready on port $EmbedPort"
+            } else {
+                Write-Warn "Embedding sidecar did not become ready within ${embedTimeout}s - continuing in fail-open mode"
+            }
+        } else {
+            Write-Warn "Embedding launcher not found at $EmbedLauncher - continuing in fail-open mode"
+        }
     }
 
     # API Server
@@ -351,7 +525,7 @@ try {
     # No --env-file needed - avoids depending on Node's --env-file support here.
     Write-Host "  Starting API Server (port $ApiPort)..."
     $apiJob = Start-Job -Name "api" -ScriptBlock {
-        param($root, $envFile, $runtimeEnvOverrides, $apiEntry, $debugFlag)
+        param($root, $envFile, $runtimeEnvOverrides, $profileDefaults, $apiEntry, $debugFlag)
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
         Set-Location (Join-Path $root "packages/api")
@@ -377,13 +551,23 @@ try {
                 [System.Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, "Process")
             }
         }
+        # Reapply profile defaults after .env reload (mirrors start-dev.sh resolve_config:
+        # env override > profile default -- only apply if current value is empty/null)
+        if ($profileDefaults) {
+            foreach ($entry in $profileDefaults.GetEnumerator()) {
+                $current = [System.Environment]::GetEnvironmentVariable($entry.Key, "Process")
+                if (-not $current) {
+                    [System.Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+                }
+            }
+        }
         if ($debugFlag) {
             $env:LOG_LEVEL = "debug"
             & node $apiEntry --debug 2>&1
         } else {
             & node $apiEntry 2>&1
         }
-    } -ArgumentList $ProjectRoot, $envFile, $runtimeEnvOverrides, $apiEntry, $Debug.IsPresent
+    } -ArgumentList $ProjectRoot, $envFile, $runtimeEnvOverrides, $profileDefaults, $apiEntry, $Debug.IsPresent
     $jobs += $apiJob
 
     Start-Sleep -Seconds 2
@@ -422,6 +606,13 @@ try {
     $safeEffectiveRedisUrl = Get-RedactedRedisUrl -RedisUrl $effectiveRedisUrl
     $storageMode = if ($useRedis -and $safeEffectiveRedisUrl) { "Redis ($safeEffectiveRedisUrl)" } elseif ($useRedis) { "Redis (redis://localhost:$RedisPort)" } else { "Memory (restart loses data)" }
     $frontendMode = if ($Dev) { "development (hot reload)" } else { "production (PWA enabled)" }
+    $embeddingMode = if ($embedEnabled) {
+        if ($useLocalEmbedSidecar) { "Local (http://127.0.0.1:$EmbedPort)" }
+        elseif ($configuredEmbedUrl) { "Remote ($configuredEmbedUrl)" }
+        else { "Enabled" }
+    } else {
+        "Off"
+    }
     $logDir = Join-Path $ProjectRoot "data/logs/api"
 
     Write-Host ""
@@ -432,6 +623,7 @@ try {
     Write-Host "  Frontend: http://localhost:$WebPort"
     Write-Host "  API:      http://localhost:$ApiPort"
     Write-Host "  Storage:  $storageMode"
+    Write-Host "  Embed:    $embeddingMode"
     Write-Host "  Frontend: $frontendMode"
     if ($Debug) {
         Write-Host "  Debug:    ON (logs: $logDir)" -ForegroundColor Yellow
@@ -473,6 +665,7 @@ try {
     }
     Clear-ManagedProcessId -PidFile $ApiPidFile
     Clear-ManagedProcessId -PidFile $WebPidFile
+    Clear-ManagedProcessId -PidFile $EmbedPidFile
 
     if ($startedRedis) {
         try {
@@ -481,6 +674,10 @@ try {
         } catch {
             Write-Warn "Could not stop Redis gracefully"
         }
+    }
+    if ($redisJob) {
+        Stop-Job -Job $redisJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $redisJob -Force -ErrorAction SilentlyContinue
     }
 
     Write-Host "Goodbye!" -ForegroundColor Cyan

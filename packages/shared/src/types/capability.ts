@@ -5,6 +5,8 @@
  * 配置编排器从此格式生成三种 CLI 配置 (.mcp.json / .codex/config.toml / .gemini/settings.json)。
  */
 
+import type { MarketplaceEcosystem } from './marketplace.js';
+
 /** MCP transport type — stdio (default) or remote HTTP (TD104) */
 export type McpTransport = 'stdio' | 'streamableHttp';
 
@@ -56,6 +58,12 @@ export interface CapabilityEntry {
   mcpServer?: Omit<McpServerDescriptor, 'name' | 'enabled' | 'source'>;
   /** Source origin */
   source: 'cat-cafe' | 'external';
+  /** F146-D: Source ecosystem when installed from marketplace */
+  ecosystem?: MarketplaceEcosystem;
+  /** F146-C: Version lock (AC-C2) */
+  lockVersion?: LockVersion;
+  /** F146-C: Persistent probe state (AC-C3/C4/C6) */
+  probeState?: ProbeState;
 }
 
 /** Root schema for .cat-cafe/capabilities.json */
@@ -88,6 +96,12 @@ export interface CapabilityBoardItem {
   tools?: McpToolInfo[];
   /** MCP connection status (only when ?probe=true) */
   connectionStatus?: 'connected' | 'disconnected' | 'unknown';
+  /** F146-D: Capability layer (L1=MCP, L2=Skill, L3=Extension) */
+  layer?: 'L1' | 'L2' | 'L3';
+  /** F146-D: Source ecosystem (from marketplace install) */
+  ecosystem?: MarketplaceEcosystem;
+  /** F146-D: Version lock info (from Phase C install governance) */
+  lockVersion?: LockVersion;
 }
 
 /** Lightweight MCP tool info for board display */
@@ -218,6 +232,66 @@ export interface DispatchExecutionDigest {
   readonly status: 'completed' | 'partial' | 'blocked';
   readonly doneWhenResults: readonly DoneWhenResult[];
   readonly nextSteps: readonly string[];
+}
+
+// ─── F146 Phase C: Install Governance Types ─────────────────────────
+
+/** Version lock record — written on install (AC-C2) */
+export interface LockVersion {
+  source: 'marketplace' | 'npm' | 'git' | 'local';
+  version: string;
+  channel?: string;
+  installedAt: string;
+  installedBy: string;
+}
+
+/** Persistent probe state (AC-C3/C4/C6) */
+export interface ProbeState {
+  status: 'ready' | 'probe_failed' | 'not_probed';
+  lastProbed?: string;
+  failureReason?: string;
+  declaredTools?: string[];
+  probedTools?: string[];
+}
+
+// ─── F146: MCP Marketplace Write-Path Types ─────────────────────────
+
+/** POST /api/capabilities/mcp/install request body */
+export interface McpInstallRequest {
+  id: string;
+  transport?: McpTransport;
+  command?: string;
+  args?: string[];
+  url?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+  resolver?: string;
+  projectPath?: string;
+  ecosystem?: MarketplaceEcosystem;
+}
+
+/** POST /api/capabilities/mcp/preview response */
+export interface McpInstallPreview {
+  entry: CapabilityEntry;
+  cliConfigsAffected: string[];
+  willProbe: boolean;
+  risks: string[];
+}
+
+/** DELETE /api/capabilities/mcp/:id query params */
+export interface McpDeleteParams {
+  hard?: boolean;
+  projectPath?: string;
+}
+
+/** Audit log entry (.cat-cafe/audit.jsonl) */
+export interface CapabilityAuditEntry {
+  timestamp: string;
+  userId: string;
+  action: 'install' | 'delete' | 'update' | 'toggle' | 'revoke';
+  capabilityId: string;
+  before: CapabilityEntry | null;
+  after: CapabilityEntry | null;
 }
 
 /** PATCH request body for toggling capabilities */

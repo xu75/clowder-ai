@@ -1,39 +1,37 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { type Thread, useChatStore } from '@/stores/chatStore';
 import { apiFetch } from '@/utils/api-client';
 import { BootcampIcon } from './icons/BootcampIcon';
+import { pushThreadRouteWithHistory } from './ThreadSidebar/thread-navigation';
 
 /** Phase labels for human-readable display */
 const PHASE_LABELS: Record<string, string> = {
-  'phase-0-select-cat': '选猫',
-  'phase-1-intro': '天团登场',
+  'phase-1-intro': '自我介绍',
   'phase-2-env-check': '环境检测',
   'phase-3-config-help': '配置帮助',
-  'phase-3.5-advanced': '进阶功能',
-  'phase-4-task-select': '选任务',
-  'phase-5-kickoff': '立项',
+  'phase-4-task-select': '选择任务',
+  'phase-5-kickoff': '确认需求',
   'phase-6-design': '设计',
   'phase-7-dev': '开发',
-  'phase-8-review': 'Review',
+  'phase-7.5-add-teammate': '添加队友',
+  'phase-8-collab': '多猫协作',
   'phase-9-complete': '完成',
   'phase-10-retro': '回顾',
   'phase-11-farewell': '毕业',
 };
 
 const PHASE_ORDER = [
-  'phase-0-select-cat',
   'phase-1-intro',
   'phase-2-env-check',
   'phase-3-config-help',
-  'phase-3.5-advanced',
   'phase-4-task-select',
   'phase-5-kickoff',
   'phase-6-design',
   'phase-7-dev',
-  'phase-8-review',
+  'phase-7.5-add-teammate',
+  'phase-8-collab',
   'phase-9-complete',
   'phase-10-retro',
   'phase-11-farewell',
@@ -54,7 +52,6 @@ interface BootcampListModalProps {
 }
 
 export function BootcampListModal({ open, onClose, currentThreadId }: BootcampListModalProps) {
-  const router = useRouter();
   const storeThreads = useChatStore((s) => s.threads);
   const setThreads = useChatStore((s) => s.setThreads);
   const [isCreating, setIsCreating] = useState(false);
@@ -92,7 +89,7 @@ export function BootcampListModal({ open, onClose, currentThreadId }: BootcampLi
   if (!open) return null;
 
   const handleNavigate = (threadId: string) => {
-    router.push(`/thread/${threadId}`);
+    pushThreadRouteWithHistory(threadId, typeof window !== 'undefined' ? window : undefined);
     onClose();
   };
 
@@ -103,14 +100,14 @@ export function BootcampListModal({ open, onClose, currentThreadId }: BootcampLi
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          title: '🎓 猫猫训练营',
-          bootcampState: { v: 1, phase: 'phase-0-select-cat', startedAt: Date.now() },
+          title: '猫猫训练营',
+          bootcampState: { v: 1, phase: 'phase-1-intro', startedAt: Date.now() },
         }),
       });
       if (!res.ok) return;
       const thread: Thread = await res.json();
       setThreads([thread, ...storeThreads]);
-      router.push(`/thread/${thread.id}`);
+      pushThreadRouteWithHistory(thread.id, typeof window !== 'undefined' ? window : undefined);
       onClose();
     } finally {
       setIsCreating(false);
@@ -177,7 +174,7 @@ export function BootcampListModal({ open, onClose, currentThreadId }: BootcampLi
                   {/* Top row: title + badge */}
                   <div className="flex items-center justify-between mb-2">
                     <span className={`text-[15px] font-semibold ${isCompleted ? 'text-cafe-secondary' : 'text-cafe'}`}>
-                      {t.title ?? '🎓 猫猫训练营'}
+                      {t.title ?? '猫猫训练营'}
                     </span>
                     <span
                       className={`text-xs font-medium px-2.5 py-1 rounded-full ${
@@ -188,13 +185,13 @@ export function BootcampListModal({ open, onClose, currentThreadId }: BootcampLi
                             : 'bg-amber-100 text-amber-700'
                       }`}
                     >
-                      {isCurrent ? '当前' : isCompleted ? '已完成 ✓' : '进行中'}
+                      {isCurrent ? '当前' : isCompleted ? '已完成' : '进行中'}
                     </span>
                   </div>
                   {/* Meta: task + phase */}
                   <div className="flex items-center justify-between text-[13px] text-cafe-secondary mb-2">
                     <div className="flex items-center gap-4">
-                      {t.selectedTaskId && <span>⭐ {t.selectedTaskId}</span>}
+                      {t.selectedTaskId && <span>{t.selectedTaskId}</span>}
                       <span>
                         Phase {phaseNum}/{PHASE_ORDER.length} · {phaseLabel}
                       </span>

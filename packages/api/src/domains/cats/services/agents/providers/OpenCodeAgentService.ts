@@ -109,6 +109,10 @@ export class OpenCodeAgentService implements AgentService {
     const args = this.buildArgs(prompt, options?.sessionId, effectiveModel, options?.cliConfigArgs);
     const cwd = options?.workingDirectory;
     const childEnv = this.buildEnv(options?.callbackEnv);
+    // F171: Account env vars applied LAST — user overrides provider-injected values
+    if (options?.accountEnv) {
+      for (const [k, v] of Object.entries(options.accountEnv)) childEnv[k] = v;
+    }
     const envSummary = summarizeOpenCodeEnvForDebug(childEnv);
     const metadata: MessageMetadata = { provider: 'opencode', model: effectiveModel };
     let sessionInitEmitted = false;
@@ -150,6 +154,7 @@ export class OpenCodeAgentService implements AgentService {
         ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
         ...(options?.cliSessionId ? { cliSessionId: options.cliSessionId } : {}),
         ...(options?.livenessProbe ? { livenessProbe: options.livenessProbe } : {}),
+        ...(options?.parentSpan ? { parentSpan: options.parentSpan } : {}),
       };
       const events = options?.spawnCliOverride
         ? options.spawnCliOverride(cliOpts)
@@ -287,29 +292,35 @@ export class OpenCodeAgentService implements AgentService {
     // Do not silently prepend provider prefixes (e.g. anthropic/, openrouter/).
     // The user-configured model string is the source of truth.
     const effectiveModel = model ?? this.model;
-    args.push('-m', effectiveModel);
+    if (effectiveModel) args.push('-m', effectiveModel);
 
     // JSON event stream output
     args.push('--format', 'json');
 
-    // User-defined CLI args from the member editor.
-    // Each entry is passed as-is (e.g. "--variant low" → args.push('--variant', 'low')).
-    // No implicit mapping — the user writes the exact flags the CLI expects.
+    // User-defined CLI args from the member editor (#567).
+    // User args win when they overlap with system-injected flags.
+    const userParts: string[] = [];
     for (const arg of cliConfigArgs ?? []) {
-      const parts = arg.trim().split(/\s+/);
-      args.push(...parts);
+      userParts.push(...arg.trim().split(/\s+/));
     }
+    const userFlags = new Set(userParts.filter((p) => p.startsWith('-')));
+    const deduped: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i].startsWith('-') && userFlags.has(args[i])) {
+        if (i + 1 < args.length && !args[i + 1].startsWith('-')) i++;
+        continue;
+      }
+      deduped.push(args[i]);
+    }
+    deduped.push(...userParts, prompt);
 
-    // Prompt as positional arg
-    args.push(prompt);
-
-    return args;
+    return deduped;
   }
 
   private buildEnv(callbackEnv?: Record<string, string>): Record<string, string | null> {
     const env: Record<string, string | null> = { ...callbackEnv };
 
-    // F189: When OPENCODE_CONFIG is set (custom provider via runtime config file),
+    // clowder-ai#223: When OPENCODE_CONFIG is set (custom provider via runtime config file),
     // credentials are injected via {env:CAT_CAFE_OC_*} substitution in the config.
     // Clear anthropic env vars to prevent opencode from using the builtin anthropic provider.
     if (callbackEnv?.OPENCODE_CONFIG) {

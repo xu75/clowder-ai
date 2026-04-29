@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import {
   bootstrapDebugFromStorage,
@@ -10,15 +10,15 @@ import {
 } from '@/debug/invocationEventDebug';
 import { useBrakeStore } from '@/stores/brakeStore';
 import { useChatStore } from '@/stores/chatStore';
+import { useGuideStore } from '@/stores/guideStore';
 import { useToastStore } from '@/stores/toastStore';
 import { API_URL, apiFetch } from '@/utils/api-client';
 import { getUserId } from '@/utils/userId';
+// F173 Phase E: isInvocationReplaced 检查已下沉到 useAgentMessages.handleAgentMessage
+// dispatch entry，useSocket 不再做 active path drop guard。
 import { reconnectGame } from './useGameReconnect';
-import {
-  type BackgroundAgentMessage,
-  clearBackgroundStreamRefForActiveEvent,
-  handleBackgroundAgentMessage,
-} from './useSocket-background';
+// F173 Phase E (KD-1): bg refs + background message processing moved into
+// useAgentMessages — useSocket no longer dispatches active vs background.
 import { loadJoinedRoomsFromSession, saveJoinedRoomsToSession } from './useSocket-persistence';
 import { handleVoiceChunk, handleVoiceStreamEnd, handleVoiceStreamStart } from './useVoiceStream';
 
@@ -51,7 +51,7 @@ interface ConnectorMessageEvent {
     type: 'connector';
     content: string;
     source?: import('../stores/chat-types').ConnectorSourceData;
-    extra?: Record<string, unknown>;
+    extra?: import('../stores/chat-types').ChatMessage['extra'];
     timestamp: number;
   };
 }
@@ -70,8 +70,15 @@ type DebugWebSocket = WebSocket & { __catCafeCloseLoggerAttached?: boolean };
 
 export interface SocketCallbacks {
   onMessage: (msg: AgentMessage) => void;
-  onThreadUpdated?: (data: { threadId: string; title?: string; participants?: string[] }) => void;
+  onThreadUpdated?: (data: {
+    threadId: string;
+    title?: string;
+    participants?: string[];
+    bootcampState?: Record<string, unknown>;
+  }) => void;
   onIntentMode?: (data: { threadId: string; mode: string; targetCats: string[] }) => void;
+  /** F118 D2: Earliest signal that cats are being spawned (before intent_mode) */
+  onSpawnStarted?: (data: { threadId: string; targetCats: string[]; invocationId: string }) => void;
   onTaskCreated?: (task: Record<string, unknown>) => void;
   onTaskUpdated?: (task: Record<string, unknown>) => void;
   onHeartbeat?: (data: { threadId: string; timestamp: number }) => void;
@@ -111,12 +118,125 @@ export interface SocketCallbacks {
     reason: 'canceled' | 'failed';
     queue: import('../stores/chat-types').QueueEntry[];
   }) => void;
+  // B-5: Guide events removed from callbacks — now go directly to guideStore.reduceServerEvent
+  /** F152 Phase B: Memory bootstrap index events */
+  onIndexEvent?: (event: string, data: Record<string, unknown>) => void;
 }
 
 const RECONNECT_RECONCILE_DELAY_MS = 2000;
+/** Watchdog: how often to scan threadStates for silent active invocations. */
+const STALE_WATCHDOG_INTERVAL_MS = 30_000;
+/** A thread is suspect if hasActiveInvocation but lastActivity is older than this. */
+const STALE_IDLE_THRESHOLD_MS = 3 * 60_000;
+/** Don't re-probe the same thread more often than this (protects server + avoids loop). */
+const STALE_PROBE_COOLDOWN_MS = 60_000;
+/** Direction-2 gate: only probe current thread for missed slots if user engaged within this window. */
+const STALE_RECENT_ENGAGEMENT_MS = 5 * 60_000;
 
 /** Generation counter: each reconnect increments, stale callbacks discard themselves. */
 let reconcileGeneration = 0;
+/** Per-thread last-probe timestamp used by the watchdog cooldown. */
+const staleProbeCooldown = new Map<string, number>();
+/** Per-thread epoch used to invalidate stale live queue-processing hydrates. */
+const liveQueueHydrateEpoch = new Map<string, number>();
+
+function bumpLiveQueueHydrateEpoch(threadId: string): number {
+  const next = (liveQueueHydrateEpoch.get(threadId) ?? 0) + 1;
+  liveQueueHydrateEpoch.set(threadId, next);
+  return next;
+}
+
+function getLiveQueueHydrateEpoch(threadId: string): number {
+  return liveQueueHydrateEpoch.get(threadId) ?? 0;
+}
+
+function hasStaleActiveThreadPresentation(state: ReturnType<typeof useChatStore.getState>, threadId: string): boolean {
+  if (state.currentThreadId !== threadId) return false;
+  if (state.messages.some((msg) => msg.type === 'assistant' && msg.isStreaming)) return true;
+  if (state.intentMode === 'execute' && state.targetCats.length > 0) return true;
+  return Object.values(state.catStatuses ?? {}).some((status) =>
+    ['spawning', 'pending', 'streaming', 'alive_but_silent', 'suspected_stall'].includes(status),
+  );
+}
+
+/**
+ * Query /queue for one thread and reconcile local state against server truth.
+ * Shared by reconnect reconciliation and the stale-watchdog probe.
+ * `shouldAbort` lets the caller bail out when a newer reconciliation supersedes it.
+ *
+ * Exported for tests (F173 PR-C Task 10 — fixture asserts mirror invariant).
+ */
+export async function reconcileThreadWithServer(
+  threadId: string,
+  shouldAbort: () => boolean,
+  source: string,
+): Promise<void> {
+  try {
+    const res = await apiFetch(`/api/threads/${threadId}/queue`);
+    if (shouldAbort()) return;
+    if (!res.ok) return;
+    const data = (await res.json()) as {
+      activeInvocations?: Array<{ catId: string; startedAt: number }>;
+    };
+    if (shouldAbort()) return;
+    const store = useChatStore.getState();
+    const serverSlots = data.activeInvocations && data.activeInvocations.length > 0 ? data.activeInvocations : null;
+    const isActiveThread = store.currentThreadId === threadId;
+
+    if (serverSlots) {
+      // Server still processing — re-hydrate local slots to match server truth.
+      // Stale hydrated/mismatched invocationIds get replaced so done(isFinal)
+      // cleanup works correctly when the response finishes.
+      // F173 PR-C Task 10: thread-scoped writers throughout — flat is mirror, no
+      // active vs background branch needed.
+      const serverActiveCats = serverSlots.map((s) => s.catId);
+      store.clearThreadActiveInvocation(threadId);
+      store.replaceThreadTargetCats(threadId, serverActiveCats);
+      for (const slot of serverSlots) {
+        store.updateThreadCatStatus(threadId, slot.catId, 'streaming');
+        const syntheticId = `hydrated-${threadId}-${slot.catId}`;
+        store.addThreadActiveInvocation(threadId, syntheticId, slot.catId, 'execute', slot.startedAt);
+      }
+      console.log(`[ws] ${source} reconciliation: re-hydrated active slots from server`, {
+        threadId,
+        cats: serverActiveCats,
+      });
+      return;
+    }
+
+    // F173 PR-C Task 10: server-no-slots clear path also goes through thread-scoped
+    // writers. Active-thread staleness check still uses flat (`hasActiveInvocation`
+    // + `hasStaleActiveThreadPresentation`) since stream/loading lingering is the
+    // active-only Direction 2/3 condition; background only checks ThreadState.
+    const ts = store.getThreadState(threadId);
+    const shouldClear = isActiveThread
+      ? store.hasActiveInvocation || hasStaleActiveThreadPresentation(store, threadId)
+      : ts.hasActiveInvocation;
+    if (!shouldClear) return;
+
+    store.clearThreadActiveInvocation(threadId);
+    store.setThreadLoading(threadId, false);
+    store.setThreadIntentMode(threadId, null);
+    store.clearThreadCatStatuses(threadId);
+    const messagesToCheck = isActiveThread ? store.messages : ts.messages;
+    for (const msg of messagesToCheck) {
+      if (msg.type === 'assistant' && msg.isStreaming) {
+        store.setThreadMessageStreaming(threadId, msg.id, false);
+      }
+    }
+    if (isActiveThread) {
+      // Server finished but done(isFinal) was lost — or local stream UI lingered
+      // after the slot ended. Fetch missed messages so user doesn't need F5.
+      store.requestStreamCatchUp(threadId);
+    }
+    console.log(
+      `[ws] ${source} reconciliation: cleared stale ${isActiveThread ? 'active-thread' : 'background-thread'} invocation state`,
+      { threadId },
+    );
+  } catch {
+    // Non-critical — don't break the caller
+  }
+}
 
 /**
  * After socket reconnect, bidirectionally reconcile invocation state with server.
@@ -145,88 +265,89 @@ function reconcileInvocationStateOnReconnect(activeThreadId: string | null): voi
 
   // Small delay: let any buffered socket events arrive first
   setTimeout(async () => {
-    // Discard if a newer reconnect has started its own reconciliation
     if (generation !== reconcileGeneration) return;
     for (const threadId of threadsToCheck) {
       if (generation !== reconcileGeneration) return;
-      try {
-        const res = await apiFetch(`/api/threads/${threadId}/queue`);
-        if (generation !== reconcileGeneration) return; // stale after await
-        if (!res.ok) continue;
-        const data = (await res.json()) as {
-          activeInvocations?: Array<{ catId: string; startedAt: number }>;
-        };
-        if (generation !== reconcileGeneration) return; // stale after await
-        const store = useChatStore.getState();
-        const serverSlots = data.activeInvocations && data.activeInvocations.length > 0 ? data.activeInvocations : null;
-        const isActiveThread = store.currentThreadId === threadId;
-
-        if (serverSlots) {
-          // Server still processing — re-hydrate local slots to match server truth.
-          // Stale hydrated/mismatched invocationIds get replaced so done(isFinal)
-          // cleanup works correctly when the response finishes.
-          const serverActiveCats = serverSlots.map((s) => s.catId);
-          store.clearThreadActiveInvocation(threadId);
-          store.replaceThreadTargetCats(threadId, serverActiveCats);
-          for (const slot of serverSlots) {
-            store.updateThreadCatStatus(threadId, slot.catId, 'streaming');
-            const syntheticId = `hydrated-${threadId}-${slot.catId}`;
-            if (isActiveThread) {
-              store.addActiveInvocation(syntheticId, slot.catId, 'execute', slot.startedAt);
-            } else {
-              store.addThreadActiveInvocation(threadId, syntheticId, slot.catId, 'execute', slot.startedAt);
-            }
-          }
-          console.log('[ws] Reconnect reconciliation: re-hydrated active slots from server', {
-            threadId,
-            cats: serverActiveCats,
-          });
-          continue;
-        }
-
-        if (isActiveThread && store.hasActiveInvocation) {
-          store.clearAllActiveInvocations();
-          store.setLoading(false);
-          store.setIntentMode(null);
-          store.clearCatStatuses();
-          for (const msg of store.messages) {
-            if (msg.type === 'assistant' && msg.isStreaming) {
-              store.setStreaming(msg.id, false);
-            }
-          }
-          // Reconnect catch-up (#276): server finished during disconnect,
-          // done(isFinal) was lost → fetch missed messages so user doesn't need F5
-          store.requestStreamCatchUp(threadId);
-          console.log('[ws] Reconnect reconciliation: cleared stale active-thread invocation state', { threadId });
-        } else if (!isActiveThread) {
-          const ts = store.getThreadState(threadId);
-          if (ts.hasActiveInvocation) {
-            store.clearThreadActiveInvocation(threadId);
-            store.setThreadLoading(threadId, false);
-            for (const msg of ts.messages) {
-              if (msg.type === 'assistant' && msg.isStreaming) {
-                store.setThreadMessageStreaming(threadId, msg.id, false);
-              }
-            }
-            console.log('[ws] Reconnect reconciliation: cleared stale background-thread invocation state', {
-              threadId,
-            });
-          }
-        }
-      } catch {
-        // Non-critical — don't break reconnect flow
-      }
+      await reconcileThreadWithServer(threadId, () => generation !== reconcileGeneration, 'Reconnect');
+      staleProbeCooldown.set(threadId, Date.now());
     }
   }, RECONNECT_RECONCILE_DELAY_MS);
 }
 
+/**
+ * Watchdog for two failure modes of the done/intent_mode pipeline on a live socket:
+ *  Direction 1 — done(isFinal) dropped: hasActiveInvocation=true but the slot went quiet.
+ *  Direction 2 — intent_mode dropped: server has a live slot but UI shows idle (no cancel button).
+ *  Direction 3 — local stream/cat-status UI lingered after server already finished.
+ *
+ * Active-thread truth lives in flat state (`state.hasActiveInvocation`, `state.activeInvocations`,
+ * `state.messages`), not in `state.threadStates[currentThreadId]` — `setCurrentThread` only saves
+ * the outgoing thread's snapshot, and `snapshotActive` returns `lastActivity=Date.now()` while
+ * streaming, so neither source is reliable for stale detection. Background threads are still
+ * correctly reflected in `threadStates` since background updates write through to the map.
+ */
+function checkForStaleActiveInvocations(): void {
+  const now = Date.now();
+  const state = useChatStore.getState();
+  const currentThreadId = state.currentThreadId;
+  const toProbe = new Set<string>();
+
+  const canProbe = (threadId: string): boolean =>
+    now - (staleProbeCooldown.get(threadId) ?? 0) >= STALE_PROBE_COOLDOWN_MS;
+
+  // Background threads: iterate threadStates (skip current — flat state is the truth there).
+  for (const [threadId, ts] of Object.entries(state.threadStates ?? {})) {
+    if (threadId === currentThreadId) continue;
+    if (!ts.hasActiveInvocation) continue;
+    if (now - (ts.lastActivity ?? 0) < STALE_IDLE_THRESHOLD_MS) continue;
+    if (!canProbe(threadId)) continue;
+    toProbe.add(threadId);
+  }
+
+  if (currentThreadId && canProbe(currentThreadId)) {
+    // Active thread: read directly from flat state.
+    if (state.hasActiveInvocation) {
+      // Direction 1 on active: derive staleness from oldest invocation.startedAt, since
+      // snapshotActive.lastActivity is always Date.now() while streaming.
+      const starts = Object.values(state.activeInvocations ?? {})
+        .map((inv) => inv?.startedAt)
+        .filter((n): n is number => typeof n === 'number');
+      if (starts.length > 0 && now - Math.min(...starts) >= STALE_IDLE_THRESHOLD_MS) {
+        toProbe.add(currentThreadId);
+      }
+    } else {
+      // Direction 2 on active: probe only when user is waiting — last message
+      // is a user message. A completed assistant round-trip means there's
+      // nothing to reconcile, and keying off "any recent activity" probes
+      // healthy threads for 5 minutes after normal completion.
+      const lastMsg = state.messages?.[state.messages.length - 1];
+      if (hasStaleActiveThreadPresentation(state, currentThreadId)) {
+        toProbe.add(currentThreadId);
+      } else if (lastMsg?.type === 'user') {
+        const lastActivity = lastMsg.deliveredAt ?? lastMsg.timestamp ?? 0;
+        if (now - lastActivity < STALE_RECENT_ENGAGEMENT_MS) {
+          toProbe.add(currentThreadId);
+        }
+      }
+    }
+  }
+
+  if (toProbe.size === 0) return;
+  for (const threadId of toProbe) {
+    staleProbeCooldown.set(threadId, now);
+    void reconcileThreadWithServer(threadId, () => false, 'Watchdog');
+  }
+}
+
 export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
   const socketRef = useRef<Socket | null>(null);
+  const [socketConnected, setSocketConnected] = useState<boolean | null>(null);
   const joinedRoomsRef = useRef<Set<string>>(new Set());
-  const bgStreamRefsRef = useRef<Map<string, { id: string; threadId: string; catId: string }>>(new Map());
-  const bgReplacedInvocationsRef = useRef<Map<string, string>>(new Map());
-  const bgFinalizedRefsRef = useRef<Map<string, string>>(new Map());
-  const bgSeqRef = useRef(0);
+  const pendingGuideStartsRef = useRef<Map<string, { guideId: string; threadId: string; timestamp: number }>>(
+    new Map(),
+  );
+  // F173 Phase E (KD-1): bg refs (bgStreamRefs / bgFinalizedRefs / bgSeq) moved to
+  // useAgentMessages — single dispatch handler owns them now。
   const userIdRef = useRef(getUserId());
   const threadIdRef = useRef(threadId);
   threadIdRef.current = threadId;
@@ -294,6 +415,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
     };
 
     socket.on('connect', () => {
+      setSocketConnected(true);
       console.log('[ws] Connected', {
         socketId: socket.id,
         transport: getTransportName(),
@@ -346,17 +468,12 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
     });
 
     socket.on('agent_message', (msg: AgentMessage) => {
-      const routeThread = threadIdRef.current;
-      const storeThread = useChatStore.getState().currentThreadId;
-
-      // Active thread requires BOTH route-level and store-level agreement.
-      // This blocks a switch-window race where route already points to thread-B
-      // but flat store still belongs to thread-A.
-      const isActiveThreadMessage = Boolean(
-        msg.threadId && routeThread && storeThread && msg.threadId === routeThread && msg.threadId === storeThread,
-      );
-      // If either pointer is temporarily unavailable during thread switch,
-      // route thread-tagged events to background to avoid mutating stale flat state.
+      // F173 KD-4 — single-pointer routing.
+      // store.currentThreadId is the only source of truth. routeThread (URL ref)
+      // is removed because it caused the reverse-race ghost bubbles: when store
+      // had switched to B but URL ref was still A, events for B were mis-routed
+      // to background, creating bg-{ts}-{cat}-{seq} ghost bubbles whose
+      // invocationId came from stale thread-state — never matched on F5 hydration.
       recordInvocationEvent({
         event: msg.type === 'done' ? 'done' : 'agent_message',
         threadId: msg.threadId,
@@ -364,40 +481,27 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
         isFinal: msg.isFinal === true,
       });
 
-      // Defensive fallback for malformed legacy payloads (threadId missing).
-      if (!msg.threadId) {
-        callbacksRef.current.onMessage(msg);
-        clearBackgroundStreamRefForActiveEvent(msg, bgStreamRefsRef.current);
-        return;
-      }
-
-      // Active thread → full processing via onMessage (streaming, tool events, etc.)
-      if (isActiveThreadMessage) {
-        callbacksRef.current.onMessage(msg);
-        clearBackgroundStreamRefForActiveEvent(msg, bgStreamRefsRef.current);
-        return;
-      }
-
-      // Background thread → delegated handler
-      handleBackgroundAgentMessage(msg as BackgroundAgentMessage, {
-        store: useChatStore.getState(),
-        bgStreamRefs: bgStreamRefsRef.current,
-        finalizedBgRefs: bgFinalizedRefsRef.current,
-        replacedInvocations: bgReplacedInvocationsRef.current,
-        nextBgSeq: () => bgSeqRef.current++,
-        addToast: (toast) => useToastStore.getState().addToast(toast),
-        clearDoneTimeout: callbacksRef.current.clearDoneTimeout,
-      });
+      // F173 Phase E (KD-1 handler unification): single dispatch.
+      // useAgentMessages.handleAgentMessage 现在自己路由 active vs background，并管 bg refs。
+      // useSocket 只做 socket-event-level 概念（recordInvocationEvent + 转发 callback）。
+      callbacksRef.current.onMessage(msg);
     });
 
-    socket.on('thread_updated', (data: { threadId: string; title?: string; participants?: string[] }) => {
-      callbacksRef.current.onThreadUpdated?.(data);
-    });
+    socket.on(
+      'thread_updated',
+      (data: {
+        threadId: string;
+        title?: string;
+        participants?: string[];
+        bootcampState?: Record<string, unknown>;
+      }) => {
+        callbacksRef.current.onThreadUpdated?.(data);
+      },
+    );
 
     socket.on(
       'intent_mode',
       (data: { threadId: string; mode: string; targetCats: string[]; invocationId?: string }) => {
-        const routeThread = threadIdRef.current;
         const storeThread = useChatStore.getState().currentThreadId;
         recordInvocationEvent({
           event: 'intent_mode',
@@ -405,12 +509,8 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
           mode: data.mode,
         });
 
-        // Dual-pointer guard: both route and store must agree for active-thread processing.
-        // Mirrors agent_message pattern — blocks switch-window race where route already
-        // points to thread-B but flat store still belongs to thread-A.
-        const isActiveThread = Boolean(
-          data.threadId && routeThread && storeThread && data.threadId === routeThread && data.threadId === storeThread,
-        );
+        // F173 KD-4 — single-pointer routing (store as truth source). See agent_message comment.
+        const isActiveThread = Boolean(data.threadId && storeThread && data.threadId === storeThread);
 
         if (isActiveThread) {
           callbacksRef.current.onIntentMode?.(data);
@@ -461,6 +561,32 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
         }
       },
     );
+
+    // F118 D2: spawn_started — earliest per-cat spawning signal (fires before intent_mode).
+    socket.on('spawn_started', (data: { threadId: string; targetCats: string[]; invocationId: string }) => {
+      const storeThread = useChatStore.getState().currentThreadId;
+
+      // F173 KD-4 — single-pointer routing (store as truth source). See agent_message comment.
+      const isActiveThread = Boolean(data.threadId && storeThread && data.threadId === storeThread);
+
+      if (isActiveThread) {
+        callbacksRef.current.onSpawnStarted?.(data);
+        // Set per-cat spawning status for ThinkingIndicator
+        const cats = data.targetCats ?? [];
+        for (const catId of cats) {
+          useChatStore.getState().setCatStatus(catId, 'spawning');
+        }
+        return;
+      }
+
+      // Background thread (split-pane): write thread-scoped state
+      if (data.threadId) {
+        const store = useChatStore.getState();
+        store.setThreadLoading(data.threadId, true);
+        store.setThreadHasActiveInvocation(data.threadId, true);
+        store.setThreadTargetCats(data.threadId, data.targetCats ?? []);
+      }
+    });
 
     socket.on('task_created', (task: Record<string, unknown>) => {
       callbacksRef.current.onTaskCreated?.(task);
@@ -514,10 +640,40 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
     socket.on('queue_updated', (data: { threadId: string; queue: unknown[]; action: string }) => {
       const store = useChatStore.getState();
       store.setQueue(data.threadId, data.queue as import('../stores/chat-types').QueueEntry[]);
-      // Queue processor started executing an entry: restore active invocation marker
-      // so ChatInput can show "正在回复中" and Stop/queue controls after thread switches/F5.
+      // Queue processor started executing an entry: restore the coarse "active"
+      // marker immediately, then hydrate current-thread slot truth from /queue.
+      // This covers the gap where processing resumes before intent_mode lands:
+      // without slot hydration, the top single-cat cancel can stay hidden even
+      // though the server is already executing this thread.
       if (data.action === 'processing') {
         store.setThreadHasActiveInvocation(data.threadId, true);
+        if (data.threadId === store.currentThreadId) {
+          const epoch = bumpLiveQueueHydrateEpoch(data.threadId);
+          void reconcileThreadWithServer(
+            data.threadId,
+            () =>
+              useChatStore.getState().currentThreadId !== data.threadId ||
+              getLiveQueueHydrateEpoch(data.threadId) !== epoch,
+            'QueueProcessing',
+          );
+        }
+      }
+      if (data.action === 'completed') {
+        bumpLiveQueueHydrateEpoch(data.threadId);
+        if (data.threadId === store.currentThreadId) {
+          const epoch = getLiveQueueHydrateEpoch(data.threadId);
+          // Queue `completed` is the thread-terminal signal for this processing
+          // path. We invalidate the earlier processing-time hydrate here, then
+          // fetch `/queue` once more so a stale response that already won the
+          // race gets actively cleared instead of lingering until watchdog.
+          void reconcileThreadWithServer(
+            data.threadId,
+            () =>
+              useChatStore.getState().currentThreadId !== data.threadId ||
+              getLiveQueueHydrateEpoch(data.threadId) !== epoch,
+            'QueueCompleted',
+          );
+        }
       }
       // P1 fix: 'processing' means continue/auto-dequeue resumed the queue — clear paused state
       if (data.action === 'processing' || data.action === 'cleared') {
@@ -562,6 +718,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
       const store = useChatStore.getState();
       store.setQueue(data.threadId, data.queue as import('../stores/chat-types').QueueEntry[]);
       store.setQueuePaused(data.threadId, true, data.reason);
+      bumpLiveQueueHydrateEpoch(data.threadId);
       if (isDebugEnabled()) {
         recordInvocationEvent({
           event: 'queue_paused',
@@ -587,6 +744,17 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
 
     socket.on('connector_message', (data: ConnectorMessageEvent) => {
       if (!data?.threadId || !data?.message?.id) return;
+      const toast = data.message.extra?.scheduler?.toast;
+      if (data.message.source?.connector === 'scheduler' && toast) {
+        useToastStore.getState().addToast({
+          type: toast.type,
+          title: toast.title,
+          message: toast.message,
+          threadId: data.threadId,
+          duration: toast.duration,
+        });
+        return;
+      }
       const store = useChatStore.getState();
       store.addMessageToThread(data.threadId, {
         id: data.message.id,
@@ -633,12 +801,75 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
       },
     );
 
+    // F155/B-5: Guide events → Zustand reducer (no CustomEvent bridge)
+    socket.on('guide_start', (data: { guideId: string; threadId: string; timestamp: number }) => {
+      const routeThread = threadIdRef.current;
+      const storeThread = useChatStore.getState().currentThreadId;
+      const isActiveThread = Boolean(
+        data.threadId && routeThread && storeThread && data.threadId === routeThread && data.threadId === storeThread,
+      );
+      if (!isActiveThread) {
+        pendingGuideStartsRef.current.set(data.threadId, data);
+        return;
+      }
+      pendingGuideStartsRef.current.delete(data.threadId);
+      useGuideStore.getState().reduceServerEvent({ action: 'start', guideId: data.guideId, threadId: data.threadId });
+    });
+
+    socket.on('guide_control', (data: { action: string; guideId: string; threadId: string; timestamp: number }) => {
+      if (data.action === 'exit') {
+        pendingGuideStartsRef.current.delete(data.threadId);
+      }
+      const routeThread = threadIdRef.current;
+      const storeThread = useChatStore.getState().currentThreadId;
+      const isActiveThread = Boolean(
+        data.threadId && routeThread && storeThread && data.threadId === routeThread && data.threadId === storeThread,
+      );
+      if (!isActiveThread) return;
+      const action =
+        data.action === 'exit'
+          ? 'control_exit'
+          : data.action === 'skip'
+            ? 'control_skip'
+            : data.action === 'next'
+              ? 'control_next'
+              : undefined;
+      if (action) {
+        useGuideStore.getState().reduceServerEvent({ action, guideId: data.guideId, threadId: data.threadId });
+      }
+    });
+
+    socket.on('guide_complete', (data: { guideId: string; threadId: string; timestamp: number }) => {
+      pendingGuideStartsRef.current.delete(data.threadId);
+      const routeThread = threadIdRef.current;
+      const storeThread = useChatStore.getState().currentThreadId;
+      const isActiveThread = Boolean(
+        data.threadId && routeThread && storeThread && data.threadId === routeThread && data.threadId === storeThread,
+      );
+      if (!isActiveThread) return;
+      useGuideStore
+        .getState()
+        .reduceServerEvent({ action: 'complete', guideId: data.guideId, threadId: data.threadId });
+    });
+
+    // F152 Phase B: Memory bootstrap progress events
+    socket.on('index:progress', (data: Record<string, unknown>) => {
+      callbacksRef.current.onIndexEvent?.('index:progress', data);
+    });
+    socket.on('index:complete', (data: Record<string, unknown>) => {
+      callbacksRef.current.onIndexEvent?.('index:complete', data);
+    });
+    socket.on('index:failed', (data: Record<string, unknown>) => {
+      callbacksRef.current.onIndexEvent?.('index:failed', data);
+    });
+
     // F111 Phase B + F112 Phase A: Real-time voice stream events
     socket.on('voice_stream_start', handleVoiceStreamStart);
     socket.on('voice_chunk', handleVoiceChunk);
     socket.on('voice_stream_end', handleVoiceStreamEnd);
 
     socket.on('connect_error', (error: Error & { description?: unknown; context?: unknown }) => {
+      setSocketConnected(false);
       console.error('[ws] connect_error', {
         message: error.message,
         name: error.name,
@@ -649,6 +880,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
     });
 
     socket.on('disconnect', (...args: unknown[]) => {
+      setSocketConnected(false);
       const [reason, details] = args;
       console.warn('[ws] Disconnected', {
         reason: typeof reason === 'string' ? reason : String(reason),
@@ -682,7 +914,24 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
 
     socketRef.current = socket;
 
+    // Stale-invocation watchdog: periodic probe to catch missed done(isFinal) events
+    // on a still-connected socket (won't trigger reconcile-on-reconnect).
+    const watchdogTimer = setInterval(checkForStaleActiveInvocations, STALE_WATCHDOG_INTERVAL_MS);
+    const visibilityHandler =
+      typeof document !== 'undefined'
+        ? () => {
+            if (document.visibilityState === 'visible') checkForStaleActiveInvocations();
+          }
+        : null;
+    if (visibilityHandler) {
+      document.addEventListener('visibilitychange', visibilityHandler);
+    }
+
     return () => {
+      clearInterval(watchdogTimer);
+      if (visibilityHandler) {
+        document.removeEventListener('visibilitychange', visibilityHandler);
+      }
       socket.disconnect();
       joinedRoomsRef.current.clear();
     };
@@ -752,9 +1001,23 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
     }
   }, [threadId, joinRoom]);
 
-  const cancelInvocation = useCallback((tid: string) => {
-    socketRef.current?.emit('cancel_invocation', { threadId: tid });
+  const storeThreadId = useChatStore((s) => s.currentThreadId);
+  useEffect(() => {
+    if (!threadId) return;
+    if (storeThreadId !== threadId) return;
+    const pendingStart = pendingGuideStartsRef.current.get(threadId);
+    if (!pendingStart) return;
+    pendingGuideStartsRef.current.delete(threadId);
+    useGuideStore.getState().reduceServerEvent({
+      action: 'start',
+      guideId: pendingStart.guideId,
+      threadId: pendingStart.threadId,
+    });
+  }, [threadId, storeThreadId]);
+
+  const cancelInvocation = useCallback((tid: string, catId?: string) => {
+    socketRef.current?.emit('cancel_invocation', catId ? { threadId: tid, catId } : { threadId: tid });
   }, []);
 
-  return { socketRef, joinRoom, leaveRoom, syncRooms, cancelInvocation };
+  return { socketRef, joinRoom, leaveRoom, syncRooms, cancelInvocation, socketConnected };
 }

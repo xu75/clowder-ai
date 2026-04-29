@@ -6,7 +6,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { CatId, ConnectorSource, MessageContent, RichMessageExtra } from '@cat-cafe/shared';
+import type {
+  CatId,
+  ConnectorSource,
+  MessageContent,
+  ReplyPreview,
+  RichMessageExtra,
+  SchedulerMessageExtra,
+} from '@cat-cafe/shared';
 import type { MessageMetadata } from '../../types.js';
 import { isSystemUserMessage } from '../visibility.js';
 // Single source of truth: ThreadStore.ts owns DEFAULT_THREAD_ID
@@ -50,12 +57,14 @@ export interface StoredMessage {
   toolEvents?: readonly StoredToolEvent[];
   /** Provider/model metadata (for cat messages) */
   metadata?: MessageMetadata;
-  /** F22+F52+F098-C1: Extensible extra data (rich blocks, stream metadata, cross-post origin, explicit targets) */
+  /** F22+F52+F098-C1+F153-F: Extensible extra data (rich blocks, stream metadata, cross-post origin, explicit targets, tracing pointers) */
   extra?: {
     rich?: RichMessageExtra;
     stream?: { invocationId: string };
     crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
     targetCats?: string[];
+    scheduler?: SchedulerMessageExtra['scheduler'];
+    tracing?: { traceId: string; spanId: string; parentSpanId?: string };
   };
   /** CatIds mentioned in this message */
   mentions: readonly CatId[];
@@ -547,13 +556,6 @@ export class MessageStore {
   }
 }
 
-/** F121: Reply preview for frontend rendering */
-export interface ReplyPreview {
-  senderCatId: CatId | null;
-  content: string;
-  deleted?: true;
-}
-
 const PREVIEW_MAX_LENGTH = 80;
 
 /**
@@ -572,5 +574,9 @@ export async function hydrateReplyPreview(store: IMessageStore, replyToId: strin
   const truncated =
     parent.content.length > PREVIEW_MAX_LENGTH ? parent.content.slice(0, PREVIEW_MAX_LENGTH) : parent.content;
 
-  return { senderCatId: parent.catId, content: truncated };
+  return {
+    senderCatId: parent.catId,
+    content: truncated,
+    ...(parent.extra?.scheduler?.hiddenTrigger ? { kind: 'scheduler_trigger' as const } : {}),
+  };
 }

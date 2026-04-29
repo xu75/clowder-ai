@@ -1,5 +1,5 @@
 /**
- * F140/F320: ReviewFeedbackTaskSpec — detect new PR review feedback (comments + decisions).
+ * F140 + clowder-ai#320: ReviewFeedbackTaskSpec — detect new PR review feedback (comments + decisions).
  *
  * #320: Reads from unified TaskStore (kind=pr_tracking) instead of PrTrackingStore.
  * KD-11: Replaces ReviewCommentsTaskSpec with richer model.
@@ -21,7 +21,7 @@ export interface ReviewFeedbackSignal {
   prNumber: number;
   newComments: PrFeedbackComment[];
   newDecisions: PrReviewDecision[];
-  commitCursor: () => void;
+  commitCursor: () => Promise<void>;
 }
 
 export interface ReviewFeedbackTaskSpecOptions {
@@ -38,12 +38,60 @@ export interface ReviewFeedbackTaskSpecOptions {
   readonly pollIntervalMs?: number;
   readonly isEchoComment?: (comment: PrFeedbackComment) => boolean;
   readonly isEchoReview?: (review: PrReviewDecision) => boolean;
+  /**
+   * F140 Phase E.1: bot setup-only conversation noise filter.
+   * Semantically independent from isEchoComment (self-authored echo).
+   * Both predicates return `skip` — OR'd together in gate().
+   */
+  readonly isNoiseComment?: (comment: PrFeedbackComment) => boolean;
 }
 
 export function createReviewFeedbackTaskSpec(opts: ReviewFeedbackTaskSpecOptions): TaskSpec_P1<ReviewFeedbackSignal> {
   // In-memory cursors: highest seen comment ID and review ID per PR
   const commentCursors = new Map<string, number>();
   const reviewCursors = new Map<string, number>();
+
+  /**
+   * Advance cursor: persist to store + update in-memory map.
+   *
+   * Two policies (matching blast radius of each failure mode):
+   * - persistFirst (echo-skip): no delivery happened → persist first, skip memory on failure → safe retry
+   * - memoryFirst  (post-delivery): notification sent → advance memory first → prevent duplicate spam
+   */
+  async function advanceCursor(
+    taskId: string,
+    prKey: string,
+    cursors: { comment: number; decision: number },
+    policy: 'persistFirst' | 'memoryFirst',
+  ): Promise<void> {
+    const patch = {
+      review: {
+        lastCommentCursor: cursors.comment,
+        lastDecisionCursor: cursors.decision,
+        ...(policy === 'memoryFirst' ? { lastNotifiedAt: Date.now() } : {}),
+      },
+    };
+    const setMemory = () => {
+      commentCursors.set(prKey, cursors.comment);
+      reviewCursors.set(prKey, cursors.decision);
+    };
+
+    if (policy === 'memoryFirst') {
+      setMemory();
+      try {
+        await opts.taskStore.patchAutomationState(taskId, patch);
+      } catch (e) {
+        opts.log.warn(`[review-feedback] cursor persist failed for ${prKey}, restart may replay`, e);
+      }
+    } else {
+      try {
+        await opts.taskStore.patchAutomationState(taskId, patch);
+        setMemory();
+      } catch (e) {
+        opts.log.warn(`[review-feedback] echo-skip persist failed for ${prKey}, will retry next tick`, e);
+      }
+    }
+  }
 
   return {
     id: 'review-feedback',
@@ -71,15 +119,21 @@ export function createReviewFeedbackTaskSpec(opts: ReviewFeedbackTaskSpecOptions
               opts.fetchReviews(repoFullName, prNumber),
             ]);
 
-            const commentCursor = commentCursors.get(prKey) ?? 0;
-            const reviewCursor = reviewCursors.get(prKey) ?? 0;
+            // #406: Seed from persisted automationState.review on first access (survives restart)
+            const commentCursor = commentCursors.get(prKey) ?? task.automationState?.review?.lastCommentCursor ?? 0;
+            const reviewCursor = reviewCursors.get(prKey) ?? task.automationState?.review?.lastDecisionCursor ?? 0;
 
             const allNewComments = comments.filter((c) => c.id > commentCursor);
             const allNewReviews = reviews.filter((r) => r.id > reviewCursor);
 
             const commentFilter = opts.isEchoComment;
+            const noiseFilter = opts.isNoiseComment;
             const reviewFilter = opts.isEchoReview;
-            const newComments = commentFilter ? allNewComments.filter((c) => !commentFilter(c)) : allNewComments;
+            const newComments = allNewComments.filter((c) => {
+              if (commentFilter?.(c)) return false;
+              if (noiseFilter?.(c)) return false;
+              return true;
+            });
             const newDecisions = reviewFilter ? allNewReviews.filter((r) => !reviewFilter(r)) : allNewReviews;
 
             const maxCommentId =
@@ -89,8 +143,7 @@ export function createReviewFeedbackTaskSpec(opts: ReviewFeedbackTaskSpecOptions
             const allSkipped = newComments.length === 0 && newDecisions.length === 0;
             const hadNewItems = allNewComments.length > 0 || allNewReviews.length > 0;
             if (hadNewItems && allSkipped) {
-              commentCursors.set(prKey, maxCommentId);
-              reviewCursors.set(prKey, maxReviewId);
+              await advanceCursor(task.id, prKey, { comment: maxCommentId, decision: maxReviewId }, 'persistFirst');
               continue;
             }
 
@@ -103,10 +156,8 @@ export function createReviewFeedbackTaskSpec(opts: ReviewFeedbackTaskSpecOptions
                 prNumber,
                 newComments,
                 newDecisions,
-                commitCursor: () => {
-                  commentCursors.set(prKey, maxCommentId);
-                  reviewCursors.set(prKey, maxReviewId);
-                },
+                commitCursor: () =>
+                  advanceCursor(task.id, prKey, { comment: maxCommentId, decision: maxReviewId }, 'memoryFirst'),
               },
               // #320 KD-15: unified subject_key format
               subjectKey: task.subjectKey!,
@@ -144,7 +195,7 @@ export function createReviewFeedbackTaskSpec(opts: ReviewFeedbackTaskSpecOptions
 
         if (routeResult.kind !== 'notified') return;
 
-        signal.commitCursor();
+        await signal.commitCursor();
 
         if (opts.invokeTrigger) {
           try {

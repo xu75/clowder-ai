@@ -66,9 +66,18 @@ export interface ThreadMemoryV1 {
   openQuestions?: string[];
   /** VG-3: Referenced artifacts — ADRs, Feature IDs (max 8) */
   artifacts?: string[];
+  /** F148 Phase H: Deterministic file/PR artifacts from session seal (max 5) */
+  recentArtifacts?: Array<{
+    type: string;
+    ref: string;
+    label: string;
+    updatedAt: number;
+    updatedBy: string;
+    ops?: string[];
+  }>;
 }
 
-export type MentionRoutingSuppressionReason = 'no_action' | 'cross_paragraph';
+export type MentionRoutingSuppressionReason = 'no_action' | 'cross_paragraph' | 'inline_action';
 export type MentionActionabilityMode = 'strict' | 'relaxed';
 
 export interface ThreadMentionRoutingFeedbackItem {
@@ -130,8 +139,12 @@ export interface Thread {
   deletedAt?: number | null;
   /** F087: CVO Bootcamp onboarding state. */
   bootcampState?: BootcampStateV1;
+  /** F171: First-Run Quest onboarding state. */
+  firstRunQuestState?: FirstRunQuestStateV1;
   /** F088 Phase G: Connector Hub thread state — marks this thread as an IM Hub for command isolation. */
   connectorHubState?: ConnectorHubStateV1;
+  /** F168: Auto-switch workspace panel when this thread is opened. */
+  preferredWorkspaceMode?: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community';
 }
 
 /** F088 Phase G: Connector Hub thread state for IM command isolation. */
@@ -147,31 +160,82 @@ export interface ConnectorHubStateV1 {
   lastCommandAt?: number;
 }
 
-/** F087: Bootcamp phase for CVO onboarding */
+/** F087: Bootcamp phase for CVO onboarding (F171 v2 flow) */
 export type BootcampPhase =
-  | 'phase-0-select-cat'
   | 'phase-1-intro'
   | 'phase-2-env-check'
   | 'phase-3-config-help'
-  | 'phase-3.5-advanced'
   | 'phase-4-task-select'
   | 'phase-5-kickoff'
   | 'phase-6-design'
   | 'phase-7-dev'
-  | 'phase-8-review'
+  | 'phase-7.5-add-teammate'
+  | 'phase-8-collab'
   | 'phase-9-complete'
   | 'phase-10-retro'
   | 'phase-11-farewell';
+
+/** F171: Sub-step for add-teammate console guide overlay */
+export type BootcampGuideStep = 'preview-result' | 'open-hub' | 'click-add-member' | 'fill-form' | 'done';
 
 export interface BootcampStateV1 {
   v: 1;
   phase: BootcampPhase;
   leadCat?: CatId;
   selectedTaskId?: string;
+  /** F171: sub-step for add-teammate console guide overlay */
+  guideStep?: BootcampGuideStep | null;
   envCheck?: Record<string, { ok: boolean; version?: string; note?: string }>;
   advancedFeatures?: Record<string, 'available' | 'unavailable' | 'skipped'>;
   startedAt: number;
   completedAt?: number;
+}
+
+/** F171: First-Run Quest phase */
+export type FirstRunQuestPhase =
+  | 'quest-0-welcome'
+  | 'quest-1-create-first-cat'
+  | 'quest-2-cat-intro'
+  | 'quest-3-task-select'
+  | 'quest-4-task-running'
+  | 'quest-5-error-encountered'
+  | 'quest-6-second-cat-prompt'
+  | 'quest-7-second-cat-created'
+  | 'quest-8-collaboration-demo'
+  | 'quest-9-completion';
+
+/** F171: First-Run Quest state stored in thread metadata */
+export interface FirstRunQuestStateV1 {
+  v: 1;
+  phase: FirstRunQuestPhase;
+  startedAt: number;
+  completedAt?: number;
+  firstCatId?: string;
+  firstCatName?: string;
+  secondCatId?: string;
+  secondCatName?: string;
+  selectedTaskId?: string;
+  errorDetected?: boolean;
+}
+
+/** F155: Guide session status */
+export type GuideStatus = 'offered' | 'awaiting_choice' | 'active' | 'completed' | 'cancelled';
+
+/** F155: Scene-based bidirectional guide state — thread-level authority */
+export interface GuideStateV1 {
+  v: 1;
+  guideId: string;
+  status: GuideStatus;
+  /** Owning user for default-thread guide state. */
+  userId?: string;
+  currentStep?: number;
+  offeredAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  /** True after the first agent turn has seen the completion (one-shot consumption). */
+  completionAcked?: boolean;
+  /** catId that offered this guide (prevents multi-cat duplicate offers). */
+  offeredBy?: string;
 }
 
 /** F079: Voting state stored in thread metadata */
@@ -246,8 +310,14 @@ export interface IThreadStore {
   updateVoiceMode(threadId: string, voiceMode: boolean): void | Promise<void>;
   /** F087: Get/update bootcamp state. */
   updateBootcampState(threadId: string, state: BootcampStateV1 | null): void | Promise<void>;
+  /** F171: Get/update first-run quest state. */
+  updateFirstRunQuestState(threadId: string, state: FirstRunQuestStateV1 | null): void | Promise<void>;
   /** F088 Phase G: Get/update connector hub state. */
   updateConnectorHubState(threadId: string, state: ConnectorHubStateV1 | null): void | Promise<void>;
+  updatePreferredWorkspaceMode(
+    threadId: string,
+    mode: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community' | null,
+  ): void | Promise<void>;
   updateLastActive(threadId: string): void | Promise<void>;
   delete(threadId: string): boolean | Promise<boolean>;
   /** F095 Phase D: Soft-delete — mark thread as deleted without removing data. */
@@ -256,6 +326,8 @@ export interface IThreadStore {
   restore(threadId: string): boolean | Promise<boolean>;
   /** F095 Phase D: List soft-deleted threads (trash bin). */
   listDeleted(userId: string): Thread[] | Promise<Thread[]>;
+  /** Repair sparse/missing per-user thread indexes from authoritative thread detail hashes. */
+  repairIndex?(userId?: string): Promise<{ repairedUsers: number; repairedMembers: number }>;
 }
 
 const MAX_THREADS = 100;
@@ -555,6 +627,16 @@ export class ThreadStore implements IThreadStore {
     }
   }
 
+  updateFirstRunQuestState(threadId: string, state: FirstRunQuestStateV1 | null): void {
+    const thread = this.get(threadId);
+    if (!thread) return;
+    if (state === null) {
+      delete thread.firstRunQuestState;
+    } else {
+      thread.firstRunQuestState = state;
+    }
+  }
+
   updateConnectorHubState(threadId: string, state: ConnectorHubStateV1 | null): void {
     const thread = this.get(threadId);
     if (!thread) return;
@@ -562,6 +644,19 @@ export class ThreadStore implements IThreadStore {
       delete thread.connectorHubState;
     } else {
       thread.connectorHubState = state;
+    }
+  }
+
+  updatePreferredWorkspaceMode(
+    threadId: string,
+    mode: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community' | null,
+  ): void {
+    const thread = this.get(threadId);
+    if (!thread) return;
+    if (mode === null) {
+      delete thread.preferredWorkspaceMode;
+    } else {
+      thread.preferredWorkspaceMode = mode;
     }
   }
 

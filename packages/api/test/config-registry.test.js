@@ -102,13 +102,13 @@ describe('ConfigRegistry', () => {
     assert.equal(snapshot.server.redis, 'connected');
   });
 
-  it('populates cats from CAT_CONFIGS', async () => {
+  it('populates cats from runtime config', async () => {
     const { collectConfigSnapshot } = await import('../dist/config/ConfigRegistry.js');
     const snapshot = collectConfigSnapshot();
 
     assert.ok(snapshot.cats.opus, 'has opus');
     assert.ok(snapshot.cats.opus.displayName, 'opus has displayName');
-    assert.ok(snapshot.cats.opus.provider, 'opus has provider');
+    assert.ok(snapshot.cats.opus.clientId, 'opus has clientId');
     assert.ok(snapshot.cats.opus.model, 'opus has model');
     assert.equal(typeof snapshot.cats.opus.mcpSupport, 'boolean', 'opus has mcpSupport');
   });

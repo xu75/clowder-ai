@@ -24,9 +24,33 @@ triggers:
 
 1. Reviewer 有**明确放行信号**（"放行"/"LGTM"/"通过"/"可以合入"）
 2. **所有 P1/P2** 已修复且经 reviewer 确认
-3. Review 针对**当前分支/当前工作**（不是历史 review）
+3. Review 针对**当前分支/当前工作**（不是历史 review，且必须覆盖**当前 HEAD SHA**）
 4. BACKLOG 涉及条目已在 feature branch 上标 `[x]`
 5. **`pnpm gate` 全绿**（基于最新 `origin/main` rebase 后的全量 build + test + lint + check）
+
+### Review Continuity Guard（review 是否真的覆盖当前 HEAD）
+
+`pnpm gate`、rebase、fixup、feature index regeneration 都可能让 HEAD 变化。**只要 HEAD 变了，旧 review 默认不自动继承。**
+
+进入 Step 7 之前，author 必须核对：
+
+```bash
+CURRENT_HEAD="$(gh pr view {PR_NUMBER} --json headRefOid --jq '.headRefOid')"
+echo "$CURRENT_HEAD"
+```
+
+- reviewer 放行对应的 SHA = `CURRENT_HEAD` → 通过
+- reviewer 放行时的 SHA ≠ `CURRENT_HEAD` → **停止 merge-gate**
+  - 非行为性 delta（例如 `docs/features/index.json` regenerate、纯 rebase 无代码差异）：
+    reviewer 必须在 thread / PR 上**显式写出**“放行延续到 `{CURRENT_HEAD:0:8}`”
+  - 行为性 delta（代码、测试、配置、接口变化）：
+    重新 review，不能拿旧放行硬套新 HEAD
+- 只改 PR body / comment 不改 commit SHA → 不影响 review 覆盖范围
+
+**作者交接格式**（ping reviewer / 汇报 merge-gate 时必须带）：
+- 当前 HEAD：`{short_sha}`
+- reviewer 已覆盖：`yes/no`
+- 如果 `no`：说明是“请求延续到新 SHA”还是“请求重审”
 
 ### `pnpm gate` — Latest Main 全量门禁（Step 0，开 PR 前必跑）
 
@@ -46,6 +70,24 @@ pnpm gate
 1. 命令：`pnpm gate`（全量，不是 `--filter`）
 2. SHA：基于最新 `origin/main` rebase 后的 HEAD SHA
 3. 状态：已 rebase 到最新 `origin/main`
+
+### Root Artifact Guard（Step 0.5，开 PR 前必跑）
+
+```bash
+ROOT_ARTIFACTS="$(git diff --name-only origin/main...HEAD | \
+  rg '^[^/]+\.(png|jpe?g|webp|gif|webm|mp4|mov|wav|pdf|pen)$' || true)"
+
+if [ -n "$ROOT_ARTIFACTS" ]; then
+  echo "❌ 根目录存在媒体/设计工件（已提交差异），停止 merge-gate"
+  printf '%s\n' "$ROOT_ARTIFACTS"
+  echo "请先归档到 docs/evidence/、docs/features/assets/F{NNN}/ 或其他正式目录。"
+  exit 1
+fi
+```
+
+这个检查和 Step 8 的脏工作树 fail-closed 互补：  
+- Step 0.5 拦“已经进分支历史但放错位置”的文件  
+- Step 8 拦“还在工作树里没处理的脏改动”
 
 ### 合入方式（唯一正确做法）
 
@@ -81,32 +123,24 @@ printf '%s\n' "$PR_BODY" | rg -q '@[A-Za-z0-9_-]+ review' && \
 printf '%s\n' "$PR_BODY" | rg -q '@(codex|chatgpt-codex-connector|gpt52|opus|sonnet|gemini)\b' && \
   { echo "❌ 不合规：PR body 禁止出现任何 @句柄（含 HTML 注释中的签名）"; exit 1; }
 
-# 5. 触发云端 review（在 PR comment 中，不是 body！）
-HEAD_SHA="$(gh pr view {PR_NUMBER} --json headRefOid --jq '.headRefOid')" || \
-  { echo "❌ 无法读取 PR head sha，停止流程"; exit 1; }
-SHORT_SHA="${HEAD_SHA:0:8}"
+# 5. 触发云端 review（极简格式，在 PR comment 中，不是 body！）
+# ⚠️ 只发 “@codex review” 一行，不带 SHA、不带规则描述、不带审查标准！
+# 详细格式会让 Codex connector 误解为代码修改请求（2026-04-20 PR #1300 确认）
+# 详见 refs/pr-template.md「云端 Review 触发 Comment 模板」
 
-# 5.1 去重防呆（同一 commit 只允许触发一次；新 commit 允许再次触发）
-TRIGGER_URL="$(gh pr view {PR_NUMBER} --json comments | jq -r --arg sha "$SHORT_SHA" '
-  .comments[]
-  | select(.body | contains("Please review latest commit \($sha) for P1/P2 only."))
-  | .url
-' | head -n 1)"
-[ -n "$TRIGGER_URL" ] && \
-  { echo "❌ 已对 commit ${SHORT_SHA} 触发过 cloud review: ${TRIGGER_URL}"; exit 1; }
+# 5.1 去重防呆
+LAST_TRIGGER=”$(gh pr view {PR_NUMBER} --json comments | jq -r '
+  [.comments[] | select(.body | test(“^@codex\\s+review\\s*$”; “m”))] | last | .url // empty
+')”
+# 有已触发 → 检查是否需要重发（新 commit / create-environment 回复 / 无 👀）
 
-TRIGGER_COMMENT_BODY="$(cat <<'EOF'
-{按 refs/pr-template.md 的“云端 Review 触发 Comment 模板”填写}
-EOF
-)"
-gh pr comment {PR_NUMBER} --body "$TRIGGER_COMMENT_BODY"
-# ⚠️ 完整模板见 refs/pr-template.md「云端 Review 触发 Comment 模板」
+gh pr comment {PR_NUMBER} --body '@codex review'
 
 # 6. 等云端 review（事件驱动，不轮询）
 #
 # 6.1 👀 接单检测（触发后 5 分钟查一次）
 TRIGGER_COMMENT_ID=”$(gh api repos/{OWNER}/{REPO}/issues/{PR_NUMBER}/comments \
-  --jq “[.[] | select(.body | contains(\”$SHORT_SHA\”))] | last | .id”)”
+  --jq '[.[] | select(.body | test(“^@codex\\s+review”; “m”))] | last | .id')”
 EYES=”$(gh api repos/{OWNER}/{REPO}/issues/comments/${TRIGGER_COMMENT_ID}/reactions \
   --jq '[.[] | select(.content == “eyes”)] | length')”
 #   - EYES > 0 → 云端已接单 → 停止监控，PR tracking 会自动通知结果
@@ -115,8 +149,49 @@ EYES=”$(gh api repos/{OWNER}/{REPO}/issues/comments/${TRIGGER_COMMENT_ID}/reac
 # 6.2 允许再次触发的条件（满足任一即可）：
 #     a. HEAD SHA 变化（有新 commit）
 #     b. 触发 comment 存在但 5 分钟后仍无 👀 reaction
-#     c. 明确确认第一次触发失败（例如 comment 未发出/被删除）
+#     c. 首次触发收到 “create an environment” 回复（= Codex 没接单）
 #     其它情况一律禁止二次触发
+
+# 6.5 Guardian Sign-Off Gate (F168 Phase D — community intake PRs only)
+#
+# Trigger condition: PR branch links to a community issue (check PR body or branch name).
+# Skip this step for non-community PRs.
+#
+# Prerequisites: cat agent env vars $CAT_CAFE_INVOCATION_ID and $CAT_CAFE_CALLBACK_TOKEN
+# are set by invoke-single-cat.ts at launch. All guardian endpoints require callback auth.
+AUTH_HEADERS=(-H "X-Invocation-Id: $CAT_CAFE_INVOCATION_ID" \
+              -H "X-Callback-Token: $CAT_CAFE_CALLBACK_TOKEN")
+#
+# 6.5.1 Request guardian assignment (if not already assigned):
+ISSUE_ID="{COMMUNITY_ISSUE_ID}"  # from PR body or branch metadata
+GUARDIAN_STATUS="$(curl -sf "${AUTH_HEADERS[@]}" \
+  http://localhost:3004/api/community-issues/${ISSUE_ID}/guardian-status)"
+HAS_GUARDIAN="$(echo "$GUARDIAN_STATUS" | jq -r '.hasGuardian')"
+if [ "$HAS_GUARDIAN" != "true" ]; then
+  # request-guardian returns guardianAssignment + signoffToken (for later guardian-signoff)
+  ASSIGN_RESULT="$(curl -sf -X POST "${AUTH_HEADERS[@]}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"author\": \"{AUTHOR_CAT_ID}\", \"reviewer\": \"{REVIEWER_CAT_ID}\"}" \
+    http://localhost:3004/api/community-issues/${ISSUE_ID}/request-guardian)"
+  SIGNOFF_TOKEN="$(echo "$ASSIGN_RESULT" | jq -r '.signoffToken')"
+  # Refresh status after assignment
+  GUARDIAN_STATUS="$(curl -sf "${AUTH_HEADERS[@]}" \
+    http://localhost:3004/api/community-issues/${ISSUE_ID}/guardian-status)"
+fi
+#
+# 6.5.2 Notify guardian via MCP (auto @ — AC-D1):
+GUARDIAN_CAT="$(echo "$ASSIGN_RESULT" | jq -r '.guardianAssignment.guardianCatId')"
+# Use cat_cafe_multi_mention to @ the guardian cat with intake checklist instructions.
+# Pass SIGNOFF_TOKEN to the guardian so they can call guardian-signoff with it.
+# The guardian cat receives the mention, reviews the checklist, and calls guardian-signoff.
+#
+# 6.5.3 Check sign-off status (blocking):
+SIGNED_OFF="$(echo "$GUARDIAN_STATUS" | jq -r '.signedOff')"
+if [ "$SIGNED_OFF" != "true" ]; then
+  echo "❌ Guardian sign-off missing. Cannot merge until guardian completes intake checklist."
+  echo "$GUARDIAN_STATUS" | jq .
+  exit 1
+fi
 
 # 7. Squash merge（GitHub 处理，禁止本地 squash！）
 gh pr merge {PR_NUMBER} --squash --delete-branch
@@ -240,12 +315,15 @@ gh api --paginate repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/comments \
 |------|------|
 | PR body 里写了云端 review 触发句柄 | 在 PR **comment** 里写（body 里写会触发代码修改权限而非 review） |
 | PR body 或 HTML 注释里写了 `@句柄`（例如签名） | **PR body 禁止任何 @句柄**，签名改为纯文本（如 `codex` / `gpt52`） |
+| 触发 comment 带了多行描述（SHA/规则/审查标准） | **只发 `@codex review` 一行**，详细内容让 Codex 误解为代码修改请求 |
 | 同一个 commit 连续发多条触发 comment | 先做 Step 5.1 去重检查；只有新 commit 才 re-trigger |
 | 触发后立刻轮询或手动重触发 | 5 分钟后查 👀（Step 6.1）；有 👀 = PR tracking 自动通知，不用管；无 👀 = 允许 re-trigger |
 | 修了 P1 不 re-trigger review | 修完 push 后**必须重新触发**云端 review |
+| `pnpm gate` rebase / fixup 后沿用旧 review 直接 merge | 先对齐 `headRefOid`；**只要 HEAD 变了，就拿 reviewer 对新 SHA 的显式延续或重审** |
 | 本地 `git rebase -i` 手动 squash | 用 `gh pr merge --squash`（GitHub 处理） |
 | 本地 merge 后 `gh pr close` | `gh pr close` = 放弃，`gh pr merge` = 合入 |
 | 不等云端 review 直接合入 | 必须等 0 P1/P2 |
+| 把截图/录屏/.pen 直接 commit 到仓库根目录 | Step 0.5 Root Artifact Guard 先拦截；先归档再开 PR |
 | Merge 后不更新 feature doc | Step 7.5 Phase 文档同步（每次 merge 必做！） |
 | Merge 后不清理 review 沙盒 | Step 8.5 按 review-target-id 回收 `/tmp/cat-cafe-review/` |
 
@@ -271,13 +349,15 @@ gh api --paginate repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/comments \
 
 **⚠️ THIS IS NOT A REVIEW-PERMISSION ERROR. THIS MESSAGE IS ABOUT CODE-WRITE ENVIRONMENT PERMISSION.**
 
-触发这个提示通常代表：
-- 你用了错误句柄（例如 `@chatgpt-codex-connector review`）
-- 或者把触发语句放错位置（body/非模板 comment）
+**最常见原因**：comment body 里带了多行内容（SHA、审查标准、规则描述等），Codex connector 把它解析成了**代码修改请求**而非 review。即使第一行是 `@codex review`，附加描述在当前解析规则下仍会触发 code-write intent。
 
-正确做法：
-- 只在 PR comment 使用 `refs/pr-template.md` 的标准触发模板（含短 SHA 与 P1/P2 约束）
-- 先跑去重检查（Step 5.1），同一 SHA 不重复触发
+**动作**：**只发 `@codex review` 一行**重新触发（同 SHA 不需要新 commit）。
+
+```bash
+gh pr comment {PR_NUMBER} --body '@codex review'
+```
+
+> 教训演进：2026-04-18 曾以为是"后台 bug / 没接单"，2026-04-20 PR #1300 确认根因是**详细格式触发 code-write 解析**。极简格式是唯一可靠触发方式（PR #1258 + PR #1300 两次实战验证）。
 
 ### Q2: PR 里看到小眼睛（👀）是什么意思？
 

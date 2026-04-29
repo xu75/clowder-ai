@@ -194,6 +194,26 @@ install_runtime_dependencies() {
   pnpm -C "$RUNTIME_DIR" install --frozen-lockfile
 }
 
+seed_runtime_config_from_project() {
+  local source_config="$PROJECT_DIR/.cat-cafe"
+  local target_config="$RUNTIME_DIR/.cat-cafe"
+  local file
+
+  [ "$RUNTIME_DIR" != "$PROJECT_DIR" ] || return 0
+  [ -d "$source_config" ] || return 0
+
+  for file in cat-catalog.json accounts.json credentials.json; do
+    [ -f "$source_config/$file" ] || continue
+    [ ! -e "$target_config/$file" ] || continue
+    mkdir -p "$target_config"
+    cp "$source_config/$file" "$target_config/$file"
+    if [ "$file" = "credentials.json" ]; then
+      chmod 600 "$target_config/$file" || true
+    fi
+    info "seeded runtime config: .cat-cafe/$file"
+  done
+}
+
 ensure_runtime_dependencies() {
   local missing=()
 
@@ -260,6 +280,15 @@ ensure_runtime_clean() {
   local dirty
   dirty=$(git -C "$RUNTIME_DIR" status --short -uno 2>/dev/null || true)
   if [ -n "$dirty" ] && [ "$FORCE" != "true" ]; then
+    # Auto-stash isolated pnpm-lock.yaml drift (common after pnpm install on
+    # a previous run). Only the lock file dirty → safe to stash and proceed.
+    local drift_files
+    drift_files=$(git -C "$RUNTIME_DIR" diff HEAD --name-only 2>/dev/null || true)
+    if [ "$drift_files" = "pnpm-lock.yaml" ]; then
+      info "lock drift detected — stashing before sync"
+      git -C "$RUNTIME_DIR" stash push -m "lock-drift-pre-sync-stash" -- pnpm-lock.yaml
+      return 0
+    fi
     die "runtime worktree has local changes. Commit/stash first, or re-run with --force."
   fi
 }
@@ -305,6 +334,8 @@ init_runtime_worktree() {
     pnpm -C "$RUNTIME_DIR" install
   fi
 
+  seed_runtime_config_from_project
+
   info "runtime worktree ready at $RUNTIME_DIR"
 }
 
@@ -347,6 +378,8 @@ sync_runtime_worktree() {
     fi
   fi
 
+  seed_runtime_config_from_project
+
   info "sync complete"
 }
 
@@ -382,6 +415,9 @@ start_runtime_worktree() {
     ensure_runtime_start_prereqs
     info "running in-place (deployment mode): $PROJECT_DIR"
     cd "$PROJECT_DIR"
+    # In-place deployment: binary == workspace == PROJECT_DIR
+    export CAT_CAFE_RUNTIME_ROOT="$PROJECT_DIR"
+    export CAT_CAFE_WORKSPACE_ROOT="${CAT_CAFE_WORKSPACE_ROOT:-$PROJECT_DIR}"
     exec env CAT_CAFE_STRICT_PROFILE_DEFAULTS=1 ./scripts/start-dev.sh --prod-web --profile=opensource ${START_ARGS[@]+"${START_ARGS[@]}"}
   fi
 
@@ -399,15 +435,26 @@ start_runtime_worktree() {
     if is_api_running && [ "$FORCE" != "true" ]; then
       info "API port is active; skip pre-start sync to avoid in-place hot swap."
       info "Run 'pnpm runtime:sync' after stop if you need latest origin/main."
+      seed_runtime_config_from_project
     else
       sync_runtime_worktree
     fi
+  else
+    seed_runtime_config_from_project
   fi
 
   ensure_runtime_start_prereqs
 
   info "starting production stack from runtime worktree: $RUNTIME_DIR"
   cd "$RUNTIME_DIR"
+  # F061 PR #1414 — separate runtime binary root from user workspace root so
+  # Antigravity MCP config command points at fresh runtime dist while
+  # ALLOWED_WORKSPACE_DIRS scopes Bengal's shell tools to the user's actual
+  # project (the main cat-cafe repo where they're editing code).
+  export CAT_CAFE_RUNTIME_ROOT="$RUNTIME_DIR"
+  export CAT_CAFE_WORKSPACE_ROOT="${CAT_CAFE_WORKSPACE_ROOT:-$PROJECT_DIR}"
+  info "exporting CAT_CAFE_RUNTIME_ROOT=$CAT_CAFE_RUNTIME_ROOT"
+  info "exporting CAT_CAFE_WORKSPACE_ROOT=$CAT_CAFE_WORKSPACE_ROOT"
   # Runtime = production: auto-inject --prod-web for PWA + Tailscale support.
   # Bash 3.2 + set -u: empty-array expansion can throw "unbound variable".
   exec env CAT_CAFE_STRICT_PROFILE_DEFAULTS=1 ./scripts/start-dev.sh --prod-web --profile=opensource ${START_ARGS[@]+"${START_ARGS[@]}"}

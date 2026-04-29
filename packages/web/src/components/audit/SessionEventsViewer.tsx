@@ -2,6 +2,7 @@
 
 // biome-ignore lint/correctness/noUnusedImports: React needed for JSX in vitest environment
 import React, { useCallback, useEffect, useState } from 'react';
+import { useCatData } from '@/hooks/useCatData';
 import { apiFetch } from '@/utils/api-client';
 
 type ViewMode = 'chat' | 'handoff' | 'raw';
@@ -32,6 +33,7 @@ interface RawEvent {
 
 export interface SessionEventsViewerProps {
   sessionId: string;
+  catId?: string;
   onClose: () => void;
 }
 
@@ -46,11 +48,27 @@ function fmtDuration(ms: number): string {
 
 const ROLE_STYLES: Record<string, string> = {
   user: 'bg-blue-50 text-blue-800',
-  assistant: 'bg-purple-50 text-purple-800',
   system: 'bg-cafe-surface-elevated text-cafe-secondary',
 };
 
-export function SessionEventsViewer({ sessionId, onClose }: SessionEventsViewerProps) {
+const ASSISTANT_STYLE_BY_CAT: Record<string, string> = {
+  opus: 'bg-opus-light text-opus-dark',
+  codex: 'bg-codex-light text-codex-dark',
+  gemini: 'bg-gemini-light text-gemini-dark',
+  kimi: 'bg-kimi-light text-kimi-dark',
+  dare: 'bg-dare-light text-dare-dark',
+  gpt52: 'bg-[#C8E6C9] text-[#2E7D32]',
+  'opus-45': 'bg-[#E1D5F0] text-[#5E35B1]',
+  sonnet: 'bg-[#EDE7F6] text-[#6A1B9A]',
+};
+
+function assistantRoleStyle(catId?: string): string {
+  if (!catId) return 'bg-cafe-surface-elevated text-cafe-secondary';
+  return ASSISTANT_STYLE_BY_CAT[catId] ?? 'bg-cafe-surface-elevated text-cafe-secondary';
+}
+
+export function SessionEventsViewer({ sessionId, catId, onClose }: SessionEventsViewerProps) {
+  const { getCatById } = useCatData();
   const [view, setView] = useState<ViewMode>('chat');
   const [data, setData] = useState<ChatMessage[] | HandoffSummary[] | RawEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -86,8 +104,10 @@ export function SessionEventsViewer({ sessionId, onClose }: SessionEventsViewerP
     [sessionId],
   );
 
+  // Stale-while-revalidate: keep old data visible during view switch.
+  // fetchEvents() replaces data on success; cursor/history reset here
+  // because the new view always starts at page 0.
   useEffect(() => {
-    setData([]);
     setCursor(0);
     setCursorHistory([]);
     fetchEvents(view, 0);
@@ -107,6 +127,9 @@ export function SessionEventsViewer({ sessionId, onClose }: SessionEventsViewerP
     setCursor(prev);
     fetchEvents(view, prev);
   };
+
+  const assistantStyle = assistantRoleStyle(catId);
+  const assistantLabel = catId ? (getCatById(catId)?.displayName ?? catId) : 'assistant';
 
   return (
     <div className="rounded-lg border border-cafe bg-cafe-surface">
@@ -138,26 +161,33 @@ export function SessionEventsViewer({ sessionId, onClose }: SessionEventsViewerP
         ))}
       </div>
 
-      {/* Content */}
+      {/* Content — stale-while-revalidate: show old data with loading indicator */}
       <div className="max-h-72 overflow-y-auto p-2">
-        {loading && <div className="text-xs text-cafe-muted py-2">加载中...</div>}
+        {loading && data.length > 0 && (
+          <div className="text-[10px] text-cafe-muted text-center py-1 animate-pulse">Refreshing...</div>
+        )}
+        {loading && data.length === 0 && <div className="text-xs text-cafe-muted py-2">加载中...</div>}
         {error && <div className="text-xs text-red-500 py-2">加载失败</div>}
 
-        {!loading && !error && view === 'chat' && (
+        {!error && view === 'chat' && (
           <div className="space-y-1.5">
             {(data as ChatMessage[]).map((msg, i) => (
               <div
                 key={`${msg.role}-${msg.timestamp}-${i}`}
-                className={`rounded px-2 py-1.5 text-[11px] ${ROLE_STYLES[msg.role] ?? 'bg-cafe-surface-elevated text-cafe-secondary'}`}
+                className={`rounded px-2 py-1.5 text-[11px] ${
+                  msg.role === 'assistant'
+                    ? assistantStyle
+                    : (ROLE_STYLES[msg.role] ?? 'bg-cafe-surface-elevated text-cafe-secondary')
+                }`}
               >
-                <span className="font-medium">{msg.role}</span>
+                <span className="font-medium">{msg.role === 'assistant' ? assistantLabel : msg.role}</span>
                 <p className="mt-0.5 whitespace-pre-wrap break-words">{msg.content}</p>
               </div>
             ))}
           </div>
         )}
 
-        {!loading && !error && view === 'handoff' && (
+        {!error && view === 'handoff' && (
           <div className="space-y-1.5">
             {(data as HandoffSummary[]).map((inv) => (
               <div key={inv.invocationId} className="rounded border border-cafe-subtle px-2 py-1.5 text-[11px]">
@@ -184,7 +214,7 @@ export function SessionEventsViewer({ sessionId, onClose }: SessionEventsViewerP
           </div>
         )}
 
-        {!loading && !error && view === 'raw' && (
+        {!error && view === 'raw' && (
           <div className="space-y-1">
             {(data as RawEvent[]).map((evt) => (
               <div key={evt.eventNo} className="text-[10px] font-mono bg-cafe-surface-elevated rounded px-1.5 py-1">

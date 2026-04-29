@@ -11,11 +11,11 @@ description: >
 
 ## 核心原则
 
-**PPT 不是一个人的活，是三猫流水线。**
+**PPT 不是一个人的活，是多猫流水线。** 角色按当前 roster 可用猫分配。
 
-- Ragdoll：内容规划 + HTML 制作 + density gate
-- Maine Coon：布局/信息审查 + Export Truth Gate
-- Siamese：审美/品牌审查 + 风格定调
+- 主执行猫（当前持球猫）：内容规划 + HTML 制作 + density gate
+- QA/审查猫（跨 family）：布局/信息审查 + Export Truth Gate
+- 视觉把关猫（跨 family）：审美/品牌审查 + 风格定调
 
 ## 开局参数（必须声明）
 
@@ -33,14 +33,14 @@ description: >
 
 | 触发 | 场景 | 主导 | 详细文档 |
 |------|------|------|---------|
-| 铲屎官说"做个 PPT" | **A: 内容规划** | Ragdoll | 主 skill 最小规则（ref 待补） |
-| 大纲确认 | **B: 风格定调** | Siamese审 + Ragdoll做 | [ppt-style-tile.md](../refs/ppt-style-tile.md) |
-| 风格确认 | **C: Slide 批量制作** | Ragdoll | [ppt-slide-authoring.md](../refs/ppt-slide-authoring.md) |
-| Slide 做完 | **D: 视觉审查 Gate** | Maine Coon(D1) + Siamese(D2) | [ppt-visual-review.md](../refs/ppt-visual-review.md) |
-| 审查通过 | **E: Export Truth Gate** | Maine Coon | 主 skill 最小规则（ref 待补） |
-| 导出验证通过 | **F: 交付** | Ragdoll | [ppt-delivery.md](../refs/ppt-delivery.md) |
-| 需要对比竞品 | **G: Benchmark 对拍** | Maine Coon + Siamese | 主 skill 最小规则（ref 待补） |
-| 铲屎官不满意 / 连续 2 轮 P1>0 | **R: 翻盘重来** | 三猫 | 主 skill 最小规则（ref 待补） |
+| 铲屎官说"做个 PPT" | **A: 内容规划** | 主执行猫 | 主 skill 最小规则（ref 待补） |
+| 大纲确认 | **B: 风格定调** | 视觉把关猫审 + 主执行猫做 | [ppt-style-tile.md](../refs/ppt-style-tile.md) |
+| 风格确认 | **C: Slide 批量制作** | 主执行猫 | [ppt-slide-authoring.md](../refs/ppt-slide-authoring.md) |
+| Slide 做完 | **D: 视觉审查 Gate** | QA/审查猫(D1) + 视觉把关猫(D2) | [ppt-visual-review.md](../refs/ppt-visual-review.md) |
+| 审查通过 | **E: Export Truth Gate** | QA/审查猫 | 主 skill 最小规则（ref 待补） |
+| 导出验证通过 | **F: 交付** | 主执行猫 | [ppt-delivery.md](../refs/ppt-delivery.md) |
+| 需要对比竞品 | **G: Benchmark 对拍** | QA/审查猫 + 视觉把关猫 | 主 skill 最小规则（ref 待补） |
+| 铲屎官不满意 / 连续 2 轮 P1>0 | **R: 翻盘重来** | 全部参与猫 | 主 skill 最小规则（ref 待补） |
 
 ## 还没拆成 ref 的场景（当前最小真相源）
 
@@ -80,7 +80,7 @@ description: >
 
 ## 审查维度速查
 
-### D1: 布局/信息审查（Maine Coon）
+### D1: 布局/信息审查（QA/审查猫）
 
 | 级别 | 维度 | 判定 |
 |------|------|------|
@@ -88,7 +88,7 @@ description: >
 | P1 | 信息失败 | 没讲清重点 / 层级错 / 受众看不懂 |
 | P1 | 密度失衡 | 该密不密 / 该疏不疏 |
 
-### D2: 审美/品牌审查（Siamese）
+### D2: 审美/品牌审查（视觉把关猫）
 
 | 级别 | 维度 | 判定 |
 |------|------|------|
@@ -96,6 +96,52 @@ description: >
 | P2 | 视觉一致性 | 字号/卡片/边框/图标语言不统一 |
 
 审美五维：色彩体系 · 字体排印 · 空间网格 · 视觉元素 · 密度平衡
+
+## HTML Slide 预览（ref: browser-preview skill）
+
+Slide 做完必须先自己看一遍再交活。预览走 **Hub 内嵌浏览器**（browser-preview skill），禁止用 Chrome MCP / `open` 命令 / Playwright。
+
+### 预览流程
+
+```
+1. 图片内联 — 所有 <img src="xxx.png"> 必须转成 data URI
+   原因：Preview Gateway 要求每个请求带 __preview_port 参数，
+   相对路径请求（如 /image.png）不带此参数 → 400 错误 → 图裂。
+
+2. 起 HTTP server — 每个 slide 用独立端口
+   原因：BrowserPanel 按 port 去重，同 port 只创建 1 个 tab。
+   N 个 slide → N 个端口 → N 个 tab。
+   python3 -m http.server PORT（每个 slide 一个端口）
+
+3. 调 auto-open API — 每个端口调一次
+   curl -X POST http://localhost:3003/api/preview/auto-open \
+     -H "Content-Type: application/json" \
+     -d '{"port": PORT, "path": "/slide.html"}'
+   间隔 300ms 避免 socket 事件丢失。
+```
+
+### 图片内联参考
+
+```python
+import base64, re, os
+def inline_images(html_path):
+    with open(html_path) as f: content = f.read()
+    def replace(m):
+        src = m.group(1)
+        if not os.path.exists(src): return m.group(0)
+        b64 = base64.b64encode(open(src,'rb').read()).decode()
+        mime = 'image/png' if src.endswith('.png') else 'image/jpeg'
+        return f'src="data:{mime};base64,{b64}"'
+    return re.sub(r'src="([^"]+\.(?:png|jpg|jpeg|gif|webp))"', replace, content)
+```
+
+### 陷阱速查
+
+| 现象 | 根因 | 修法 |
+|------|------|------|
+| 图片裂了 | 相对路径缺 `__preview_port` | 图片转 data URI |
+| 只有 1 个 tab | 同 port 去重 | 每 slide 独立端口 |
+| proxy error | HTTP server 没跑 | 先 `curl localhost:PORT` 验证 |
 
 ## 密度填充手法
 

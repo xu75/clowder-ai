@@ -68,8 +68,12 @@ describe('MCP Callback Tools', () => {
     assert.ok(capturedUrl.includes('/api/callbacks/post-message'));
     const body = JSON.parse(capturedOptions.body);
     assert.equal(body.content, 'Hello from cat!');
-    assert.equal(body.invocationId, 'test-invocation');
-    assert.equal(body.callbackToken, 'test-token');
+    // F174 Phase F (AC-F2): first-party MCP client stopped dual-writing creds.
+    // Headers are now the only place creds appear.
+    assert.equal(body.invocationId, undefined, 'creds must NOT be dual-written to body');
+    assert.equal(body.callbackToken, undefined, 'creds must NOT be dual-written to body');
+    assert.equal(capturedOptions.headers['x-invocation-id'], 'test-invocation');
+    assert.equal(capturedOptions.headers['x-callback-token'], 'test-token');
   });
 
   test('handlePostMessage forwards optional threadId for cross-thread posting', async () => {
@@ -135,12 +139,13 @@ describe('MCP Callback Tools', () => {
     assert.equal(result.isError, undefined);
   });
 
-  test('handleGetPendingMentions calls API with auth in query', async () => {
+  test('handleGetPendingMentions calls API with auth in headers', async () => {
     const { handleGetPendingMentions } = await import('../dist/tools/callback-tools.js');
 
-    let capturedUrl;
-    globalThis.fetch = async (url) => {
+    let capturedUrl, capturedOptions;
+    globalThis.fetch = async (url, options) => {
       capturedUrl = url;
+      capturedOptions = options;
       return {
         ok: true,
         json: async () => ({ mentions: [] }),
@@ -151,8 +156,11 @@ describe('MCP Callback Tools', () => {
 
     assert.equal(result.isError, undefined);
     assert.ok(capturedUrl.includes('/api/callbacks/pending-mentions'));
-    assert.ok(capturedUrl.includes('invocationId=test-invocation'));
-    assert.ok(capturedUrl.includes('callbackToken=test-token'));
+    // F174 Phase F (AC-F2): creds no longer dual-written to query.
+    assert.ok(!capturedUrl.includes('invocationId='), 'creds must NOT be dual-written to query');
+    assert.ok(!capturedUrl.includes('callbackToken='), 'creds must NOT be dual-written to query');
+    assert.equal(capturedOptions.headers['x-invocation-id'], 'test-invocation');
+    assert.equal(capturedOptions.headers['x-callback-token'], 'test-token');
   });
 
   test('handleGetThreadContext calls API with limit', async () => {
@@ -353,21 +361,50 @@ describe('MCP Callback Tools', () => {
     assert.ok(text.includes('直接在你的回复文本里另起一行写 @猫名'));
   });
 
-  test('adds credential hint on callback credential failure with @mention', async () => {
+  test('adds reason-typed credential hint on expired callback failure with @mention', async () => {
     const { handlePostMessage } = await import('../dist/tools/callback-tools.js');
 
+    // F174 Phase A: structured 401 carries reason; client routes hint by typed reason.
     globalThis.fetch = async () => ({
       ok: false,
       status: 401,
-      text: async () => JSON.stringify({ error: 'Invalid or expired callback credentials' }),
+      text: async () =>
+        JSON.stringify({
+          error: 'callback_auth_failed',
+          reason: 'expired',
+          message: 'Callback credentials expired (TTL elapsed)',
+          hint: '...',
+        }),
     });
 
     const result = await handlePostMessage({ content: '@codex ping' });
     const text = result.content[0].text;
 
     assert.equal(result.isError, true);
-    assert.ok(text.includes('callback 凭证校验失败'));
-    assert.ok(text.includes('可能是 token 过期，也可能 invocation/token 不匹配'));
+    assert.ok(text.includes('callback 凭证已过期'));
+    assert.ok(text.includes('直接在你的回复文本里另起一行写 @猫名'));
+  });
+
+  test('adds invalid_token-specific hint on token mismatch with @mention', async () => {
+    const { handlePostMessage } = await import('../dist/tools/callback-tools.js');
+
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 401,
+      text: async () =>
+        JSON.stringify({
+          error: 'callback_auth_failed',
+          reason: 'invalid_token',
+          message: 'Callback token does not match invocation',
+          hint: '...',
+        }),
+    });
+
+    const result = await handlePostMessage({ content: '@gpt52 ping' });
+    const text = result.content[0].text;
+
+    assert.equal(result.isError, true);
+    assert.ok(text.includes('callback token 与 invocation 不匹配'));
   });
 
   test('handleSearchEvidence calls callback endpoint with encoded query params', async () => {
@@ -416,8 +453,8 @@ describe('MCP Callback Tools', () => {
     assert.ok(capturedUrl.includes('/api/callbacks/reflect'));
     const body = JSON.parse(capturedOptions.body);
     assert.equal(body.query, 'How to reduce context drift?');
-    assert.equal(body.invocationId, 'test-invocation');
-    assert.equal(body.callbackToken, 'test-token');
+    assert.equal(capturedOptions.headers['x-invocation-id'], 'test-invocation');
+    assert.equal(capturedOptions.headers['x-callback-token'], 'test-token');
   });
 
   test('handleRetainMemory posts content/tags/metadata to callback retain endpoint', async () => {
@@ -617,8 +654,11 @@ describe('MCP Callback Tools', () => {
     assert.equal(body.action, 'git_commit');
     assert.equal(body.reason, 'Committing bug fix');
     assert.equal(body.context, 'Fix for issue #42');
-    assert.equal(body.invocationId, 'test-invocation');
-    assert.equal(body.callbackToken, 'test-token');
+    // F174 Phase F (AC-F2): creds headers-only.
+    assert.equal(body.invocationId, undefined);
+    assert.equal(body.callbackToken, undefined);
+    assert.equal(capturedOptions.headers['x-invocation-id'], 'test-invocation');
+    assert.equal(capturedOptions.headers['x-callback-token'], 'test-token');
     assert.ok(result.content[0].text.includes('granted'));
   });
 
@@ -649,9 +689,10 @@ describe('MCP Callback Tools', () => {
   test('handleCheckPermissionStatus queries permission-status endpoint', async () => {
     const { handleCheckPermissionStatus } = await import('../dist/tools/callback-tools.js');
 
-    let capturedUrl;
-    globalThis.fetch = async (url) => {
+    let capturedUrl, capturedOptions;
+    globalThis.fetch = async (url, options) => {
       capturedUrl = url;
+      capturedOptions = options;
       return {
         ok: true,
         json: async () => ({
@@ -668,8 +709,11 @@ describe('MCP Callback Tools', () => {
     assert.equal(result.isError, undefined);
     assert.ok(capturedUrl.includes('/api/callbacks/permission-status'));
     assert.ok(capturedUrl.includes('requestId=req-123'));
-    assert.ok(capturedUrl.includes('invocationId=test-invocation'));
-    assert.ok(capturedUrl.includes('callbackToken=test-token'));
+    // F174 Phase F (AC-F2): creds headers-only.
+    assert.ok(!capturedUrl.includes('invocationId='));
+    assert.ok(!capturedUrl.includes('callbackToken='));
+    assert.equal(capturedOptions.headers['x-invocation-id'], 'test-invocation');
+    assert.equal(capturedOptions.headers['x-callback-token'], 'test-token');
     assert.ok(result.content[0].text.includes('granted'));
   });
 
@@ -733,6 +777,65 @@ describe('MCP Callback Tools', () => {
     assert.equal(readdirSync(outboxDir).length, 0, 'stale entry should be dropped after max attempts');
   });
 
+  // ---- #476: outbox legacy fixup — pre-migration entries have creds in body, not headers ----
+
+  test('flushes pre-#476 outbox entry with creds in body by migrating them to headers', async () => {
+    const { handlePostMessage } = await import('../dist/tools/callback-tools.js');
+
+    // Seed a legacy outbox entry: has invocationId/callbackToken in body, NO headers field
+    const legacyEntry = {
+      id: 'legacy-001',
+      queuedAt: 1,
+      apiUrl: 'http://127.0.0.1:3004',
+      path: '/api/callbacks/post-message',
+      body: {
+        invocationId: 'legacy-inv',
+        callbackToken: 'legacy-tok',
+        content: 'legacy-queued-message',
+        clientMessageId: 'legacy-001',
+      },
+      // NOTE: no "headers" field — this is the pre-#476 format
+      attempts: 0,
+      lastError: 'seeded',
+    };
+    writeFileSync(
+      join(outboxDir, `${legacyEntry.queuedAt}-${legacyEntry.id}.json`),
+      JSON.stringify(legacyEntry),
+      'utf8',
+    );
+
+    const replayedHeaders = [];
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      if (body.content === 'legacy-queued-message') {
+        replayedHeaders.push({ ...options.headers });
+      }
+      return {
+        ok: true,
+        json: async () => ({ status: 'ok' }),
+      };
+    };
+
+    const result = await handlePostMessage({
+      content: 'current-after-legacy',
+      clientMessageId: 'current-legacy-001',
+    });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(replayedHeaders.length, 1, 'legacy entry should have been replayed');
+    assert.equal(
+      replayedHeaders[0]['x-invocation-id'],
+      'legacy-inv',
+      'replay must extract invocationId from body into x-invocation-id header',
+    );
+    assert.equal(
+      replayedHeaders[0]['x-callback-token'],
+      'legacy-tok',
+      'replay must extract callbackToken from body into x-callback-token header',
+    );
+    assert.equal(readdirSync(outboxDir).length, 0, 'legacy entry should be drained after success');
+  });
+
   // ---- #84: create_rich_block Route A → Route B fallback ----
 
   test('handleCreateRichBlock succeeds via Route A when callback works', async () => {
@@ -761,8 +864,18 @@ describe('MCP Callback Tools', () => {
     globalThis.fetch = async (url, _options) => {
       capturedUrls.push(url);
       if (url.includes('create-rich-block')) {
-        // Route A fails
-        return { ok: false, status: 401, text: async () => 'Expired' };
+        // Route A fails — F174 Phase A: structured 401 with reason=expired triggers degradation.
+        return {
+          ok: false,
+          status: 401,
+          text: async () =>
+            JSON.stringify({
+              error: 'callback_auth_failed',
+              reason: 'expired',
+              message: 'Callback credentials expired',
+              hint: '...',
+            }),
+        };
       }
       // Route B (post-message) succeeds
       return { ok: true, json: async () => ({ status: 'ok' }) };
@@ -788,10 +901,17 @@ describe('MCP Callback Tools', () => {
   test('handleCreateRichBlock returns error with cc_rich hint when both routes fail', async () => {
     const { handleCreateRichBlock } = await import('../dist/tools/callback-tools.js');
 
+    // F174 Phase A: 401 must include structured reason for degradation to trigger.
     globalThis.fetch = async () => ({
       ok: false,
       status: 401,
-      text: async () => 'Expired token',
+      text: async () =>
+        JSON.stringify({
+          error: 'callback_auth_failed',
+          reason: 'expired',
+          message: 'Callback credentials expired (TTL elapsed)',
+          hint: '...',
+        }),
     });
 
     const block = JSON.stringify({ id: 'c2', kind: 'card', v: 1, title: 'Hint Test' });
@@ -801,6 +921,56 @@ describe('MCP Callback Tools', () => {
     const text = result.content[0].text;
     assert.ok(text.includes('cc_rich'), 'error should contain cc_rich hint text');
     assert.ok(text.includes('Hint Test'), 'error should contain the block content');
+  });
+
+  // F174 Phase A — Reason-typed degradation contract (KD-7)
+  test('handleCreateRichBlock does NOT degrade on reason:invalid_token (client bug, not transient)', async () => {
+    const { handleCreateRichBlock } = await import('../dist/tools/callback-tools.js');
+
+    const capturedUrls = [];
+    globalThis.fetch = async (url) => {
+      capturedUrls.push(url);
+      return {
+        ok: false,
+        status: 401,
+        text: async () =>
+          JSON.stringify({
+            error: 'callback_auth_failed',
+            reason: 'invalid_token',
+            message: 'Callback token does not match invocation',
+            hint: '...',
+          }),
+      };
+    };
+
+    const block = JSON.stringify({ id: 'c3', kind: 'card', v: 1, title: 'No Degrade' });
+    const result = await handleCreateRichBlock({ block });
+
+    assert.equal(result.isError, true);
+    // Route A attempted; Route B (post-message) should NOT have been attempted
+    assert.ok(
+      !capturedUrls.some((u) => u.includes('post-message')),
+      'invalid_token must not trigger Route B fallback (it is a client bug, not transient auth failure)',
+    );
+  });
+
+  test('handleCreateRichBlock does NOT degrade on un-tagged 401 (legacy API or non-JSON body)', async () => {
+    const { handleCreateRichBlock } = await import('../dist/tools/callback-tools.js');
+
+    const capturedUrls = [];
+    globalThis.fetch = async (url) => {
+      capturedUrls.push(url);
+      return { ok: false, status: 401, text: async () => 'plain text 401' };
+    };
+
+    const block = JSON.stringify({ id: 'c4', kind: 'card', v: 1, title: 'No Degrade Legacy' });
+    const result = await handleCreateRichBlock({ block });
+
+    assert.equal(result.isError, true);
+    assert.ok(
+      !capturedUrls.some((u) => u.includes('post-message')),
+      'un-tagged 401 must surface to caller — degradation requires explicit reason from server',
+    );
   });
 
   test('handleCreateRichBlock does NOT fallback on validation error (400)', async () => {
@@ -894,8 +1064,8 @@ describe('MCP Callback Tools', () => {
     assert.equal(body.timeoutMinutes, 8);
     assert.deepEqual(body.searchEvidenceRefs, ['docs/features/F055.md']);
     assert.equal(body.triggerType, 'cross-domain');
-    assert.equal(body.invocationId, 'test-invocation');
-    assert.equal(body.callbackToken, 'test-token');
+    assert.equal(capturedOptions.headers['x-invocation-id'], 'test-invocation');
+    assert.equal(capturedOptions.headers['x-callback-token'], 'test-token');
   });
 
   test('handleMultiMention rejects missing searchEvidenceRefs and overrideReason', async () => {
@@ -982,8 +1152,8 @@ describe('MCP Callback Tools', () => {
     assert.equal(body.repoFullName, 'zts212653/cat-cafe');
     assert.equal(body.prNumber, 832);
     assert.equal(body.catId, undefined, 'catId must not appear in body when omitted');
-    assert.equal(body.invocationId, 'test-invocation');
-    assert.equal(body.callbackToken, 'test-token');
+    assert.equal(capturedOptions.headers['x-invocation-id'], 'test-invocation');
+    assert.equal(capturedOptions.headers['x-callback-token'], 'test-token');
   });
 
   test('handleRegisterPrTracking forwards catId when provided (backward compat)', async () => {

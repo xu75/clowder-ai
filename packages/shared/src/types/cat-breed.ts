@@ -7,7 +7,7 @@
  * Phase 4-F: 支持多 Variant（多版本猫召唤）
  */
 
-import type { CatColor, CatProvider } from './cat.js';
+import type { CatColor, ClientId } from './cat.js';
 import type { CatId } from './ids.js';
 import type { VoiceConfig } from './tts.js';
 
@@ -42,6 +42,8 @@ export interface CliConfig {
    * Default: 'max' (claude) / 'xhigh' (codex)
    */
   readonly effort?: CliEffortValue;
+  readonly contextWindow?: number;
+  readonly autoCompactTokenLimit?: number;
 }
 
 /**
@@ -64,7 +66,8 @@ export interface CatVariant {
   readonly mentionPatterns?: readonly string[];
   /** F127: member-side binding to a concrete account config (built-in or API key). */
   readonly accountRef?: string;
-  readonly provider: CatProvider;
+  /** clowder-ai#340 P5: CLI client identity (renamed from `provider`). */
+  readonly clientId: ClientId;
   readonly defaultModel: string;
   readonly mcpSupport: boolean;
   readonly cli: CliConfig;
@@ -88,13 +91,19 @@ export interface CatVariant {
   readonly teamStrengths?: string;
   /** F-Ground-3: Caution note. null = explicitly no caution (overrides breed). */
   readonly caution?: string | null;
+  /** F167 Phase E (KD-20): hard task restrictions — natural-language bans
+   *  (e.g. `["禁止写代码"]`). Surfaced to teammates via buildTeammateRoster
+   *  and to the cat itself via buildStaticIdentity. Data-driven replacement
+   *  for the retired L3 role-gate hardcoded regex. */
+  readonly restrictions?: readonly string[];
   /** F127: Extra CLI --config key=value pairs passed to the client at invocation time.
    *  Each entry is a raw config string, e.g. 'model_reasoning_effort="low"'. */
   readonly cliConfigArgs?: readonly string[];
-  /** F189: OpenCode custom provider name (e.g. "maas", "deepseek").
-   *  Used with api_key auth — runtime assembles `ocProviderName/defaultModel` for the -m flag
+  /** clowder-ai#340 P5: Model provider name for api_key routing (renamed from `ocProviderName`).
+   *  e.g. "openrouter", "maas", "deepseek".
+   *  Used with api_key auth — runtime assembles `provider/defaultModel` for the -m flag
    *  and generates an OPENCODE_CONFIG runtime config file for the provider. */
-  readonly ocProviderName?: string;
+  readonly provider?: string;
 }
 
 /**
@@ -105,7 +114,7 @@ export interface CatFeatures {
   /** F24: Enable session chain (context health tracking, auto-seal, bootstrap).
    *  Default: true. Set false for cats with inaccurate token stats (e.g. Gemini). */
   readonly sessionChain?: boolean;
-  /** F33 Phase 2: Per-breed session strategy override from cat-config.json.
+  /** F33 Phase 2: Per-breed session strategy override from the resolved runtime cat config.
    *  Partial config — merged with provider/global defaults at runtime.
    *  Matches SessionStrategyConfig shape (all fields except strategy are optional). */
   readonly sessionStrategy?: {
@@ -152,6 +161,9 @@ export interface CatBreed {
   readonly teamStrengths?: string;
   /** F-Ground-3: Caution note. null = explicitly no caution (overrides breed). */
   readonly caution?: string | null;
+  /** F167 Phase E (KD-20): breed-level hard restrictions; variants may override.
+   *  Natural-language bans (e.g. `["禁止生成图片"]`). */
+  readonly restrictions?: readonly string[];
 }
 
 // ── F032: Roster types for collaboration rules ─────────────────────────
@@ -194,18 +206,22 @@ export interface ReviewPolicy {
 // ── F136 Phase 4: Account config types ──────────────────────────────────
 
 /** Protocol that the LLM endpoint speaks. */
-export type AccountProtocol = 'anthropic' | 'openai' | 'openai-responses' | 'google';
+export type AccountProtocol = 'anthropic' | 'openai' | 'openai-responses' | 'google' | 'kimi';
 
 /**
- * Account configuration — lives in cat-catalog.json `accounts` section.
+ * Account configuration — lives in ~/.cat-cafe/accounts.json (global).
  * Maps an accountRef to its LLM endpoint metadata (no secrets).
  */
 export interface AccountConfig {
   readonly authType: 'oauth' | 'api_key';
-  readonly protocol: AccountProtocol;
+  /** F171: Explicit client identity for API key accounts (e.g. 'anthropic', 'openai'). */
+  readonly clientId?: string;
   readonly baseUrl?: string;
   readonly models?: readonly string[];
   readonly displayName?: string;
+  /** F171: User-defined env vars injected into agent subprocess.
+   *  Keys starting with CAT_CAFE_ are reserved and cannot be overridden. */
+  readonly envVars?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -253,7 +269,11 @@ export interface CatCafeConfigV2 {
   readonly roster: Roster;
   readonly reviewPolicy: ReviewPolicy;
   readonly coCreator?: CoCreatorConfig;
-  /** F136 Phase 4: Account metadata (accountRef → config). HC-2: runtime write source. */
+  /**
+   * @deprecated clowder-ai#340: Accounts moved to global ~/.cat-cafe/accounts.json.
+   * This field is only read during one-time migration (catalog → global).
+   * New code must use catalog-accounts.ts which reads the global file.
+   */
   readonly accounts?: Readonly<Record<string, AccountConfig>>;
 }
 

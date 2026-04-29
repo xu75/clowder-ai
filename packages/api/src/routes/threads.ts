@@ -24,6 +24,7 @@ import type { IThreadReadStateStore } from '../domains/cats/services/stores/port
 import type {
   BootcampStateV1,
   IThreadStore,
+  Thread,
   ThreadRoutingPolicyV1,
 } from '../domains/cats/services/stores/ports/ThreadStore.js';
 import { createModuleLogger } from '../infrastructure/logger.js';
@@ -53,20 +54,21 @@ export interface ThreadsRoutesOptions {
   readStateStore?: IThreadReadStateStore;
   /** F095 Phase C: validate backlogItemId on thread creation */
   backlogStore?: IBacklogStore;
+  /** B-4: Cascade delete guide session when thread is deleted */
+  guideSessionStore?: import('../domains/guides/GuideSessionRepository.js').IGuideSessionStore;
 }
 
-/** F087: Bootcamp state Zod schema */
+/** F087: Bootcamp state Zod schema (F171 v2 flow) */
 const bootcampPhaseSchema = z.enum([
-  'phase-0-select-cat',
   'phase-1-intro',
   'phase-2-env-check',
   'phase-3-config-help',
-  'phase-3.5-advanced',
   'phase-4-task-select',
   'phase-5-kickoff',
   'phase-6-design',
   'phase-7-dev',
-  'phase-8-review',
+  'phase-7.5-add-teammate',
+  'phase-8-collab',
   'phase-9-complete',
   'phase-10-retro',
   'phase-11-farewell',
@@ -77,6 +79,9 @@ const bootcampStateSchema = z
     phase: bootcampPhaseSchema,
     leadCat: catIdSchema().optional(),
     selectedTaskId: z.string().max(50).optional(),
+    /** F171: sub-step for add-teammate / farewell console guide overlay.
+     *  Free-form string — guide flows evolve and rigid enums cause silent PATCH failures. */
+    guideStep: z.string().max(50).nullable().optional(),
     envCheck: z
       .record(z.object({ ok: z.boolean(), version: z.string().optional(), note: z.string().optional() }))
       .optional(),
@@ -121,6 +126,10 @@ function parseOptionalBooleanQuery(value: string | boolean | undefined): boolean
   if (normalized === 'true' || normalized === '1') return true;
   if (normalized === 'false' || normalized === '0') return false;
   return undefined;
+}
+
+function sanitizeThreadForResponse(thread: Thread, _userId: string): Thread {
+  return thread;
 }
 
 const threadRoutingRuleSchema = z
@@ -169,6 +178,8 @@ const updateThreadSchema = z
     bubbleThinking: z.enum(['global', 'expanded', 'collapsed']).optional(),
     /** Bubble display overrides: CLI output block expand/collapse. */
     bubbleCli: z.enum(['global', 'expanded', 'collapsed']).optional(),
+    /** F168: Preferred workspace mode for auto-switch on thread open. null clears. */
+    preferredWorkspaceMode: z.enum(['dev', 'recall', 'schedule', 'tasks', 'community']).nullable().optional(),
   })
   .strict()
   .refine(
@@ -182,7 +193,8 @@ const updateThreadSchema = z
       data.voiceMode !== undefined ||
       data.bootcampState !== undefined ||
       data.bubbleThinking !== undefined ||
-      data.bubbleCli !== undefined,
+      data.bubbleCli !== undefined ||
+      data.preferredWorkspaceMode !== undefined,
     {
       message: 'At least one field must be provided',
     },
@@ -203,7 +215,7 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     const userId = resolveUserId(request, { fallbackUserId: legacyUserId });
     if (!userId) {
       reply.status(401);
-      return { error: 'Identity required (X-Cat-Cafe-User header or userId query)' };
+      return { error: 'Identity required (session cookie or X-Cat-Cafe-User header)' };
     }
 
     // Validate projectPath is a real directory under allowed roots
@@ -279,11 +291,14 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
 
     // F095 Phase D: Return soft-deleted threads when deleted=true
     if (showDeleted) {
-      const deletedThreads = await threadStore.listDeleted(userId);
+      const deletedThreads = (await threadStore.listDeleted(userId)).map((thread) =>
+        sanitizeThreadForResponse(thread, userId),
+      );
       return { threads: deletedThreads };
     }
 
     let threads = projectPath ? await threadStore.listByProject(userId, projectPath) : await threadStore.list(userId);
+    threads = threads.map((thread) => sanitizeThreadForResponse(thread, userId));
 
     // F058 Phase G: Match threads by feature IDs in titles
     if (featureIds) {
@@ -390,7 +405,8 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
       reply.status(404);
       return { error: 'Thread not found' };
     }
-    return thread;
+    const userId = resolveUserId(request, { defaultUserId: 'default-user' }) ?? 'default-user';
+    return sanitizeThreadForResponse(thread, userId);
   });
 
   // PATCH /api/threads/:id - 更新标题/置顶/收藏
@@ -419,6 +435,7 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
       bootcampState,
       bubbleThinking,
       bubbleCli,
+      preferredWorkspaceMode,
     } = parseResult.data;
     if (title !== undefined) await threadStore.updateTitle(id, title);
     if (pinned !== undefined) await threadStore.updatePin(id, pinned);
@@ -434,6 +451,9 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     }
     if (bubbleThinking !== undefined) await threadStore.updateBubbleDisplay(id, 'bubbleThinking', bubbleThinking);
     if (bubbleCli !== undefined) await threadStore.updateBubbleDisplay(id, 'bubbleCli', bubbleCli);
+    if (preferredWorkspaceMode !== undefined) {
+      await threadStore.updatePreferredWorkspaceMode(id, preferredWorkspaceMode);
+    }
 
     const updated = await threadStore.get(id);
     if (!updated) {
@@ -487,6 +507,9 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
         reply.status(400);
         return { error: 'Cannot delete this thread' };
       }
+
+      // B-4: Cascade delete guide session to prevent stale sessions on deleted threads
+      void opts.guideSessionStore?.delete(id).catch(() => {});
 
       // I-2: Audit thread deletion for traceability (best-effort, don't block response)
       const userId = resolveUserId(request, {});

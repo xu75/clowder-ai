@@ -4,13 +4,13 @@ import type {
   CatBreed,
   CatCafeConfig,
   CatColor,
-  CatProvider,
   CatVariant,
   CliConfig,
+  ClientId,
   CoCreatorConfig,
   ContextBudget,
 } from '@cat-cafe/shared';
-import { CAT_CONFIGS, createCatId } from '@cat-cafe/shared';
+import { createCatId } from '@cat-cafe/shared';
 import { clearBudgetCache } from './cat-budgets.js';
 import { bootstrapCatCatalog, readCatCatalog, resolveCatCatalogPath } from './cat-catalog-store.js';
 import { _resetCachedConfig, loadCatConfig, toAllCatConfigs } from './cat-config-loader.js';
@@ -22,6 +22,7 @@ export interface RuntimeCatInput {
   breedId?: string;
   name: string;
   displayName: string;
+  variantLabel?: string;
   nickname?: string;
   avatar: string;
   color: CatColor;
@@ -33,19 +34,21 @@ export interface RuntimeCatInput {
   caution?: string | null;
   strengths?: string[];
   sessionChain?: boolean;
-  provider: CatProvider;
+  clientId: ClientId;
   defaultModel: string;
   mcpSupport: boolean;
   cli: CliConfig;
   commandArgs?: string[];
   cliConfigArgs?: string[];
   contextBudget?: ContextBudget;
-  ocProviderName?: string;
+  /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
+  provider?: string;
 }
 
 export interface RuntimeCatUpdate {
   name?: string;
   displayName?: string;
+  variantLabel?: string | null;
   nickname?: string;
   avatar?: string;
   color?: CatColor;
@@ -57,14 +60,15 @@ export interface RuntimeCatUpdate {
   caution?: string | null;
   strengths?: string[];
   sessionChain?: boolean;
-  provider?: CatProvider;
+  clientId?: ClientId;
   defaultModel?: string;
   mcpSupport?: boolean;
   cli?: CliConfig;
   commandArgs?: string[];
   cliConfigArgs?: string[];
   contextBudget?: ContextBudget | null;
-  ocProviderName?: string | null;
+  /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
+  provider?: string | null;
   available?: boolean;
 }
 
@@ -109,16 +113,6 @@ function readOrBootstrapCatalog(projectRoot: string): CatCafeConfig {
     throw new Error(`Runtime cat catalog missing at ${projectRoot}`);
   }
   return catalog;
-}
-
-function isSeedCat(projectRoot: string, catId: string): boolean {
-  try {
-    const templatePath = resolveProjectTemplatePath(projectRoot);
-    const seedCats = toAllCatConfigs(loadCatConfig(templatePath));
-    return Object.hasOwn(seedCats, catId);
-  } catch {
-    return Object.hasOwn(CAT_CONFIGS, catId);
-  }
 }
 
 function invalidateRuntimeCatalogCaches(): void {
@@ -214,16 +208,19 @@ function createBreedFromInput(input: RuntimeCatInput): CatBreed {
     variants: [
       {
         id: variantId,
-        provider: input.provider,
+        clientId: input.clientId,
+        ...(input.variantLabel != null && input.variantLabel.trim().length > 0
+          ? { variantLabel: input.variantLabel.trim() }
+          : {}),
         defaultModel: input.defaultModel,
         mcpSupport: input.mcpSupport,
         cli: input.cli,
         ...(input.accountRef != null && input.accountRef.trim().length > 0
-          ? { accountRef: input.accountRef.trim(), providerProfileId: input.accountRef.trim() }
+          ? { accountRef: input.accountRef.trim() }
           : {}),
         ...(input.commandArgs && input.commandArgs.length > 0 ? { commandArgs: input.commandArgs } : {}),
         ...(input.cliConfigArgs && input.cliConfigArgs.length > 0 ? { cliConfigArgs: input.cliConfigArgs } : {}),
-        ...(input.ocProviderName ? { ocProviderName: input.ocProviderName } : {}),
+        ...(input.provider ? { provider: input.provider } : {}),
         ...(input.contextBudget ? { contextBudget: input.contextBudget } : {}),
         ...(input.personality != null && input.personality.trim().length > 0 ? { personality: input.personality } : {}),
         ...(input.teamStrengths != null && input.teamStrengths.trim().length > 0
@@ -317,6 +314,14 @@ export function updateRuntimeCat(projectRoot: string, catId: string, patch: Runt
     }
   }
 
+  if (patch.variantLabel !== undefined) {
+    if (patch.variantLabel && patch.variantLabel.trim().length > 0) {
+      variant.variantLabel = patch.variantLabel.trim();
+    } else {
+      delete variant.variantLabel;
+    }
+  }
+
   if (patch.avatar !== undefined) {
     if (located.isDefaultVariant) {
       breed.avatar = patch.avatar;
@@ -347,12 +352,9 @@ export function updateRuntimeCat(projectRoot: string, catId: string, patch: Runt
 
   if (patch.accountRef !== undefined) {
     if (patch.accountRef && patch.accountRef.trim().length > 0) {
-      const normalizedAccountRef = patch.accountRef.trim();
-      variant.accountRef = normalizedAccountRef;
-      variant.providerProfileId = normalizedAccountRef;
+      variant.accountRef = patch.accountRef.trim();
     } else {
       delete variant.accountRef;
-      delete variant.providerProfileId;
     }
   }
   if (patch.personality !== undefined) {
@@ -386,7 +388,7 @@ export function updateRuntimeCat(projectRoot: string, catId: string, patch: Runt
       variant.sessionChain = patch.sessionChain;
     }
   }
-  if (patch.provider !== undefined) variant.provider = patch.provider;
+  if (patch.clientId !== undefined) variant.clientId = patch.clientId;
   if (patch.defaultModel !== undefined) variant.defaultModel = patch.defaultModel;
   if (patch.mcpSupport !== undefined) variant.mcpSupport = patch.mcpSupport;
   if (patch.cli !== undefined) variant.cli = patch.cli;
@@ -411,11 +413,11 @@ export function updateRuntimeCat(projectRoot: string, catId: string, patch: Runt
       delete variant.cliConfigArgs;
     }
   }
-  if (patch.ocProviderName !== undefined) {
-    if (patch.ocProviderName) {
-      variant.ocProviderName = patch.ocProviderName;
+  if (patch.provider !== undefined) {
+    if (patch.provider) {
+      variant.provider = patch.provider;
     } else {
-      delete variant.ocProviderName;
+      delete variant.provider;
     }
   }
   if (patch.available !== undefined && catalog.version === 2) {
@@ -494,15 +496,11 @@ export function updateRuntimeCoCreator(projectRoot: string, patch: RuntimeCoCrea
 }
 
 export function deleteRuntimeCat(projectRoot: string, catId: string): CatCafeConfig {
-  if (isSeedCat(projectRoot, catId)) {
-    throw new Error(`Cannot delete seed cat "${catId}" from runtime catalog`);
-  }
   const catalog = cloneCatalog(readOrBootstrapCatalog(projectRoot));
   const located = findBreedVariant(catalog as unknown as CatCafeConfig, catId);
   if (!located) {
     throw new Error(`Cat "${catId}" not found in runtime catalog`);
   }
-
   const breed = catalog.breeds[located.breedIndex] as Record<string, any>;
   if (breed.variants.length === 1) {
     catalog.breeds = catalog.breeds.filter((_: unknown, index: number) => index !== located.breedIndex);

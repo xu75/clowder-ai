@@ -1,10 +1,48 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MobileStatusSheet } from '@/components/MobileStatusSheet';
 import type { CatStatus, IntentMode } from '@/components/status-helpers';
 import type { CatInvocationInfo } from '@/stores/chatStore';
 import { useChatStore } from '@/stores/chatStore';
+
+const TEST_CATS = [
+  {
+    id: 'opus',
+    displayName: '布偶猫',
+    color: { primary: '#9B7EBD', secondary: '#E8D5F5' },
+    mentionPatterns: ['@opus'],
+    clientId: 'anthropic',
+    defaultModel: 'claude-opus-4-6',
+    avatar: '',
+    roleDescription: '',
+    personality: '',
+  },
+  {
+    id: 'codex',
+    displayName: '缅因猫',
+    color: { primary: '#5B8C5A', secondary: '#D5E8D4' },
+    mentionPatterns: ['@codex'],
+    clientId: 'openai',
+    defaultModel: 'gpt-5.5',
+    avatar: '',
+    roleDescription: '',
+    personality: '',
+  },
+];
+
+vi.mock('@/hooks/useCatData', () => ({
+  formatCatName: (cat: { displayName: string; variantLabel?: string }) =>
+    cat.variantLabel ? `${cat.displayName}（${cat.variantLabel}）` : cat.displayName,
+  useCatData: () => ({
+    cats: TEST_CATS,
+    isLoading: false,
+    hasFetched: true,
+    getCatById: (id: string) => TEST_CATS.find((cat) => cat.id === id),
+    getCatsByBreed: () => new Map(),
+    refresh: async () => TEST_CATS,
+  }),
+}));
 
 describe('MobileStatusSheet', () => {
   let container: HTMLDivElement;
@@ -84,6 +122,26 @@ describe('MobileStatusSheet', () => {
     expect(container.textContent).toContain('缅因猫');
   });
 
+  it('prefers activeInvocations over stale targetCats when provided', () => {
+    const props = {
+      ...baseProps,
+      open: true,
+      targetCats: ['codex'],
+      catStatuses: { codex: 'pending' as CatStatus, dare: 'streaming' as CatStatus },
+      activeInvocations: {
+        'inv-dare-1': { catId: 'dare', mode: 'execute' },
+      },
+      hasActiveInvocation: true,
+    };
+
+    act(() => {
+      root.render(React.createElement(MobileStatusSheet, props));
+    });
+
+    expect(container.textContent).toContain('dare');
+    expect(container.textContent).not.toContain('缅因猫');
+  });
+
   it('shows close button that calls onClose', () => {
     let closed = false;
     const props = {
@@ -129,18 +187,16 @@ describe('MobileStatusSheet', () => {
   });
 
   it('shows cats that only exist in activeInvocations on mobile', () => {
-    useChatStore.setState({
-      activeInvocations: {
-        'inv-main': { catId: 'opus', mode: 'ideate' },
-        'inv-main-codex': { catId: 'codex', mode: 'ideate' },
-      },
-    });
-
     const props = {
       ...baseProps,
       open: true,
       targetCats: ['opus'],
       catStatuses: { opus: 'streaming' as CatStatus, codex: 'pending' as CatStatus },
+      activeInvocations: {
+        'inv-main': { catId: 'opus', mode: 'ideate' },
+        'inv-main-codex': { catId: 'codex', mode: 'ideate' },
+      },
+      hasActiveInvocation: true,
     };
 
     act(() => {

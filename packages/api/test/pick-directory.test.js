@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import Fastify from 'fastify';
 
@@ -79,9 +81,9 @@ describe('getProjectBrowseParent()', () => {
 });
 
 describe('POST /api/projects/pick-directory', () => {
-  it('returns 401 when only a spoofed userId query param is provided', async () => {
+  it('returns 401 without trusted identity header', async () => {
     const app = await buildApp();
-    const res = await app.inject({ method: 'POST', url: '/api/projects/pick-directory?userId=spoofed' });
+    const res = await app.inject({ method: 'POST', url: '/api/projects/pick-directory' });
     assert.equal(res.statusCode, 401);
     const body = JSON.parse(res.body);
     assert.ok(body.error.includes('Identity required'));
@@ -131,15 +133,18 @@ describe('POST /api/projects/pick-directory', () => {
 });
 
 describe('GET /api/projects/browse (F113 cross-platform)', () => {
-  it('returns 401 when only a spoofed userId query param is provided', async () => {
+  it('returns 401 without trusted identity header', async () => {
     const app = await buildApp();
-    const res = await app.inject({ method: 'GET', url: '/api/projects/browse?userId=spoofed' });
+    const res = await app.inject({ method: 'GET', url: '/api/projects/browse' });
     assert.equal(res.statusCode, 401);
     const body = JSON.parse(res.body);
     assert.ok(body.error.includes('Identity required'));
   });
 
   it('returns home directory listing by default', async () => {
+    const sampleDirName = 'pick-directory-home-fixture';
+    mkdirSync(join(homedir(), sampleDirName), { recursive: true });
+
     const app = await buildApp();
     const res = await app.inject({ method: 'GET', url: '/api/projects/browse', headers: AUTH_HEADERS });
     assert.equal(res.statusCode, 200);
@@ -147,8 +152,7 @@ describe('GET /api/projects/browse (F113 cross-platform)', () => {
     assert.equal(body.current, homedir());
     assert.equal(typeof body.name, 'string');
     assert.ok(Array.isArray(body.entries));
-    // Home directory should have subdirectories
-    assert.ok(body.entries.length > 0);
+    assert.ok(body.entries.some((entry) => entry.name === sampleDirName));
     // All entries should be directories
     for (const entry of body.entries) {
       assert.equal(entry.isDirectory, true);

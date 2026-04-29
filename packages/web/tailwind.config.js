@@ -23,6 +23,12 @@ module.exports = {
           dark: 'var(--color-gemini-dark)',
           bg: 'var(--color-gemini-bg)',
         },
+        kimi: {
+          primary: 'var(--color-kimi-primary)',
+          light: 'var(--color-kimi-light)',
+          dark: 'var(--color-kimi-dark)',
+          bg: 'var(--color-kimi-bg)',
+        },
         dare: {
           primary: 'var(--color-dare-primary)',
           light: 'var(--color-dare-light)',
@@ -120,6 +126,11 @@ module.exports = {
           'accent-hover': 'var(--cafe-accent-hover)',
           crosspost: 'var(--cafe-crosspost)',
           interactive: 'var(--cafe-interactive)',
+          /* F174 D2b-2: cat callback-auth status dot palette (烁烁 visual review). */
+          'status-healthy': '#22C55E',
+          'status-degraded': '#F59E0B',
+          'status-broken': '#EF4444',
+          'status-unknown': '#A89386',
         },
         /* F101 AC-D5: Werewolf Cute theme tokens */
         ww: {

@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useChatStore } from '@/stores/chatStore';
 import { apiFetch } from '@/utils/api-client';
+import { CapabilityAuditLog } from './CapabilityAuditLog';
 import type {
   CapabilityBoardItem,
   CapabilityBoardResponse,
@@ -26,9 +27,11 @@ import {
   SkillHealthBanner,
   StatusDot,
 } from './capability-board-ui';
+import { McpInstallForm } from './McpInstallForm';
 import { getProjectPaths, projectDisplayName } from './ThreadSidebar/thread-utils';
 
 type FilterSource = 'all' | 'cat-cafe' | 'external';
+type FilterLayer = 'all' | 'L1' | 'L2' | 'L3';
 
 export function HubCapabilityTab() {
   const [items, setItems] = useState<CapabilityBoardItem[]>([]);
@@ -37,7 +40,10 @@ export function HubCapabilityTab() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [filterSource, setFilterSource] = useState<FilterSource>('all');
+  const [filterLayer, setFilterLayer] = useState<FilterLayer>('all');
   const [toggling, setToggling] = useState<string | null>(null);
+  const [showAddMcp, setShowAddMcp] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   // Multi-project state
   const [projectPath, setProjectPath] = useState<string | null>(null);
@@ -117,11 +123,38 @@ export function HubCapabilityTab() {
     [fetchCapabilities, projectPath],
   );
 
+  const handleDeleteMcp = useCallback(
+    async (capId: string, hard: boolean) => {
+      setDeleting(capId);
+      try {
+        const query = new URLSearchParams();
+        if (hard) query.set('hard', 'true');
+        if (projectPath) query.set('projectPath', projectPath);
+        const res = await apiFetch(`/api/capabilities/mcp/${encodeURIComponent(capId)}?${query}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as Record<string, string>;
+          setError(data.error ?? `删除失败 (${res.status})`);
+          return;
+        }
+        await fetchCapabilities(projectPath ?? undefined);
+      } catch {
+        setError('网络错误');
+      } finally {
+        setDeleting(null);
+      }
+    },
+    [fetchCapabilities, projectPath],
+  );
+
   // Filter + group
   const filtered = useMemo(() => {
-    if (filterSource === 'all') return items;
-    return items.filter((i) => i.source === filterSource);
-  }, [items, filterSource]);
+    let result = items;
+    if (filterSource !== 'all') result = result.filter((i) => i.source === filterSource);
+    if (filterLayer !== 'all') result = result.filter((i) => i.layer === filterLayer);
+    return result;
+  }, [items, filterSource, filterLayer]);
 
   const mcpItems = useMemo(() => filtered.filter((i) => i.type === 'mcp'), [filtered]);
   const externalSkills = useMemo(
@@ -175,21 +208,60 @@ export function HubCapabilityTab() {
           ]}
           onChange={(v) => setFilterSource(v as FilterSource)}
         />
+        <FilterChips
+          label="层级"
+          value={filterLayer}
+          options={[
+            { value: 'all', label: '全部' },
+            { value: 'L1', label: 'L1 MCP' },
+            { value: 'L2', label: 'L2 Skill' },
+            { value: 'L3', label: 'L3 扩展' },
+          ]}
+          onChange={(v) => setFilterLayer(v as FilterLayer)}
+        />
       </div>
 
       {/* Skill health banner */}
       {skillHealth && <SkillHealthBanner health={skillHealth} items={items} />}
 
       {/* MCP Section */}
-      <CapabilitySection
-        icon={<SectionIconMcp />}
-        title="MCP"
-        subtitle="工具服务"
-        items={mcpItems}
-        catFamilies={catFamilies}
-        toggling={toggling}
-        onToggle={handleToggle}
-      />
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2" />
+          <button
+            type="button"
+            onClick={() => setShowAddMcp(!showAddMcp)}
+            className="text-xs px-2 py-1 rounded border border-cafe text-cafe-accent
+                       hover:bg-cafe-accent/5 transition-colors"
+          >
+            {showAddMcp ? '取消' : '+ 添加 MCP'}
+          </button>
+        </div>
+
+        {showAddMcp && (
+          <div className="rounded-lg border border-cafe-accent/20 bg-cafe-surface p-3">
+            <McpInstallForm
+              projectPath={projectPath ?? undefined}
+              onInstalled={() => {
+                fetchCapabilities(projectPath ?? undefined);
+              }}
+              onClose={() => setShowAddMcp(false)}
+            />
+          </div>
+        )}
+
+        <CapabilitySection
+          icon={<SectionIconMcp />}
+          title="MCP"
+          subtitle="工具服务"
+          items={mcpItems}
+          catFamilies={catFamilies}
+          toggling={toggling}
+          onToggle={handleToggle}
+          onDeleteMcp={handleDeleteMcp}
+          deletingMcp={deleting}
+        />
+      </div>
 
       {/* Clowder AI Skills by Category */}
       {catCafeSkillGroups.map((group) => (
@@ -235,6 +307,9 @@ export function HubCapabilityTab() {
           <p className="text-xs text-slate-400 mt-1 max-w-[220px]">试着切换来源筛选，或检查 MCP/Skills 配置</p>
         </div>
       )}
+
+      {/* Audit log */}
+      <CapabilityAuditLog projectPath={projectPath ?? undefined} />
 
       {/* Summary */}
       <div className="pt-4 border-t border-slate-100/60 mt-4">

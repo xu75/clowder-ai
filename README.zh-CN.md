@@ -65,6 +65,18 @@ Clowder 不绑定模型。当前支持的 Agent CLI：
 
 ## 快速开始
 
+### 方式 A：桌面安装包（推荐）
+
+如果 [Releases 页面](https://github.com/zts212653/clowder-ai/releases) 已经提供桌面安装包，普通用户优先走这条：
+
+- **Windows**：下载 `.exe` 安装包，双击安装，然后从桌面快捷方式或开始菜单启动 Clowder AI。
+- **macOS**：下载 `.dmg`，拖到 Applications 后打开。首次启动如果被 macOS 拦截，右键应用选择 **打开**。
+- **Linux**：暂时没有桌面安装包，请走下面的源码安装，或使用 Linux 一键安装脚本。
+
+桌面安装包会自带应用运行时、便携 Node.js 和 Redis，普通用户不需要手动执行 `pnpm install` 或 `pnpm build`。启动后进入 **Hub → 系统配置 → 账号配置**，连接模型 provider 和 CLI 账号即可。
+
+### 方式 B：源码安装
+
 **前置要求：** [Node.js 20+](https://nodejs.org/) · [pnpm 9+](https://pnpm.io/) · [Redis 7+](https://redis.io/) *（可选 — 用 `--memory` 跳过）* · Git
 
 ```bash
@@ -98,9 +110,9 @@ pnpm stop
 
 > **一键替代方案（Linux）：** `bash scripts/install.sh` 一步搞定 Node、pnpm、Redis、依赖、`.env` 和首次启动。可选参数：`--start`（自动启动）、`--memory`（跳过 Redis）、`--registry=URL`（国内镜像）。**Windows** 用户请使用 `scripts/install.ps1`，然后 `scripts/start-windows.ps1`。
 
-**完整安装指南**（API key 配置、CLI 认证、语音、飞书/Telegram、常见问题）：**[SETUP.opensource.zh-CN.md](SETUP.opensource.zh-CN.md)**
+**完整安装指南**（API key 配置、CLI 认证、语音、飞书/Telegram、常见问题）：**[SETUP.zh-CN.md](SETUP.zh-CN.md)**
 
-> **想固定在某个版本？** 参阅安装指南中的[运行指定版本](SETUP.opensource.zh-CN.md#运行指定版本不自动更新)章节。
+> **想固定在某个版本？** 参阅安装指南中的[运行指定版本](SETUP.zh-CN.md#运行指定版本不自动更新)章节。
 
 > **CVO 训练营已上线！** AI 团队亲自带你走完一个完整的 feature 生命周期 — 从愿景表达到代码上线。
 
@@ -412,7 +424,7 @@ AI 不一定是冰冷的 API 和无状态调用。它可以是陪伴——有持
 
 - **[教程](https://github.com/zts212653/cat-cafe-tutorials)** — Clowder AI 的分步教程
 - **[SETUP.zh-CN.md](SETUP.zh-CN.md)** — 完整安装和配置指南
-- **[第三方 AI Provider 配置指南](docs/guides/provider-configuration.md)** — 配置 Kimi、GLM、MiniMax、Qwen、OpenRouter 等国产/第三方模型
+- **[第三方 AI Provider 配置指南](SETUP.zh-CN.md#模型接入ui)** — 配置 Kimi、GLM、MiniMax、Qwen、OpenRouter 等国产/第三方模型
 - **[使用小 Tips](docs/TIPS.md)** — Magic Words、@提及、语音陪伴等使用技巧
 - **[docs/](docs/)** — 架构决策、功能规格、经验教训
 

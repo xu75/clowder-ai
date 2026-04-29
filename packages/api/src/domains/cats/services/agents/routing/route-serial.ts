@@ -11,13 +11,29 @@
  */
 
 import type { CatConfig, CatId } from '@cat-cafe/shared';
-import { CAT_CONFIGS, catRegistry } from '@cat-cafe/shared';
+import { catRegistry } from '@cat-cafe/shared';
 import { getCatContextBudget } from '../../../../../config/cat-budgets.js';
 import { getConfigSessionStrategy, isSessionChainEnabled } from '../../../../../config/cat-config-loader.js';
 import { getCatVoice } from '../../../../../config/cat-voices.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
+import {
+  inlineActionChecked,
+  inlineActionDetected,
+  inlineActionFeedbackWriteFailed,
+  inlineActionFeedbackWritten,
+  inlineActionHintEmitFailed,
+  inlineActionHintEmitted,
+  inlineActionRoutedSetSkip,
+  inlineActionShadowMiss,
+  lineStartDetected,
+} from '../../../../../infrastructure/telemetry/instruments.js';
 import { detectUserMention } from '../../../../../routes/user-mention.js';
 import { estimateTokens } from '../../../../../utils/token-counter.js';
+import {
+  ackGuideCompletion,
+  guideContextForCat,
+  prepareGuideContext,
+} from '../../../../guides/GuideRoutingInterceptor.js';
 import { assembleContext } from '../../context/ContextAssembler.js';
 import {
   buildInvocationContext,
@@ -28,7 +44,7 @@ import { formatDegradationMessage } from '../../orchestration/DegradationPolicy.
 import { AuditEventTypes, getEventAuditLog } from '../../orchestration/EventAuditLog.js';
 import { buildSessionBootstrap } from '../../session/SessionBootstrap.js';
 import { hydrateReplyPreview, type StoredToolEvent } from '../../stores/ports/MessageStore.js';
-import type { ThreadRoutingPolicyV1 } from '../../stores/ports/ThreadStore.js';
+import type { Thread, ThreadRoutingPolicyV1 } from '../../stores/ports/ThreadStore.js';
 import { getStreamingTtsRegistry, StreamingTtsChunker } from '../../tts/StreamingTtsChunker.js';
 import { getVoiceBlockSynthesizer } from '../../tts/VoiceBlockSynthesizer.js';
 import type { AgentMessage, AgentMessageType, MessageMetadata } from '../../types.js';
@@ -36,24 +52,49 @@ import { invokeSingleCat } from '../invocation/invoke-single-cat.js';
 import { buildMcpCallbackInstructions, needsMcpInjection } from '../invocation/McpPromptInjector.js';
 import { getRichBlockBuffer } from '../invocation/RichBlockBuffer.js';
 import { resolveDefaultClaudeMcpServerPath } from '../providers/ClaudeAgentService.js';
-import { getMaxA2ADepth, parseA2AMentions } from '../routing/a2a-mentions.js';
-import { registerWorklist, unregisterWorklist } from '../routing/WorklistRegistry.js';
+import { detectInlineActionMentionsWithShadow, getMaxA2ADepth, parseA2AMentions } from '../routing/a2a-mentions.js';
+import {
+  isSubstantiveTool,
+  registerWorklist,
+  unregisterWorklist,
+  updateStreakOnPush,
+} from '../routing/WorklistRegistry.js';
+import { extractContextEvalSignals } from './context-eval.js';
+import { validateRoutingSyntax } from './final-routing-slot.js';
 import { buildBriefingMessage } from './format-briefing.js';
 import { extractRichFromText, isValidRichBlock } from './rich-block-extract.js';
 import type { RouteOptions, RouteStrategyDeps } from './route-helpers.js';
 import {
   assembleIncrementalContext,
+  createLeakedToolCallStreamStripper,
   detectContextDegradation,
   getService,
+  getThreadBootcampMemberCount,
   isUserFacingSystemInfoContent,
   routeContentBlocksForCat,
   sanitizeInjectedContent,
+  shouldAppendExplicitCurrentMessage,
   toStoredToolEvent,
   upsertMaxBoundary,
 } from './route-helpers.js';
+import { appendThinkingChunk, renderThinkingChunks } from './thinking-chunks.js';
+import { shouldWarnVerdictWithoutPass } from './verdict-detect.js';
+import { shouldWarnVoidHold } from './void-hold-detect.js';
 import { buildVoteTally, checkVoteCompletion, extractVoteFromText, VOTE_RESULT_SOURCE } from './vote-intercept.js';
 
 const log = createModuleLogger('route-serial');
+
+function collectStructuredTargetCatsFromInput(input: unknown): string[] {
+  if (!input || typeof input !== 'object') return [];
+
+  const parsed = input as { targetCats?: unknown; targets?: unknown };
+  const values = Array.isArray(parsed.targetCats)
+    ? parsed.targetCats
+    : Array.isArray(parsed.targets)
+      ? parsed.targets
+      : [];
+  return values.filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
 
 export async function* routeSerial(
   deps: RouteStrategyDeps,
@@ -95,6 +136,7 @@ export async function* routeSerial(
   let yieldedFinalDone = false;
   // F27: Track how many worklist entries have had a2a_handoff emitted
   let handoffEmitted = targetCats.length; // Original targets don't get handoff events
+  const activeTrackedA2ASlots = new Set<CatId>();
   // F042 Wave 3: Fetch thread participant activity once before loop (threadId doesn't change).
   let activeParticipants: { catId: CatId; lastMessageAt: number; messageCount: number }[] = [];
   if (deps.invocationDeps.threadStore) {
@@ -112,16 +154,19 @@ export async function* routeSerial(
   let voiceMode: boolean | undefined;
   // F087: Bootcamp state for CVO onboarding
   let bootcampState: InvocationContext['bootcampState'];
+  const targetCatIds = new Set<string>(targetCats);
+  // Thread read: shared across routingPolicy, voiceMode, bootcamp, SOP, and guide interceptor
+  let routeThread: Thread | null = null;
   if (deps.invocationDeps.threadStore) {
     try {
-      const thread = await deps.invocationDeps.threadStore.get(threadId);
-      routingPolicy = thread?.routingPolicy;
-      voiceMode = thread?.voiceMode;
-      bootcampState = thread?.bootcampState;
+      routeThread = (await deps.invocationDeps.threadStore.get(threadId)) ?? null;
+      routingPolicy = routeThread?.routingPolicy;
+      voiceMode = routeThread?.voiceMode;
+      bootcampState = routeThread?.bootcampState;
       // F073 P4: Read workflow-sop if thread is linked to a backlog item
-      if (thread?.backlogItemId && deps.invocationDeps.workflowSopStore) {
+      if (routeThread?.backlogItemId && deps.invocationDeps.workflowSopStore) {
         try {
-          const sop = await deps.invocationDeps.workflowSopStore.get(thread.backlogItemId);
+          const sop = await deps.invocationDeps.workflowSopStore.get(routeThread.backlogItemId);
           if (sop) {
             sopStageHint = {
               stage: sop.stage,
@@ -137,11 +182,27 @@ export async function* routeSerial(
       /* best-effort */
     }
   }
+  const bootcampMemberCount = getThreadBootcampMemberCount(routeThread);
+
+  // F155: Guide interceptor — resume existing guide state only
+  const guideCtx = await prepareGuideContext({
+    thread: routeThread,
+    guideSessionStore: deps.invocationDeps.guideSessionStore,
+    targetCats,
+    message,
+    userId,
+    threadId,
+    log,
+    dismissTracker: deps.invocationDeps.dismissTracker,
+  });
 
   try {
     while (index < worklist.length) {
       if (signal?.aborted) break;
       const catId = worklist[index]!;
+      // F148 OQ-2: briefing→invocation link + context eval
+      let briefingMessageId: string | undefined;
+      let briefingCoverageMap: import('./context-transport.js').CoverageMap | undefined;
 
       // Only pass images/uploads for the first cat (user's original target)
       const isOriginalTarget = index < targetCats.length;
@@ -155,10 +216,18 @@ export async function* routeSerial(
       }
 
       // Build identity: static goes in -p content (+ systemPrompt as defense-in-depth), dynamic in -p only
-      const catConfig: CatConfig | undefined =
-        catRegistry.tryGet(catId as string)?.config ?? CAT_CONFIGS[catId as string];
+      const catConfig: CatConfig | undefined = catRegistry.tryGet(catId as string)?.config;
       const teammates = [...new Set(worklist.filter((id) => id !== catId))];
       const directMessageFrom = worklistEntry.a2aFrom.get(catId);
+      // F167 L1: ping-pong warning — inject when this cat just received the ball
+      // in a same-pair streak >= 2 (streak=4 already blocked upstream, so max is 3 here).
+      const pingPongWarning =
+        worklistEntry.streakPair && worklistEntry.streakPair.to === catId && worklistEntry.streakPair.count >= 2
+          ? {
+              pairedWith: worklistEntry.streakPair.from,
+              count: worklistEntry.streakPair.count,
+            }
+          : undefined;
       const streamReplyTo = worklistEntry.a2aTriggerMessageId.get(catId);
       const streamReplyPreview = streamReplyTo
         ? await hydrateReplyPreview(deps.messageStore, streamReplyTo)
@@ -182,7 +251,7 @@ export async function* routeSerial(
       }
       const staticIdentity = buildStaticIdentity(catId, { mcpAvailable, packBlocks });
       // F041: inject HTTP callback only when MCP is NOT actually available (fallback)
-      const mcpInstructions = needsMcpInjection(mcpAvailable)
+      const mcpInstructions = needsMcpInjection(mcpAvailable, catConfig?.clientId)
         ? buildMcpCallbackInstructions({
             currentCatId: catId as string,
             teammates: teammates.map((id) => id as string),
@@ -209,6 +278,31 @@ export async function* routeSerial(
         }
       }
 
+      // F163 AC-A3: always_on constitutional docs injection (fail-open, flag-gated)
+      // shadow: query but do NOT inject into prompt (record-only for experiment diff)
+      // on: query AND inject into prompt
+      // off: skip entirely
+      let alwaysOnDocs: readonly { anchor: string; title: string; summary: string }[] | undefined;
+      let alwaysOnInjectionMode: 'off' | 'shadow' | 'on' = 'off';
+      if (deps.evidenceStore) {
+        try {
+          const { freezeFlags } = await import('../../../../../domains/memory/f163-types.js');
+          const f163Flags = freezeFlags();
+          alwaysOnInjectionMode = f163Flags.alwaysOnInjection;
+          if (alwaysOnInjectionMode !== 'off') {
+            const queryAlwaysOn = (
+              deps.evidenceStore as { queryAlwaysOn?: () => Array<{ anchor: string; title: string; summary: string }> }
+            ).queryAlwaysOn;
+            if (queryAlwaysOn) {
+              const docs = queryAlwaysOn();
+              if (docs.length > 0) alwaysOnDocs = docs;
+            }
+          }
+        } catch {
+          /* fail-open: always_on lookup failure does not block invocation */
+        }
+      }
+
       const invocationContext = buildInvocationContext({
         catId,
         mode: worklist.length > 1 ? 'serial' : 'independent',
@@ -219,13 +313,16 @@ export async function* routeSerial(
         ...(promptTags && promptTags.length > 0 ? { promptTags } : {}),
         a2aEnabled: worklistEntry.a2aCount < maxDepth,
         ...(directMessageFrom ? { directMessageFrom } : {}),
+        ...(pingPongWarning ? { pingPongWarning } : {}),
         ...(mentionRoutingFeedback ? { mentionRoutingFeedback } : {}),
         ...(activeParticipants.length > 0 ? { activeParticipants } : {}),
         ...(routingPolicy ? { routingPolicy } : {}),
         ...(sopStageHint ? { sopStageHint } : {}),
         ...(activeSignals ? { activeSignals } : {}),
         ...(voiceMode ? { voiceMode } : {}),
-        ...(bootcampState ? { bootcampState, threadId } : {}),
+        ...(bootcampState ? { bootcampState, threadId, bootcampMemberCount } : {}),
+        ...(alwaysOnDocs && alwaysOnInjectionMode === 'on' ? { alwaysOnDocs } : {}),
+        ...guideContextForCat(guideCtx, catId, targetCatIds, threadId),
       });
 
       // F24 Phase E: Bootstrap context for Session #2+
@@ -283,7 +380,11 @@ export async function* routeSerial(
           catId,
           currentUserMessageId,
           thinkingMode,
-          { effectiveMaxContextTokens: effectiveContextBudget },
+          {
+            effectiveMaxContextTokens: effectiveContextBudget,
+            canonicalFeatureId: sopStageHint?.featureId,
+            threadTitle: routeThread?.title ?? undefined,
+          },
         );
         deliveryBoundaryId = inc.boundaryId;
         if (inc.degradation) {
@@ -300,6 +401,8 @@ export async function* routeSerial(
           const briefingInput = buildBriefingMessage(inc.coverageMap, threadId, inc.briefingContext);
           try {
             const stored = await deps.messageStore.append(briefingInput);
+            briefingMessageId = stored.id;
+            briefingCoverageMap = inc.coverageMap;
             // P1-3: Include full stored message in payload so frontend can addMessage directly
             yield {
               type: 'system_info' as AgentMessageType,
@@ -326,8 +429,9 @@ export async function* routeSerial(
         const parts = [invocationContext, catModePrompt, bootstrapContext, mcpInstructions].filter(Boolean);
         if (inc.contextText) parts.push(inc.contextText);
         // F35 fix: only inject raw message when it was genuinely absent from unseen rows.
-        // If it was present but filtered out (e.g. whisper), injecting would leak private content.
-        if (!inc.includesCurrentUserMessage && !inc.currentMessageFilteredOut) parts.push(message);
+        // Defensive guard: if the current message ID is already present anywhere in
+        // the assembled context text, do not append the raw message again.
+        if (shouldAppendExplicitCurrentMessage(inc, currentUserMessageId)) parts.push(message);
         prompt = parts.join('\n\n---\n\n');
       } else {
         // Per-cat context budget (Phase 4.0): assemble context with cat-specific limits
@@ -374,16 +478,24 @@ export async function* routeSerial(
       }
 
       let textContent = '';
-      let thinkingContent = '';
+      const thinkingChunks: string[] = [];
       let firstMetadata: MessageMetadata | undefined;
       let doneMsg: AgentMessage | undefined;
       let hadError = false;
+      /** F155: tracks whether cat produced user-visible output (for guide completion ack). */
+      let catProducedOutput = false;
       let sawUserFacingSystemInfo = false;
       // #267: track errors that happened BEFORE abort — only these are real provider failures
       let hadProviderError = false;
       // Collect error text separately for system-message persistence (F5 reload)
       let collectedErrorText = '';
       const collectedToolEvents: StoredToolEvent[] = [];
+      // F148 OQ-2: Collect tool names for context eval signals
+      const collectedToolNames: string[] = [];
+      // #573: Track confirmed cat_cafe_post_message callback persistence
+      let callbackPostConfirmed = false;
+      let awaitingCallbackResult = false;
+      const structuredTargetCats = new Set<string>();
       // F060: Collect rich blocks emitted inline via system_info (not MCP buffer)
       const streamRichBlocks: import('@cat-cafe/shared').RichBlock[] = [];
       // F22 R2 P1-1: Capture own invocationId from stream (not getLatestId)
@@ -409,6 +521,8 @@ export async function* routeSerial(
         { catId: catId as string, threadId, promptLength: prompt.length, index, worklistSize: worklist.length },
         'Invoking cat via invokeSingleCat',
       );
+      const leakedPayloadStripper = createLeakedToolCallStreamStripper();
+      const invocationStartedAt = Date.now();
       for await (const msg of invokeSingleCat(deps.invocationDeps, {
         catId,
         service: getService(deps.services, catId),
@@ -424,118 +538,135 @@ export async function* routeSerial(
         ...(worklistEntry.a2aTriggerMessageId.get(catId)
           ? { a2aTriggerMessageId: worklistEntry.a2aTriggerMessageId.get(catId) }
           : {}),
+        ...(options.routeSpan ? { routeSpan: options.routeSpan } : {}),
         isLastCat: false,
       })) {
         // F39 bugfix: stop yielding after cancel (pipe buffer may still drain)
         if (signal?.aborted) break;
 
-        // F22 R2 P1-1: Capture invocationId from the initial system_info.
-        // Keep forwarding this boundary event so frontend can reset stale task progress.
-        if (msg.type === 'system_info' && msg.content && !ownInvocationId) {
-          try {
-            const parsed = JSON.parse(msg.content);
-            if (parsed.type === 'invocation_created') {
-              ownInvocationId = parsed.invocationId;
-              // F111 Phase B: Start streaming TTS when we have an invocationId
-              if (voiceMode && deps.socketManager) {
-                const ttsRegistry = getStreamingTtsRegistry();
-                if (ttsRegistry) {
-                  voiceChunker = new StreamingTtsChunker({
-                    catId: catId as string,
-                    invocationId: ownInvocationId!,
-                    threadId,
-                    voiceConfig: getCatVoice(catId as string),
-                    broadcaster: deps.socketManager,
-                    ttsRegistry,
-                    signal,
-                  });
+        const effectiveMsgs: AgentMessage[] = [];
+        if (msg.type === 'text' && msg.content) {
+          effectiveMsgs.push({ ...msg, content: leakedPayloadStripper.push(msg.content) });
+        } else if (msg.type === 'done') {
+          const flushedText = leakedPayloadStripper.flush();
+          if (flushedText) {
+            effectiveMsgs.push({
+              type: 'text',
+              catId,
+              content: flushedText,
+              timestamp: msg.timestamp,
+            });
+          }
+          effectiveMsgs.push(msg);
+        } else {
+          effectiveMsgs.push(msg);
+        }
+
+        for (const effectiveMsg of effectiveMsgs) {
+          // F22 R2 P1-1: Capture invocationId from the initial system_info.
+          // Keep forwarding this boundary event so frontend can reset stale task progress.
+          if (effectiveMsg.type === 'system_info' && effectiveMsg.content && !ownInvocationId) {
+            try {
+              const parsed = JSON.parse(effectiveMsg.content);
+              if (parsed.type === 'invocation_created') {
+                ownInvocationId = parsed.invocationId;
+                // F111 Phase B: Start streaming TTS when we have an invocationId
+                if (voiceMode && deps.socketManager) {
+                  const ttsRegistry = getStreamingTtsRegistry();
+                  if (ttsRegistry) {
+                    voiceChunker = new StreamingTtsChunker({
+                      catId: catId as string,
+                      invocationId: ownInvocationId!,
+                      threadId,
+                      voiceConfig: getCatVoice(catId as string),
+                      broadcaster: deps.socketManager,
+                      ttsRegistry,
+                      signal,
+                    });
+                  }
+                }
+                // Issue #83: Start keepalive timer once we have an invocationId.
+                // This ensures draft TTL is renewed even during long silent tool calls.
+                if (deps.draftStore && !keepaliveTimer) {
+                  const keepInvId = ownInvocationId!;
+                  keepaliveTimer = setInterval(() => {
+                    deps.draftStore!.touch(userId, threadId, keepInvId)?.catch?.(noop);
+                  }, KEEPALIVE_INTERVAL_MS);
                 }
               }
-              // Issue #83: Start keepalive timer once we have an invocationId.
-              // This ensures draft TTL is renewed even during long silent tool calls.
-              if (deps.draftStore && !keepaliveTimer) {
-                const keepInvId = ownInvocationId!;
-                keepaliveTimer = setInterval(() => {
-                  deps.draftStore!.touch(userId, threadId, keepInvId)?.catch?.(noop);
-                }, KEEPALIVE_INTERVAL_MS);
+            } catch {
+              /* ignore parse errors */
+            }
+          }
+
+          if (effectiveMsg.type === 'text' && effectiveMsg.content) {
+            textContent += effectiveMsg.content;
+            voiceChunker?.feed(effectiveMsg.content);
+          }
+          // F045: Accumulate thinking blocks for persistence (F5 recovery)
+          if (effectiveMsg.type === 'system_info' && effectiveMsg.content) {
+            if (isUserFacingSystemInfoContent(effectiveMsg.content)) {
+              sawUserFacingSystemInfo = true;
+            }
+            try {
+              const parsed = JSON.parse(effectiveMsg.content);
+              if (parsed.type === 'thinking' && typeof parsed.text === 'string') {
+                thinkingChunks.splice(0, thinkingChunks.length, ...appendThinkingChunk(thinkingChunks, parsed.text));
               }
+              // F060: Collect inline rich_block for persistence (P1 fix)
+              if (parsed.type === 'rich_block' && parsed.block && isValidRichBlock(parsed.block)) {
+                streamRichBlocks.push(parsed.block);
+              }
+            } catch {
+              /* ignore parse errors */
             }
-          } catch {
-            /* ignore parse errors */
           }
-        }
-        if (msg.type === 'text' && msg.content) {
-          textContent += msg.content;
-          voiceChunker?.feed(msg.content);
-        }
-        // F045: Accumulate thinking blocks for persistence (F5 recovery)
-        if (msg.type === 'system_info' && msg.content) {
-          if (isUserFacingSystemInfoContent(msg.content)) {
-            sawUserFacingSystemInfo = true;
+          // Accumulate tool events for persistence (before draft flush so current event is available)
+          const toolEvt = toStoredToolEvent(effectiveMsg);
+          if (toolEvt) {
+            collectedToolEvents.push(toolEvt);
           }
-          try {
-            const parsed = JSON.parse(msg.content);
-            if (parsed.type === 'thinking' && typeof parsed.text === 'string') {
-              thinkingContent += (thinkingContent ? '\n\n---\n\n' : '') + parsed.text;
-            }
-            // F060: Collect inline rich_block for persistence (P1 fix)
-            if (parsed.type === 'rich_block' && parsed.block && isValidRichBlock(parsed.block)) {
-              streamRichBlocks.push(parsed.block);
-            }
-          } catch {
-            /* ignore parse errors */
-          }
-        }
-        // Accumulate tool events for persistence (before draft flush so current event is available)
-        const toolEvt = toStoredToolEvent(msg);
-        if (toolEvt) {
-          collectedToolEvents.push(toolEvt);
-        }
 
-        // F150: Fire-and-forget tool usage counter
-        if (msg.type === 'tool_use' && deps.toolUsageCounter && msg.catId) {
-          deps.toolUsageCounter.recordToolUse(
-            msg.catId as string,
-            msg.toolName ?? 'unknown',
-            msg.toolInput as Record<string, unknown> | undefined,
-          );
-        }
+          if (effectiveMsg.type === 'tool_use') {
+            for (const target of collectStructuredTargetCatsFromInput(effectiveMsg.toolInput)) {
+              structuredTargetCats.add(target);
+            }
+          }
 
-        // #80: Draft flush — fire-and-forget periodic persistence for F5 recovery
-        if (deps.draftStore && ownInvocationId) {
-          const now = Date.now();
-          const charDelta = textContent.length - lastFlushLen;
-          const neverFlushed = lastFlushLen === 0 && lastFlushToolLen === 0;
-          if (
-            msg.type === 'text' &&
-            charDelta > 0 &&
-            (neverFlushed || now - lastFlushTime >= FLUSH_INTERVAL_MS || charDelta >= FLUSH_CHAR_DELTA)
-          ) {
-            deps.draftStore
-              .upsert({
-                userId,
-                threadId,
-                invocationId: ownInvocationId,
-                catId,
-                content: textContent,
-                ...(collectedToolEvents.length > 0 ? { toolEvents: collectedToolEvents } : {}),
-                ...(thinkingContent ? { thinking: thinkingContent } : {}),
-                updatedAt: now,
-              })
-              ?.catch?.(noop);
-            lastFlushTime = now;
-            lastFlushLen = textContent.length;
-            lastFlushToolLen = collectedToolEvents.length;
-          } else if (
-            (msg.type === 'tool_use' || msg.type === 'tool_result') &&
-            // Cloud R7 P1: bypass interval for the very first flush — tool-first invocations
-            // must create a draft immediately, not wait 2s for the interval gate.
-            (neverFlushed || now - lastFlushTime >= FLUSH_INTERVAL_MS)
-          ) {
-            // Heartbeat for non-text events: keep draft alive during long tool calls.
-            // Cloud R6 P1: upsert when there's unsaved text OR new tool events —
-            // tool-first invocations (no text yet) must still create a draft record.
-            if (textContent.length > lastFlushLen || collectedToolEvents.length > lastFlushToolLen) {
+          // F148 OQ-2: Collect tool names for context eval
+          if (effectiveMsg.type === 'tool_use' && effectiveMsg.toolName) {
+            collectedToolNames.push(effectiveMsg.toolName);
+            if (effectiveMsg.toolName.endsWith('cat_cafe_post_message')) awaitingCallbackResult = true;
+          }
+          // #573: Confirm callback persistence via tool_result success
+          if (effectiveMsg.type === 'tool_result' && awaitingCallbackResult) {
+            awaitingCallbackResult = false;
+            if (
+              effectiveMsg.content?.includes('"status":"ok"') ||
+              effectiveMsg.content?.includes('"status":"duplicate"')
+            )
+              callbackPostConfirmed = true;
+          }
+
+          // F150: Fire-and-forget tool usage counter
+          if (effectiveMsg.type === 'tool_use' && deps.toolUsageCounter && effectiveMsg.catId) {
+            deps.toolUsageCounter.recordToolUse(
+              effectiveMsg.catId as string,
+              effectiveMsg.toolName ?? 'unknown',
+              effectiveMsg.toolInput as Record<string, unknown> | undefined,
+            );
+          }
+
+          // #80: Draft flush — fire-and-forget periodic persistence for F5 recovery
+          if (deps.draftStore && ownInvocationId) {
+            const now = Date.now();
+            const charDelta = textContent.length - lastFlushLen;
+            const neverFlushed = lastFlushLen === 0 && lastFlushToolLen === 0;
+            if (
+              effectiveMsg.type === 'text' &&
+              charDelta > 0 &&
+              (neverFlushed || now - lastFlushTime >= FLUSH_INTERVAL_MS || charDelta >= FLUSH_CHAR_DELTA)
+            ) {
               deps.draftStore
                 .upsert({
                   userId,
@@ -544,42 +675,71 @@ export async function* routeSerial(
                   catId,
                   content: textContent,
                   ...(collectedToolEvents.length > 0 ? { toolEvents: collectedToolEvents } : {}),
-                  ...(thinkingContent ? { thinking: thinkingContent } : {}),
+                  ...(thinkingChunks.length > 0 ? { thinking: renderThinkingChunks(thinkingChunks) } : {}),
                   updatedAt: now,
                 })
                 ?.catch?.(noop);
+              lastFlushTime = now;
               lastFlushLen = textContent.length;
               lastFlushToolLen = collectedToolEvents.length;
-            } else {
-              deps.draftStore.touch(userId, threadId, ownInvocationId)?.catch?.(noop);
-            }
-            lastFlushTime = now;
-          }
-        }
-
-        if (msg.type === 'error') {
-          hadError = true;
-          // #267: errors before abort are real provider failures; errors after abort are cleanup
-          if (!signal?.aborted) hadProviderError = true;
-          if (msg.error) {
-            collectedErrorText += `${collectedErrorText ? '\n' : ''}${msg.error}`;
-          }
-        }
-        if (msg.metadata && !firstMetadata) {
-          firstMetadata = msg.metadata;
-        }
-        if (msg.type === 'done') {
-          doneMsg = msg; // Buffer — yield after A2A detection
-        } else {
-          // Tag CLI stdout text with origin: 'stream' (thinking/internal)
-          yield msg.type === 'text'
-            ? {
-                ...msg,
-                origin: 'stream' as const,
-                ...(streamReplyTo ? { replyTo: streamReplyTo } : {}),
-                ...(streamReplyPreview ? { replyPreview: streamReplyPreview } : {}),
+            } else if (
+              (effectiveMsg.type === 'tool_use' || effectiveMsg.type === 'tool_result') &&
+              // Cloud R7 P1: bypass interval for the very first flush — tool-first invocations
+              // must create a draft immediately, not wait 2s for the interval gate.
+              (neverFlushed || now - lastFlushTime >= FLUSH_INTERVAL_MS)
+            ) {
+              // Heartbeat for non-text events: keep draft alive during long tool calls.
+              // Cloud R6 P1: upsert when there's unsaved text OR new tool events —
+              // tool-first invocations (no text yet) must still create a draft record.
+              if (textContent.length > lastFlushLen || collectedToolEvents.length > lastFlushToolLen) {
+                deps.draftStore
+                  .upsert({
+                    userId,
+                    threadId,
+                    invocationId: ownInvocationId,
+                    catId,
+                    content: textContent,
+                    ...(collectedToolEvents.length > 0 ? { toolEvents: collectedToolEvents } : {}),
+                    ...(thinkingChunks.length > 0 ? { thinking: renderThinkingChunks(thinkingChunks) } : {}),
+                    updatedAt: now,
+                  })
+                  ?.catch?.(noop);
+                lastFlushLen = textContent.length;
+                lastFlushToolLen = collectedToolEvents.length;
+              } else {
+                deps.draftStore.touch(userId, threadId, ownInvocationId)?.catch?.(noop);
               }
-            : msg;
+              lastFlushTime = now;
+            }
+          }
+
+          if (effectiveMsg.type === 'error') {
+            hadError = true;
+            // #267: errors before abort are real provider failures; errors after abort are cleanup
+            if (!signal?.aborted) hadProviderError = true;
+            if (effectiveMsg.error) {
+              collectedErrorText += `${collectedErrorText ? '\n' : ''}${effectiveMsg.error}`;
+            }
+          }
+          if (effectiveMsg.metadata && !firstMetadata) {
+            firstMetadata = effectiveMsg.metadata;
+          }
+          if (effectiveMsg.type === 'done') {
+            doneMsg = effectiveMsg; // Buffer — yield after A2A detection
+          } else {
+            if (effectiveMsg.type === 'text' && !effectiveMsg.content) {
+              continue;
+            }
+            // Tag CLI stdout text with origin: 'stream' (thinking/internal)
+            yield effectiveMsg.type === 'text'
+              ? {
+                  ...effectiveMsg,
+                  origin: 'stream' as const,
+                  ...(streamReplyTo ? { replyTo: streamReplyTo } : {}),
+                  ...(streamReplyPreview ? { replyPreview: streamReplyPreview } : {}),
+                }
+              : effectiveMsg;
+          }
         }
       }
 
@@ -620,6 +780,7 @@ export async function* routeSerial(
       let mentionsUser = false;
 
       if (textContent) {
+        catProducedOutput = true;
         const sanitized = sanitizeInjectedContent(textContent);
 
         // F22: Extract cc_rich blocks from text (Route B fallback for non-MCP cats)
@@ -653,6 +814,231 @@ export async function* routeSerial(
         // A2A mention detection (缅因猫 P1-3: only after full text accumulated)
         // Line-start @mention = always actionable (no keyword gate)
         a2aMentions = parseA2AMentions(storedContent, catId);
+
+        // clowder-ai#489: baseline counter — line-start mentions
+        if (a2aMentions.length > 0) {
+          lineStartDetected.add(a2aMentions.length, { 'agent.id': catId as string });
+        }
+
+        // F167 Phase H AC-H3/H5 (KD-24): final routing slot validator.
+        // Mechanical slot check with zero intent classifier. Runs BEFORE #417
+        // inline-mention-hint and AC-C7 verdict warn; hit suppresses the system_info
+        // emit on both (but keeps setMentionRoutingFeedback for next-turn correction).
+        const phaseHRosterHandles: string[] = [];
+        {
+          const allCfg = catRegistry.getAllConfigs();
+          for (const cfg of Object.values(allCfg) as CatConfig[]) {
+            for (const pattern of cfg.mentionPatterns) phaseHRosterHandles.push(pattern);
+          }
+        }
+        const phaseHResult = validateRoutingSyntax({
+          text: storedContent,
+          lineStartMentions: a2aMentions,
+          toolNames: collectedToolNames,
+          structuredTargetCats: [...structuredTargetCats],
+          rosterHandles: phaseHRosterHandles,
+        });
+        const phaseHHit = phaseHResult.kind === 'invalid_route_syntax';
+        if (phaseHHit && phaseHResult.kind === 'invalid_route_syntax') {
+          try {
+            const inlineList = phaseHResult.inlineMentions.map((h) => `@${h}`).join(' ');
+            const hintSource = {
+              connector: 'routing-syntax-hint',
+              label: '路由语法提醒',
+              icon: '⚠️',
+              meta: { presentation: 'system_notice', noticeTone: 'warning' },
+            };
+            const stored = await deps.messageStore.append({
+              userId: 'system',
+              catId: null,
+              threadId,
+              content: `[路由语法]: ${inlineList} 写在行中不会触发路由 — 把 @句柄 移到最后一行行首独立一行即可。`,
+              mentions: [],
+              timestamp: Date.now(),
+              source: hintSource,
+            });
+            if (deps.socketManager) {
+              deps.socketManager.broadcastToRoom(`thread:${threadId}`, 'connector_message', {
+                threadId,
+                message: {
+                  id: stored.id,
+                  type: 'connector',
+                  content: stored.content,
+                  source: hintSource,
+                  timestamp: stored.timestamp,
+                },
+              });
+            }
+          } catch {
+            /* non-blocking hint */
+          }
+        }
+
+        // #417 / F064 AC-B3: Write-side feedback for inline action-like @mentions
+        // clowder-ai#489: counters for detection, shadow, feedback, hint
+        if (deps.invocationDeps.threadStore) {
+          const {
+            strictHits: inlineHits,
+            shadowMisses,
+            routedSetSkips,
+          } = detectInlineActionMentionsWithShadow(storedContent, catId, a2aMentions);
+          const agentAttr = { 'agent.id': catId as string };
+          inlineActionChecked.add(1, agentAttr);
+          if (inlineHits.length > 0) inlineActionDetected.add(inlineHits.length, agentAttr);
+          if (shadowMisses.length > 0) inlineActionShadowMiss.add(shadowMisses.length, agentAttr);
+          if (routedSetSkips > 0) inlineActionRoutedSetSkip.add(routedSetSkips, agentAttr);
+
+          if (inlineHits.length > 0) {
+            try {
+              await deps.invocationDeps.threadStore.setMentionRoutingFeedback(threadId, catId, {
+                sourceTimestamp: Date.now(),
+                items: inlineHits.map((m) => ({ targetCatId: m.catId, reason: 'inline_action' as const })),
+              });
+              inlineActionFeedbackWritten.add(1, agentAttr);
+              log.info(
+                { catId: catId as string, threadId, targets: inlineHits.map((h) => h.catId) },
+                'Inline action @mention detected — wrote routing feedback',
+              );
+            } catch {
+              inlineActionFeedbackWriteFailed.add(1, agentAttr);
+            }
+            // #1062: User-visible system message when chain would break
+            // (inline action detected but no line-start @ = no routing will happen)
+            // F167 Phase H AC-H5: suppress this legacy hint when Phase H already emitted
+            // routing-syntax-hint for the same turn (dedupe, single authoritative message).
+            if (a2aMentions.length === 0 && !phaseHHit) {
+              try {
+                const targets = inlineHits.map((h) => `@${h.catId}`).join(', ');
+                const hintSource = {
+                  connector: 'inline-mention-hint',
+                  label: '路由提示',
+                  icon: '💡',
+                  meta: { presentation: 'system_notice', noticeTone: 'info' },
+                };
+                const stored = await deps.messageStore.append({
+                  userId: 'system',
+                  catId: null,
+                  threadId,
+                  content: `想交接给 ${targets}？把它单独放到新起一行开头，才能触发交接。`,
+                  mentions: [],
+                  timestamp: Date.now(),
+                  source: hintSource,
+                });
+                inlineActionHintEmitted.add(1, agentAttr);
+                // Broadcast so frontend sees it in real-time (same pattern as vote result)
+                if (deps.socketManager) {
+                  deps.socketManager.broadcastToRoom(`thread:${threadId}`, 'connector_message', {
+                    threadId,
+                    message: {
+                      id: stored.id,
+                      type: 'connector',
+                      content: stored.content,
+                      source: hintSource,
+                      timestamp: stored.timestamp,
+                    },
+                  });
+                }
+              } catch {
+                inlineActionHintEmitFailed.add(1, agentAttr);
+              }
+            }
+          }
+        }
+
+        // F167 Phase H AC-H5: suppress AC-C7 verdict-without-pass when Phase H hit
+        // (format error is the root cause; verdict-without-pass is the consequence).
+        // 2026-04-25 fix (砚砚 GPT-5.5): pass hasCoCreatorLineStartMention so summary
+        // reports ending with `@co-creator` / `@铲屎官` (legitimate escalation to co-creator)
+        // don't trigger the verdict-no-pass-hint false-positive. parseA2AMentions only
+        // returns cat handles, never co-creator ones.
+        if (
+          !phaseHHit &&
+          shouldWarnVerdictWithoutPass({
+            text: storedContent,
+            lineStartMentions: a2aMentions,
+            toolNames: collectedToolNames,
+            structuredTargetCats: [...structuredTargetCats],
+            hasCoCreatorLineStartMention: storedContent ? detectUserMention(storedContent) : false,
+          })
+        ) {
+          try {
+            const hintSource = {
+              connector: 'verdict-no-pass-hint',
+              label: '球权提醒',
+              icon: '🏓',
+              meta: { presentation: 'system_notice', noticeTone: 'warning' },
+            };
+            const stored = await deps.messageStore.append({
+              userId: 'system',
+              catId: null,
+              threadId,
+              content: '[球权提醒]: 结论后直接传球，不要停在结论 — 末尾加一行行首 @句柄 或调用 `cat_cafe_hold_ball`。',
+              mentions: [],
+              timestamp: Date.now(),
+              source: hintSource,
+            });
+            if (deps.socketManager) {
+              deps.socketManager.broadcastToRoom(`thread:${threadId}`, 'connector_message', {
+                threadId,
+                message: {
+                  id: stored.id,
+                  type: 'connector',
+                  content: stored.content,
+                  source: hintSource,
+                  timestamp: stored.timestamp,
+                },
+              });
+            }
+          } catch {
+            /* non-blocking hint */
+          }
+        }
+
+        // F167 Phase I AC-I1 (KD-25): void hold detection — text says "持球" but
+        // no cat_cafe_hold_ball tool call this turn.声明-动作一致性 check.
+        if (
+          shouldWarnVoidHold({
+            text: storedContent,
+            toolNames: collectedToolNames,
+            lineStartMentions: a2aMentions,
+            structuredTargetCats: [...structuredTargetCats],
+            hasCoCreatorLineStartMention: storedContent ? detectUserMention(storedContent) : false,
+          })
+        ) {
+          try {
+            const hintSource = {
+              connector: 'void-hold-hint',
+              label: '持球提醒',
+              icon: '🏓',
+              meta: { presentation: 'system_notice', noticeTone: 'warning' },
+            };
+            const stored = await deps.messageStore.append({
+              userId: 'system',
+              catId: null,
+              threadId,
+              content:
+                '[持球提醒]: 检测到持球声明但未调用 hold_ball MCP — ' +
+                '文字声明不会设定唤醒计时器，请调用 `cat_cafe_hold_ball` 完成持球或改为传球。',
+              mentions: [],
+              timestamp: Date.now(),
+              source: hintSource,
+            });
+            if (deps.socketManager) {
+              deps.socketManager.broadcastToRoom(`thread:${threadId}`, 'connector_message', {
+                threadId,
+                message: {
+                  id: stored.id,
+                  type: 'connector',
+                  content: stored.content,
+                  source: hintSource,
+                  timestamp: stored.timestamp,
+                },
+              });
+            }
+          } catch {
+            /* non-blocking hint */
+          }
+        }
 
         // F079 Phase 2: Vote interception — extract [VOTE:xxx] from cat response
         const votedOption = extractVoteFromText(storedContent);
@@ -734,39 +1120,52 @@ export async function* routeSerial(
           }
         }
 
-        const storedTimestamp = Date.now();
+        const storedTimestamp = invocationStartedAt;
 
         // F061: Detect @co-creator mentions in agent response for browser notification
         mentionsUser = storedContent ? detectUserMention(storedContent) : false;
+
+        // #573: skip stream store only when callback confirmed persistence (not just invocation)
+        const callbackAlreadyStored = callbackPostConfirmed;
 
         // Store with actual mentions — degrade on failure to ensure done reaches frontend
         // (缅因猫 review P1-2: Redis failure must not block done yield)
         let storedMsgId: string | undefined;
         try {
-          const storedMsg = await deps.messageStore.append({
-            userId,
-            catId,
-            content: storedContent,
-            mentions: a2aMentions,
-            origin: 'stream',
-            timestamp: storedTimestamp,
-            threadId,
-            ...(mentionsUser ? { mentionsUser } : {}),
-            ...(thinkingContent ? { thinking: thinkingContent } : {}),
-            ...(firstMetadata ? { metadata: firstMetadata } : {}),
-            ...(collectedToolEvents.length > 0 ? { toolEvents: collectedToolEvents } : {}),
-            ...(streamReplyTo ? { replyTo: streamReplyTo } : {}),
-            extra: {
-              ...(allRichBlocks.length > 0 ? { rich: { v: 1 as const, blocks: allRichBlocks } } : {}),
-              ...(ownInvocationId ? { stream: { invocationId: ownInvocationId } } : {}),
-            },
-          });
-          storedMsgId = storedMsg.id;
-          // F088-P3: Stash rich blocks for outbound delivery
-          if (options.persistenceContext && allRichBlocks.length > 0) {
-            options.persistenceContext.richBlocks = allRichBlocks;
+          // #573: persist with the OUTER cat-cafe parentInvocationId (set by QueueProcessor)
+          const persistedInvocationId = options.parentInvocationId ?? ownInvocationId;
+          if (!callbackAlreadyStored) {
+            const storedMsg = await deps.messageStore.append({
+              userId,
+              catId,
+              content: storedContent,
+              mentions: a2aMentions,
+              origin: 'stream',
+              timestamp: storedTimestamp,
+              threadId,
+              ...(mentionsUser ? { mentionsUser } : {}),
+              ...(thinkingChunks.length > 0 ? { thinking: renderThinkingChunks(thinkingChunks) } : {}),
+              ...(firstMetadata ? { metadata: firstMetadata } : {}),
+              ...(collectedToolEvents.length > 0 ? { toolEvents: collectedToolEvents } : {}),
+              ...(streamReplyTo ? { replyTo: streamReplyTo } : {}),
+              extra: {
+                ...(allRichBlocks.length > 0 ? { rich: { v: 1 as const, blocks: allRichBlocks } } : {}),
+                ...(persistedInvocationId ? { stream: { invocationId: persistedInvocationId } } : {}),
+                ...(doneMsg?.tracing ? { tracing: doneMsg.tracing } : {}),
+              },
+            });
+            storedMsgId = storedMsg.id;
+            // F088-P3: Stash rich blocks for outbound delivery
+            if (options.persistenceContext && allRichBlocks.length > 0) {
+              options.persistenceContext.richBlocks = allRichBlocks;
+            }
+          } else {
+            log.info(
+              { threadId, catId: catId as string },
+              'Stream store skipped — cat_cafe_post_message callback already persisted',
+            );
           }
-          // #80: Clean up draft only after successful append (guard: keep draft if append fails)
+          // #80: Clean up draft after message is persisted (either via append or callback)
           if (deps.draftStore && ownInvocationId) {
             deps.draftStore.delete(userId, threadId, ownInvocationId)?.catch?.(noop);
           }
@@ -845,6 +1244,33 @@ export async function* routeSerial(
               }
               continue;
             }
+            // F167 L1 + Phase D: ping-pong streak check (canonical enqueue point).
+            // callerActivity (substantive tool + output length) gates streak accumulation —
+            // real work / long discussion no longer trips the breaker falsely.
+            // streak=4+ (pure language inertia) → block enqueue + emit a2a_pingpong_terminated.
+            const hadSubstantiveToolCall = collectedToolNames.some((n) => isSubstantiveTool(n));
+            const streak = updateStreakOnPush(worklistEntry, catId, nextCat, {
+              hadSubstantiveToolCall,
+              outputLength: storedContent.length,
+            });
+            if (streak.blockPingPong) {
+              log.info(
+                { threadId, catId: nextCat, fromCat: catId, count: streak.count },
+                'F167 L1: A2A ping-pong terminated (streak >= 4)',
+              );
+              yield {
+                type: 'system_info' as AgentMessageType,
+                catId,
+                content: JSON.stringify({
+                  type: 'a2a_pingpong_terminated',
+                  fromCatId: catId,
+                  targetCatId: nextCat,
+                  pairCount: streak.count,
+                }),
+                timestamp: Date.now(),
+              } as AgentMessage;
+              continue;
+            }
 
             worklist.push(nextCat);
             worklistEntry.a2aCount++;
@@ -879,8 +1305,11 @@ export async function* routeSerial(
               log.warn({ threadId, fromCat: catId, toCat: pendingCat, err }, 'A2A_HANDOFF audit write failed');
             });
 
-          const nextConfig: CatConfig | undefined =
-            catRegistry.tryGet(pendingCat as string)?.config ?? CAT_CONFIGS[pendingCat as string];
+          const nextConfig: CatConfig | undefined = catRegistry.tryGet(pendingCat as string)?.config;
+          if (options.invocationController && options.trackA2ASlot && !activeTrackedA2ASlots.has(pendingCat)) {
+            options.trackA2ASlot(threadId, pendingCat, userId, options.invocationController);
+            activeTrackedA2ASlots.add(pendingCat);
+          }
           yield {
             type: 'a2a_handoff' as AgentMessageType,
             catId,
@@ -896,7 +1325,10 @@ export async function* routeSerial(
         const noTextBlocks = [...bufferedBlocks, ...streamRichBlocks];
         const hasRichBlocks = noTextBlocks.length > 0;
         const shouldPersistNoTextMessage =
-          hasRichBlocks || collectedToolEvents.length > 0 || Boolean(thinkingContent?.trim().length > 0);
+          hasRichBlocks ||
+          collectedToolEvents.length > 0 ||
+          Boolean(renderThinkingChunks(thinkingChunks).trim().length > 0);
+        const shouldEmitSilentCompletion = collectedToolEvents.length > 0 && !hasRichBlocks && !sawUserFacingSystemInfo;
 
         log.debug(
           {
@@ -906,13 +1338,13 @@ export async function* routeSerial(
             sawUserFacingSystemInfo,
             toolCount: collectedToolEvents.length,
             shouldPersist: shouldPersistNoTextMessage,
-            thinkingLen: thinkingContent?.length ?? 0,
+            thinkingLen: renderThinkingChunks(thinkingChunks).length,
           },
           'Cat produced no text — evaluating silent_completion',
         );
         // Diagnostic: if cat ran tools but produced no text, emit a system_info so the
         // user sees *something* instead of a silent vanish (bugfix: silent-exit P1).
-        if (collectedToolEvents.length > 0 && !hasRichBlocks && !sawUserFacingSystemInfo) {
+        if (shouldEmitSilentCompletion) {
           yield {
             type: 'system_info' as AgentMessageType,
             catId,
@@ -924,6 +1356,9 @@ export async function* routeSerial(
             timestamp: Date.now(),
           } as AgentMessage;
         }
+        if (shouldPersistNoTextMessage || sawUserFacingSystemInfo || shouldEmitSilentCompletion) {
+          catProducedOutput = true;
+        }
 
         if (shouldPersistNoTextMessage) {
           try {
@@ -933,15 +1368,18 @@ export async function* routeSerial(
               content: '',
               mentions: [],
               origin: 'stream',
-              timestamp: Date.now(),
+              timestamp: invocationStartedAt,
               threadId,
               ...(streamReplyTo ? { replyTo: streamReplyTo } : {}),
-              ...(thinkingContent ? { thinking: thinkingContent } : {}),
+              ...(thinkingChunks.length > 0 ? { thinking: renderThinkingChunks(thinkingChunks) } : {}),
               ...(firstMetadata ? { metadata: firstMetadata } : {}),
               ...(collectedToolEvents.length > 0 ? { toolEvents: collectedToolEvents } : {}),
               extra: {
                 ...(noTextBlocks.length > 0 ? { rich: { v: 1 as const, blocks: noTextBlocks } } : {}),
-                ...(ownInvocationId ? { stream: { invocationId: ownInvocationId } } : {}),
+                ...((options.parentInvocationId ?? ownInvocationId)
+                  ? { stream: { invocationId: (options.parentInvocationId ?? ownInvocationId) as string } }
+                  : {}),
+                ...(doneMsg?.tracing ? { tracing: doneMsg.tracing } : {}),
               },
             });
             // F088-P3: Stash rich blocks for outbound delivery (no-text branch)
@@ -985,7 +1423,10 @@ export async function* routeSerial(
             content: JSON.stringify({
               type: 'silent_completion',
               detail: `${catConfig?.displayName ?? (catId as string)} completed without textual output.`,
-              toolCount: 0,
+              toolCount: collectedToolEvents.length,
+              provider: firstMetadata?.provider,
+              model: firstMetadata?.model,
+              invocationId: ownInvocationId,
             }),
             timestamp: Date.now(),
           } as AgentMessage;
@@ -1006,12 +1447,21 @@ export async function* routeSerial(
             content: '',
             mentions: [],
             origin: 'stream',
-            timestamp: Date.now(),
+            timestamp: invocationStartedAt,
             threadId,
             ...(streamReplyTo ? { replyTo: streamReplyTo } : {}),
             ...(firstMetadata ? { metadata: firstMetadata } : {}),
             toolEvents: collectedToolEvents,
-            ...(ownInvocationId ? { extra: { stream: { invocationId: ownInvocationId } } } : {}),
+            ...((options.parentInvocationId ?? ownInvocationId) || doneMsg?.tracing
+              ? {
+                  extra: {
+                    ...((options.parentInvocationId ?? ownInvocationId)
+                      ? { stream: { invocationId: (options.parentInvocationId ?? ownInvocationId) as string } }
+                      : {}),
+                    ...(doneMsg?.tracing ? { tracing: doneMsg.tracing } : {}),
+                  },
+                }
+              : {}),
           });
           // #80: Clean up draft only after successful append
           if (deps.draftStore && ownInvocationId) {
@@ -1055,6 +1505,46 @@ export async function* routeSerial(
         }
       }
 
+      // F27: Emit a2a_handoff for ALL new A2A targets (both response-text and callback-pushed).
+      // Keep this outside the text branch: callback/tool-only turns can push worklist entries
+      // without producing text, but their child slots still must be tracked before parent done.
+      // We track which targets have already been announced to avoid duplicate handoff events.
+      for (let wi = handoffEmitted; wi < worklist.length; wi++) {
+        const pendingCat = worklist[wi]!;
+        if (wi < targetCats.length) continue; // Skip original targets — not A2A
+
+        // === A2A_HANDOFF 审计 (fire-and-forget, 缅因猫 review P2-3) ===
+        const auditLog = getEventAuditLog();
+        auditLog
+          .append({
+            type: AuditEventTypes.A2A_HANDOFF,
+            threadId,
+            data: {
+              fromCat: catId,
+              toCat: pendingCat,
+              userId,
+              a2aDepth: worklistEntry.a2aCount,
+              maxDepth,
+            },
+          })
+          .catch((err) => {
+            log.warn({ threadId, fromCat: catId, toCat: pendingCat, err }, 'A2A_HANDOFF audit write failed');
+          });
+
+        const nextConfig: CatConfig | undefined = catRegistry.tryGet(pendingCat as string)?.config;
+        if (options.invocationController && options.trackA2ASlot && !activeTrackedA2ASlots.has(pendingCat)) {
+          options.trackA2ASlot(threadId, pendingCat, userId, options.invocationController);
+          activeTrackedA2ASlots.add(pendingCat);
+        }
+        yield {
+          type: 'a2a_handoff' as AgentMessageType,
+          catId,
+          content: `${catConfig?.displayName ?? catId} → ${nextConfig?.displayName ?? pendingCat}`,
+          timestamp: Date.now(),
+        } as AgentMessage;
+      }
+      handoffEmitted = worklist.length;
+
       // Persist error as system message so it survives F5 reload.
       // During streaming, errors render as red badges via ephemeral frontend state.
       // Without persistence, they vanish on page refresh.
@@ -1079,7 +1569,7 @@ export async function* routeSerial(
       // rounds (bug: "砚砚每次都疯狂回之前的消息").
       if (incrementalMode && deliveryBoundaryId) {
         if (options.cursorBoundaries) {
-          // ADR-008 S3: defer ack — caller acks after invocation succeeds
+          // ADR-008 S3: defer ack — caller acks after completion (or on abort/exception)
           upsertMaxBoundary(options.cursorBoundaries, catId, deliveryBoundaryId);
         } else if (deps.deliveryCursorStore) {
           // Legacy: ack immediately (deprecated route() path)
@@ -1091,11 +1581,48 @@ export async function* routeSerial(
         }
       }
 
+      // F148 OQ-2: Log briefing→invocation link + context eval signals
+      if (briefingMessageId && ownInvocationId) {
+        const evalSignals = briefingCoverageMap
+          ? extractContextEvalSignals({
+              coverageMap: briefingCoverageMap,
+              toolNames: collectedToolNames,
+              responseTokenEstimate: estimateTokens(textContent),
+            })
+          : undefined;
+        log.info({
+          f148: 'briefing-invocation-link',
+          briefingMessageId,
+          invocationId: ownInvocationId,
+          catId,
+          threadId,
+          hadError: hadProviderError,
+          ...(evalSignals ? { eval: evalSignals } : {}),
+        });
+      }
+
+      // F155: Ack guide completion only after cat produced visible output.
+      if (deps.invocationDeps.threadStore) {
+        const { createGuideStoreBridge } = await import('../../../../guides/GuideSessionRepository.js');
+        const sessionStore = deps.invocationDeps.guideSessionStore!;
+        await ackGuideCompletion({
+          ctx: guideCtx,
+          catId,
+          catProducedOutput,
+          targetCatIds,
+          threadId,
+          userId,
+          guideStore: createGuideStoreBridge(sessionStore),
+          threadStore: deps.invocationDeps.threadStore!,
+        });
+      }
+
       // Yield buffered done with correct isFinal (evaluated AFTER worklist may have grown)
       // MUST always reach here regardless of append success (缅因猫 review P1-2)
       if (doneMsg) {
         const isFinal = index === worklist.length - 1;
         yield { ...doneMsg, ...(mentionsUser ? { mentionsUser } : {}), isFinal };
+        activeTrackedA2ASlots.delete(catId);
         if (isFinal) yieldedFinalDone = true;
       }
 
@@ -1104,6 +1631,10 @@ export async function* routeSerial(
       index++;
     }
   } finally {
+    if (options.invocationController && options.completeA2ASlots && activeTrackedA2ASlots.size > 0) {
+      options.completeA2ASlots(threadId, [...activeTrackedA2ASlots], options.invocationController);
+    }
+
     // F27: Always unregister worklist, even on error/abort.
     // Pass owner ref so preempting new invocation's worklist is not deleted (缅因猫 R1 P1-1)
     unregisterWorklist(threadId, worklistEntry, options.parentInvocationId);
