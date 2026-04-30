@@ -11,7 +11,7 @@ import { createRedisClient, SessionStore } from '@cat-cafe/shared/utils';
 import fastifyCookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import fastifyWebsocket from '@fastify/websocket';
-import Fastify from 'fastify';
+import Fastify, { type FastifyReply } from 'fastify';
 import { resolveAnthropicRuntimeProfile, resolveForClient } from './config/account-resolver.js';
 import { generateCliConfigs, readCapabilitiesConfig } from './config/capabilities/capability-orchestrator.js';
 import { resolveBoundAccountRefForCat } from './config/cat-account-binding.js';
@@ -261,8 +261,11 @@ async function main(): Promise<void> {
     done();
   });
 
-  // Health check
-  app.get('/health', async () => ({ status: 'ok', timestamp: Date.now() }));
+  // Health check. Keep root paths for direct API access and expose /api/*
+  // aliases for same-origin reverse-proxy deployments.
+  const healthHandler = async () => ({ status: 'ok' as const, timestamp: Date.now() });
+  app.get('/health', healthHandler);
+  app.get('/api/health', healthHandler);
 
   // F152: Readiness check — verifies dependencies are reachable.
   // evidenceStoreRef is set after memoryServices init; handler runs at request time.
@@ -295,11 +298,13 @@ async function main(): Promise<void> {
     const allOk = Object.values(checks).every((c) => c.ok);
     return { status: allOk ? 'ready' : 'degraded', checks };
   }
-  app.get('/ready', async (_request, reply) => {
+  const readyHandler = async (_request: unknown, reply: FastifyReply) => {
     const result = await checkReadiness();
     if (result.status !== 'ready') reply.code(503);
     return { ...result, timestamp: Date.now() };
-  });
+  };
+  app.get('/ready', readyHandler);
+  app.get('/api/ready', readyHandler);
 
   // Create invocation tracker for cancellation support
   const invocationTracker = new InvocationTracker();
