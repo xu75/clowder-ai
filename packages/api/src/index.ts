@@ -90,6 +90,7 @@ import { startTtsCacheCleaner } from './domains/cats/services/tts/tts-cache-clea
 import { initVoiceBlockSynthesizer } from './domains/cats/services/tts/VoiceBlockSynthesizer.js';
 import type { AgentService } from './domains/cats/services/types.js';
 import { ActivityTracker } from './domains/health/ActivityTracker.js';
+import { shouldTrackApiActivity } from './domains/health/activity-route-filter.js';
 import { PortDiscoveryService } from './domains/preview/port-discovery.js';
 import { collectRuntimePorts } from './domains/preview/port-validator.js';
 import { PreviewGateway } from './domains/preview/preview-gateway.js';
@@ -346,8 +347,8 @@ async function main(): Promise<void> {
   // F085 Phase 4: Platform-level activity tracker (hyperfocus brake)
   const activityTracker = new ActivityTracker();
   app.addHook('onRequest', (request, _reply, done) => {
-    // Skip non-API paths and brake endpoints (avoid trigger-on-checkin loop)
-    if (!request.url.startsWith('/api/') || request.url.startsWith('/api/brake/')) {
+    // Skip non-user API paths and brake endpoints (avoid trigger-on-checkin loop)
+    if (!shouldTrackApiActivity(request.url)) {
       done();
       return;
     }
