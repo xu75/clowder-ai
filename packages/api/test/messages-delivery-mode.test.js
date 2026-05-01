@@ -121,6 +121,43 @@ describe('POST /api/messages deliveryMode', () => {
     assert.equal(queueUpdate.arguments[2].action, 'enqueued');
   });
 
+  it('queue mode replay with same idempotencyKey does not append duplicate message', async () => {
+    deps.invocationTracker.has.mock.mockImplementation(() => true);
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/messages',
+      headers: { 'x-cat-cafe-user': 'user-1', 'content-type': 'application/json' },
+      payload: {
+        content: '会重放',
+        threadId: 'thread-1',
+        deliveryMode: 'queue',
+        idempotencyKey: '11111111-1111-4111-8111-111111111111',
+      },
+    });
+    assert.equal(first.statusCode, 202);
+    const firstBody = JSON.parse(first.body);
+
+    const replay = await app.inject({
+      method: 'POST',
+      url: '/api/messages',
+      headers: { 'x-cat-cafe-user': 'user-1', 'content-type': 'application/json' },
+      payload: {
+        content: '会重放',
+        threadId: 'thread-1',
+        deliveryMode: 'queue',
+        idempotencyKey: '11111111-1111-4111-8111-111111111111',
+      },
+    });
+    assert.equal(replay.statusCode, 202);
+    const replayBody = JSON.parse(replay.body);
+
+    assert.equal(deps.messageStore.append.mock.calls.length, 1, 'replay should not append again');
+    assert.equal(deps.invocationQueue.list('thread-1', 'user-1').length, 1, 'replay should not add a new queue row');
+    assert.equal(replayBody.entryId, firstBody.entryId, 'replay should point to existing queue entry');
+    assert.equal(replayBody.userMessageId, firstBody.userMessageId, 'replay should reuse original user message');
+  });
+
   it('queue mode → same-user consecutive messages are independent entries (F175: no merge)', async () => {
     deps.invocationTracker.has.mock.mockImplementation(() => true);
 
@@ -253,6 +290,73 @@ describe('POST /api/messages deliveryMode', () => {
     assert.equal(deps.invocationQueue.list('thread-1', 'user-1').length, 0);
   });
 
+  it('default broadcast with queued leftovers but no active invocation → executes immediately', async () => {
+    deps.invocationTracker.has.mock.mockImplementation(() => false);
+    deps.queueProcessor = {
+      isThreadBusy: mock.fn(() => true),
+      isCatBusy: mock.fn(() => false),
+      onInvocationComplete: mock.fn(async () => {}),
+    };
+    deps.invocationQueue.enqueue({
+      threadId: 'thread-1',
+      userId: 'user-1',
+      content: 'queued-leftover',
+      source: 'user',
+      targetCats: ['opus'],
+      intent: 'execute',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/messages',
+      headers: { 'x-cat-cafe-user': 'user-1', 'content-type': 'application/json' },
+      payload: { content: 'new broadcast', threadId: 'thread-1' },
+    });
+
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.status, 'processing');
+    assert.ok(deps.invocationRecordStore.create.mock.calls.length > 0);
+    assert.equal(deps.invocationQueue.list('thread-1', 'user-1').length, 1, 'leftover queue must not grow');
+  });
+
+  it('TOCTOU degrade-to-queue replay with same idempotencyKey does not append duplicate message', async () => {
+    deps.invocationTracker.has.mock.mockImplementation(() => false);
+    deps.invocationTracker.tryStartThreadAll.mock.mockImplementation(() => null);
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/messages',
+      headers: { 'x-cat-cafe-user': 'user-1', 'content-type': 'application/json' },
+      payload: {
+        content: 'TOCTOU replay',
+        threadId: 'thread-1',
+        deliveryMode: 'immediate',
+        idempotencyKey: '22222222-2222-4222-8222-222222222222',
+      },
+    });
+    assert.equal(first.statusCode, 202);
+    const firstBody = JSON.parse(first.body);
+
+    const replay = await app.inject({
+      method: 'POST',
+      url: '/api/messages',
+      headers: { 'x-cat-cafe-user': 'user-1', 'content-type': 'application/json' },
+      payload: {
+        content: 'TOCTOU replay',
+        threadId: 'thread-1',
+        deliveryMode: 'immediate',
+        idempotencyKey: '22222222-2222-4222-8222-222222222222',
+      },
+    });
+    assert.equal(replay.statusCode, 202);
+    const replayBody = JSON.parse(replay.body);
+
+    assert.equal(deps.messageStore.append.mock.calls.length, 1, 'replay should not append again');
+    assert.equal(deps.invocationQueue.list('thread-1', 'user-1').length, 1, 'replay should not add a new queue row');
+    assert.equal(replayBody.entryId, firstBody.entryId, 'replay should point to existing queue entry');
+    assert.equal(replayBody.userMessageId, firstBody.userMessageId, 'replay should reuse original user message');
+  });
   it('aborted invocation does not emit spawn_started after stop wins the race', async () => {
     const controller = new AbortController();
     let releaseRunningUpdate;
