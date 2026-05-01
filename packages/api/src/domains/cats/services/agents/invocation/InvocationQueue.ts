@@ -148,8 +148,7 @@ export class InvocationQueue {
     if (input.idempotencyKey) {
       const existing = q.find(
         (entry) =>
-          entry.idempotencyKey === input.idempotencyKey &&
-          (entry.status === 'queued' || entry.status === 'processing'),
+          entry.idempotencyKey === input.idempotencyKey && (entry.status === 'queued' || entry.status === 'processing'),
       );
       if (existing) {
         const position = q.findIndex((entry) => entry.id === existing.id);

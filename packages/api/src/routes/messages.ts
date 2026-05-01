@@ -619,12 +619,7 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
                 toctouUserMessageId = toctouUserMessage.id;
                 const queueEntryId = enqueueResult.entry?.id;
                 if (queueEntryId) {
-                  opts.invocationQueue.backfillMessageId(
-                    resolvedThreadId,
-                    userId,
-                    queueEntryId,
-                    toctouUserMessage.id,
-                  );
+                  opts.invocationQueue.backfillMessageId(resolvedThreadId, userId, queueEntryId, toctouUserMessage.id);
                 }
               } catch (err) {
                 const queueEntryId = enqueueResult.entry?.id;
