@@ -1,0 +1,18 @@
+{
+  "entries": [
+    {
+      "packVersion": "1.3.0",
+      "checksum": "73e4bf742d44",
+      "syncedAt": 1779808632170,
+      "confirmedByUser": true,
+      "projectPath": "/Users/xujinsong/VSCode/SynologyDrive/quant-strategy"
+    },
+    {
+      "packVersion": "1.3.0",
+      "checksum": "73e4bf742d44",
+      "syncedAt": 1779808582869,
+      "confirmedByUser": true,
+      "projectPath": "/Users/xujinsong/VSCode/SynologyDrive/backtest/ndx100etf-a-strategy-clowder"
+    }
+  ]
+}

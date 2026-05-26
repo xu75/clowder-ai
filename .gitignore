@@ -49,7 +49,8 @@ packages/web/public/vendor/
 
 # Runtime state (bootstrapped per-machine from cat-template.json)
 cat-config.json
-.cat-cafe/
+.cat-cafe/*
+!.cat-cafe/governance-registry.json
 
 # Claude Code skills — cat-cafe symlinks are tracked; plugin-generated ones are not
 .claude/skills/pencil-renderer
