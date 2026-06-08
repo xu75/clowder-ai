@@ -650,11 +650,28 @@ export class ConnectorInvokeTrigger {
               }
             });
           }
-        } else if (this.opts.streamingHook?.cleanupPlaceholders) {
-          // Cloud-P1-R3: silent invocation (no content) — still clean up placeholder
-          await this.opts.streamingHook.cleanupPlaceholders(threadId, createResult.invocationId).catch((err) => {
-            log.warn({ err, threadId }, '[ConnectorInvokeTrigger] StreamingHook.cleanupPlaceholders failed (silent)');
-          });
+        } else {
+          // Cloud-P1-R3: silent invocation (no content) — notify user + clean up placeholder
+          if (this.opts.outboundHook) {
+            try {
+              await this.opts.outboundHook.deliver(
+                threadId,
+                '⚠️ 未能生成回复，请重新发送消息或稍后再试。',
+                catId,
+                undefined,
+                undefined,
+                undefined,
+                messageId,
+              );
+            } catch (deliverErr) {
+              log.warn({ err: deliverErr, threadId }, '[ConnectorInvokeTrigger] Silent invocation fallback delivery failed');
+            }
+          }
+          if (this.opts.streamingHook?.cleanupPlaceholders) {
+            await this.opts.streamingHook.cleanupPlaceholders(threadId, createResult.invocationId).catch((err) => {
+              log.warn({ err, threadId }, '[ConnectorInvokeTrigger] StreamingHook.cleanupPlaceholders failed (silent)');
+            });
+          }
         }
       }
 
@@ -687,6 +704,29 @@ export class ConnectorInvokeTrigger {
         },
         threadId,
       );
+
+      // Deliver error message to external platforms (Feishu etc.) so user isn't left waiting
+      if (this.opts.outboundHook) {
+        try {
+          await this.opts.outboundHook.deliver(
+            threadId,
+            '⚠️ 抱歉，处理消息时出了点问题，请稍后再试。',
+            catId,
+            undefined,
+            undefined,
+            undefined,
+            messageId,
+          );
+        } catch (deliverErr) {
+          log.warn({ err: deliverErr, threadId }, '[ConnectorInvokeTrigger] Error delivery to connector failed');
+        }
+      }
+      // Clean up streaming placeholder so it doesn't stay as "收到" forever
+      if (invocationId && this.opts.streamingHook?.cleanupPlaceholders) {
+        await this.opts.streamingHook.cleanupPlaceholders(threadId, invocationId).catch((cleanupErr) => {
+          log.warn({ err: cleanupErr, threadId }, '[ConnectorInvokeTrigger] Placeholder cleanup on error failed');
+        });
+      }
     } finally {
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       invocationTracker.complete(threadId, catId, controller);
