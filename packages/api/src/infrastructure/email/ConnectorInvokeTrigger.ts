@@ -747,9 +747,10 @@ export class ConnectorInvokeTrigger {
           log.warn({ err: deliverErr, threadId }, '[ConnectorInvokeTrigger] Error delivery to connector failed');
         }
       }
-      // Clean up streaming placeholder so it doesn't stay as "收到" forever
-      if (this.opts.streamingHook?.cleanupPlaceholders) {
-        await this.opts.streamingHook.cleanupPlaceholders(threadId, createResult.invocationId).catch((cleanupErr) => {
+      // Clean up streaming placeholder so it doesn't stay as "收到" forever.
+      // catch-block scope: createResult is try-local; use the function-scoped invocationId.
+      if (this.opts.streamingHook?.cleanupPlaceholders && invocationId) {
+        await this.opts.streamingHook.cleanupPlaceholders(threadId, invocationId).catch((cleanupErr) => {
           log.warn({ err: cleanupErr, threadId }, '[ConnectorInvokeTrigger] Placeholder cleanup on error failed');
         });
       }
