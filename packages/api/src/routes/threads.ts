@@ -13,6 +13,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
 import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/TaskProgressStore.js';
+import { resolveBootcampWorkspaceRoot } from '../domains/cats/services/bootcamp/workspace-root.js';
 import { AuditEventTypes, getEventAuditLog } from '../domains/cats/services/orchestration/EventAuditLog.js';
 import type { IBacklogStore } from '../domains/cats/services/stores/ports/BacklogStore.js';
 import type { DeliveryCursorStore } from '../domains/cats/services/stores/ports/DeliveryCursorStore.js';
@@ -23,6 +24,7 @@ import type { ITaskStore } from '../domains/cats/services/stores/ports/TaskStore
 import type { IThreadReadStateStore } from '../domains/cats/services/stores/ports/ThreadReadStateStore.js';
 import type {
   BootcampStateV1,
+  ILabelStore,
   IThreadStore,
   Thread,
   ThreadRoutingPolicyV1,
@@ -33,6 +35,11 @@ import { resolveUserId } from '../utils/request-identity.js';
 import { getMultiMentionOrchestrator } from './callback-multi-mention-routes.js';
 
 const log = createModuleLogger('routes/threads');
+
+interface ThreadIndexBuilder {
+  markThreadDirty(threadId: string): void;
+  flushDirtyThreads?(): number | Promise<number>;
+}
 
 export interface ThreadsRoutesOptions {
   threadStore: IThreadStore;
@@ -56,6 +63,10 @@ export interface ThreadsRoutesOptions {
   backlogStore?: IBacklogStore;
   /** B-4: Cascade delete guide session when thread is deleted */
   guideSessionStore?: import('../domains/guides/GuideSessionRepository.js').IGuideSessionStore;
+  /** F187: Label store for validating label IDs on thread update */
+  labelStore?: ILabelStore;
+  /** F102: keep thread evidence search in sync after title-only updates */
+  indexBuilder?: ThreadIndexBuilder;
 }
 
 /** F087: Bootcamp state Zod schema (F171 v2 flow) */
@@ -119,6 +130,38 @@ const listThreadsSchema = z.object({
   deleted: z.union([z.boolean(), z.string().trim().min(1).max(8)]).optional(),
 });
 
+async function resolveCreateThreadProjectPath(
+  projectPath: string | undefined,
+  bootcampState: BootcampStateV1 | undefined,
+): Promise<{ ok: true; projectPath: string | undefined } | { ok: false; statusCode: number; error: string }> {
+  if (bootcampState && (!projectPath || projectPath === 'default')) {
+    const bootcampWorkspace = await resolveBootcampWorkspaceRoot();
+    if (!bootcampWorkspace.ok) {
+      return {
+        ok: false,
+        statusCode: 500,
+        error: bootcampWorkspace.error,
+      };
+    }
+
+    return { ok: true, projectPath: bootcampWorkspace.projectPath };
+  }
+
+  if (projectPath && projectPath !== 'default') {
+    const validated = await validateProjectPath(projectPath);
+    if (!validated) {
+      return {
+        ok: false,
+        statusCode: 400,
+        error: 'Invalid projectPath: must be an existing directory under allowed roots',
+      };
+    }
+    return { ok: true, projectPath: validated };
+  }
+
+  return { ok: true, projectPath };
+}
+
 function parseOptionalBooleanQuery(value: string | boolean | undefined): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value === 'boolean') return value;
@@ -128,7 +171,13 @@ function parseOptionalBooleanQuery(value: string | boolean | undefined): boolean
   return undefined;
 }
 
-function sanitizeThreadForResponse(thread: Thread, _userId: string): Thread {
+export function sanitizeThreadForResponse(thread: Thread, _userId: string): Thread {
+  // Cloud Codex P2: strip internal-only fields that should not appear in API responses.
+  // pendingContinuation is per-cat/user session state — not client-visible.
+  if (thread.pendingContinuation) {
+    const { pendingContinuation: _, ...sanitized } = thread;
+    return sanitized as Thread;
+  }
   return thread;
 }
 
@@ -180,6 +229,8 @@ const updateThreadSchema = z
     bubbleCli: z.enum(['global', 'expanded', 'collapsed']).optional(),
     /** F168: Preferred workspace mode for auto-switch on thread open. null clears. */
     preferredWorkspaceMode: z.enum(['dev', 'recall', 'schedule', 'tasks', 'community']).nullable().optional(),
+    /** F187: Thread label IDs. */
+    labels: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
   })
   .strict()
   .refine(
@@ -194,7 +245,8 @@ const updateThreadSchema = z
       data.bootcampState !== undefined ||
       data.bubbleThinking !== undefined ||
       data.bubbleCli !== undefined ||
-      data.preferredWorkspaceMode !== undefined,
+      data.preferredWorkspaceMode !== undefined ||
+      data.labels !== undefined,
     {
       message: 'At least one field must be provided',
     },
@@ -211,25 +263,28 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
       return { error: 'Invalid request body', details: parseResult.error.issues };
     }
 
-    const { userId: legacyUserId, title, projectPath, preferredCats, pinned, backlogItemId } = parseResult.data;
+    const {
+      userId: legacyUserId,
+      title,
+      projectPath,
+      preferredCats,
+      pinned,
+      backlogItemId,
+      bootcampState,
+    } = parseResult.data;
     const userId = resolveUserId(request, { fallbackUserId: legacyUserId });
     if (!userId) {
       reply.status(401);
       return { error: 'Identity required (session cookie or X-Cat-Cafe-User header)' };
     }
 
-    // Validate projectPath is a real directory under allowed roots
-    let thread;
-    if (projectPath && projectPath !== 'default') {
-      const validated = await validateProjectPath(projectPath);
-      if (!validated) {
-        reply.status(400);
-        return { error: 'Invalid projectPath: must be an existing directory under allowed roots' };
-      }
-      thread = await threadStore.create(userId, title, validated);
-    } else {
-      thread = await threadStore.create(userId, title, projectPath);
+    const resolvedProjectPath = await resolveCreateThreadProjectPath(projectPath, bootcampState as BootcampStateV1);
+    if (!resolvedProjectPath.ok) {
+      reply.status(resolvedProjectPath.statusCode);
+      return { error: resolvedProjectPath.error };
     }
+
+    let thread: Thread = await threadStore.create(userId, title, resolvedProjectPath.projectPath);
 
     // F32-b Phase 2: Set preferred cats if provided at creation time
     if (preferredCats && preferredCats.length > 0) {
@@ -259,14 +314,13 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     }
 
     // F087: Set bootcamp state if provided at creation time
-    const { bootcampState } = parseResult.data;
     if (bootcampState) {
       await threadStore.updateBootcampState(thread.id, bootcampState as BootcampStateV1);
       thread = (await threadStore.get(thread.id)) ?? thread;
     }
 
     reply.status(201);
-    return thread;
+    return sanitizeThreadForResponse(thread, userId);
   });
 
   // GET /api/threads - 列出用户的对话
@@ -436,8 +490,17 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
       bubbleThinking,
       bubbleCli,
       preferredWorkspaceMode,
+      labels,
     } = parseResult.data;
-    if (title !== undefined) await threadStore.updateTitle(id, title);
+    if (title !== undefined) {
+      await threadStore.updateTitle(id, title);
+      try {
+        opts.indexBuilder?.markThreadDirty(id);
+        await opts.indexBuilder?.flushDirtyThreads?.();
+      } catch (err) {
+        log.warn({ err, threadId: id }, 'failed to refresh thread evidence index after title update');
+      }
+    }
     if (pinned !== undefined) await threadStore.updatePin(id, pinned);
     if (favorited !== undefined) await threadStore.updateFavorite(id, favorited);
     if (thinkingMode !== undefined) await threadStore.updateThinkingMode(id, thinkingMode);
@@ -454,14 +517,27 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     if (preferredWorkspaceMode !== undefined) {
       await threadStore.updatePreferredWorkspaceMode(id, preferredWorkspaceMode);
     }
+    if (labels !== undefined) {
+      if (labels.length > 0 && opts.labelStore) {
+        const userId = resolveUserId(request) ?? 'default-user';
+        const userLabels = await opts.labelStore.list(userId);
+        const validIds = new Set(userLabels.map((l) => l.id));
+        const invalid = labels.filter((lid) => !validIds.has(lid));
+        if (invalid.length > 0) {
+          reply.status(400);
+          return { error: 'Invalid label IDs', invalidIds: invalid };
+        }
+      }
+      await threadStore.updateLabels(id, labels);
+    }
 
     const updated = await threadStore.get(id);
     if (!updated) {
       reply.status(404);
       return { error: 'Thread not found' };
     }
-
-    return updated;
+    const patchUserId = resolveUserId(request, { defaultUserId: 'default-user' }) ?? 'default-user';
+    return sanitizeThreadForResponse(updated, patchUserId);
   });
 
   // DELETE /api/threads/:id - 删除对话 (with cascade delete)
@@ -487,9 +563,10 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     try {
       const thread = await threadStore.get(id);
 
-      // F095 Phase G: Protect system threads (connectorHubState) from casual deletion.
+      // F095 Phase G + F192 livefix: Protect system threads from casual deletion.
+      // Covers both IM Hub (connectorHubState) and eval domain (systemKind) threads.
       // Requires explicit ?force=true query param to proceed.
-      if (thread?.connectorHubState) {
+      if (thread?.connectorHubState || thread?.systemKind) {
         const { force } = request.query as { force?: string };
         if (force !== 'true') {
           reply.status(403);
@@ -551,7 +628,9 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     }
 
     const updated = await threadStore.get(id);
-    return updated;
+    if (!updated) return { error: 'Thread not found after restore' };
+    const restoreUserId = resolveUserId(request, { defaultUserId: 'default-user' }) ?? 'default-user';
+    return sanitizeThreadForResponse(updated, restoreUserId);
   });
 
   // F045: GET /api/threads/:threadId/task-progress — task progress snapshot for page refresh persistence

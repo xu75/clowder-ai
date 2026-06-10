@@ -102,13 +102,13 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
     return (
       <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm">
-          <span className="text-green-600 font-medium">MCP &ldquo;{id}&rdquo; 已安装</span>
+          <span className="text-conn-green-text font-medium">MCP &ldquo;{id}&rdquo; 已安装</span>
           {result.probe && (
             <span
               className={`text-xs px-1.5 py-0.5 rounded ${
                 result.probe.connectionStatus === 'connected'
-                  ? 'bg-green-50 text-green-600'
-                  : 'bg-amber-50 text-amber-600'
+                  ? 'bg-conn-green-bg text-conn-green-text'
+                  : 'bg-conn-amber-bg text-conn-amber-text'
               }`}
             >
               {result.probe.connectionStatus}
@@ -126,7 +126,7 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
     <div className="space-y-3">
       <h3 className="text-sm font-semibold text-cafe-secondary">添加 MCP</h3>
 
-      {error && <p className="text-xs text-red-500 bg-red-50 rounded px-2 py-1">{error}</p>}
+      {error && <p className="text-xs text-conn-red-text bg-conn-red-bg rounded px-2 py-1">{error}</p>}
 
       {/* ID */}
       <Field label="ID" required>
@@ -135,13 +135,17 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
           value={id}
           onChange={(e) => setId(e.target.value)}
           placeholder="e.g. agent-browser"
-          className="form-input"
+          className="w-full rounded-lg bg-[var(--console-field-bg)] px-3 py-1.5 text-xs text-cafe outline-none transition focus:ring-1 focus:ring-[var(--console-input-stroke)]"
         />
       </Field>
 
       {/* Transport */}
       <Field label="传输协议">
-        <select value={transport} onChange={(e) => setTransport(e.target.value as Transport)} className="form-input">
+        <select
+          value={transport}
+          onChange={(e) => setTransport(e.target.value as Transport)}
+          className="w-full rounded-lg bg-[var(--console-field-bg)] pl-2 pr-6 py-1.5 text-xs text-cafe-secondary outline-none transition focus:ring-1 focus:ring-[var(--console-input-stroke)]"
+        >
           <option value="stdio">stdio (本地命令)</option>
           <option value="streamableHttp">streamableHttp (远程 URL)</option>
         </select>
@@ -156,7 +160,7 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
               value={command}
               onChange={(e) => setCommand(e.target.value)}
               placeholder="e.g. npx"
-              className="form-input"
+              className="w-full rounded-lg bg-[var(--console-field-bg)] px-3 py-1.5 text-xs text-cafe outline-none transition focus:ring-1 focus:ring-[var(--console-input-stroke)]"
             />
           </Field>
           <Field label="参数 (空格分隔)">
@@ -165,7 +169,7 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
               value={args}
               onChange={(e) => setArgs(e.target.value)}
               placeholder="e.g. agent-browser-mcp"
-              className="form-input"
+              className="w-full rounded-lg bg-[var(--console-field-bg)] px-3 py-1.5 text-xs text-cafe outline-none transition focus:ring-1 focus:ring-[var(--console-input-stroke)]"
             />
           </Field>
         </>
@@ -179,7 +183,7 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://mcp.example.com/api"
-            className="form-input"
+            className="w-full rounded-lg bg-[var(--console-field-bg)] px-3 py-1.5 text-xs text-cafe outline-none transition focus:ring-1 focus:ring-[var(--console-input-stroke)]"
           />
         </Field>
       )}
@@ -191,7 +195,7 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
           value={resolver}
           onChange={(e) => setResolver(e.target.value)}
           placeholder="e.g. chrome-extension"
-          className="form-input"
+          className="w-full rounded-lg bg-[var(--console-field-bg)] px-3 py-1.5 text-xs text-cafe outline-none transition focus:ring-1 focus:ring-[var(--console-input-stroke)]"
         />
       </Field>
 
@@ -202,7 +206,7 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
           onChange={(e) => setEnvPairs(e.target.value)}
           rows={2}
           placeholder="API_KEY=xxx"
-          className="form-input resize-y"
+          className="w-full rounded-lg bg-[var(--console-field-bg)] px-3 py-1.5 text-xs text-cafe outline-none transition focus:ring-1 focus:ring-[var(--console-input-stroke)] resize-y"
         />
       </Field>
 
@@ -212,8 +216,7 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
           type="button"
           onClick={handlePreview}
           disabled={!id.trim()}
-          className="px-3 py-1.5 text-xs rounded bg-cafe-surface border border-cafe text-cafe-secondary
-                     hover:bg-cafe-surface-hover disabled:opacity-40"
+          className="px-3 py-1.5 text-xs rounded-lg bg-[var(--console-card-bg)] text-cafe-secondary shadow-[0_1px_3px_rgba(43,33,26,0.06)] hover:bg-[var(--console-hover-bg)] disabled:opacity-50"
         >
           预览
         </button>
@@ -228,19 +231,19 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
 
       {/* Preview result */}
       {preview && (
-        <div className="rounded-lg border border-cafe bg-cafe-surface/50 p-3 space-y-2">
+        <div className="rounded-lg bg-[var(--console-field-bg)] p-3 space-y-2">
           <p className="text-xs font-medium text-cafe-secondary">安装预览</p>
           <div className="text-xs text-cafe-muted space-y-1">
             <p>
               ID: <span className="text-cafe-secondary">{preview.entry.id}</span>
             </p>
             <p>将更新: {preview.cliConfigsAffected.join(', ')}</p>
-            {preview.willProbe && <p className="text-blue-500">安装后将自动探测连接状态</p>}
+            {preview.willProbe && <p className="text-conn-blue-text">安装后将自动探测连接状态</p>}
           </div>
           {preview.risks.length > 0 && (
             <div className="space-y-0.5">
               {preview.risks.map((r) => (
-                <p key={r} className="text-xs text-amber-600">
+                <p key={r} className="text-xs text-conn-amber-text">
                   {r}
                 </p>
               ))}
@@ -250,8 +253,7 @@ export function McpInstallForm({ projectPath, onInstalled, onClose, prefilledId 
             type="button"
             onClick={handleInstall}
             disabled={installing}
-            className="mt-1 px-3 py-1.5 text-xs rounded bg-cafe-accent text-white
-                       hover:bg-cafe-accent/90 disabled:opacity-50"
+            className="mt-1 px-3 py-1.5 text-xs rounded-lg bg-cafe-accent text-[var(--cafe-surface)] hover:bg-cafe-interactive disabled:opacity-50"
           >
             {installing ? '安装中...' : '确认安装'}
           </button>
@@ -266,7 +268,7 @@ function Field({ label, required, children }: { label: string; required?: boolea
     <label className="block text-xs">
       <span className="text-cafe-muted mb-0.5 block">
         {label}
-        {required && <span className="text-red-400 ml-0.5">*</span>}
+        {required && <span className="text-conn-red-text ml-0.5">*</span>}
       </span>
       {children}
     </label>

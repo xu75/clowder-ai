@@ -31,9 +31,16 @@ interface WorkspaceFileViewerProps {
   onToggleHtmlPreview: () => void;
   onToggleJsxPreview: () => void;
   onSave: (content: string) => Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
+  pendingExternalSha?: string | null;
+  onApplyExternalChange?: () => void;
+  onDismissExternalChange?: () => void;
   revealInFinder: (path: string) => void;
   onFocusMode?: () => void;
   focusDisabled?: boolean;
+  restoreScrollTop?: number | null;
+  restoreKey?: string;
+  onScrollTopChange?: (scrollTop: number) => void;
 }
 
 const CloseIcon = () => (
@@ -74,9 +81,16 @@ export function WorkspaceFileViewer({
   onToggleHtmlPreview,
   onToggleJsxPreview,
   onSave,
+  onDirtyChange,
+  pendingExternalSha,
+  onApplyExternalChange,
+  onDismissExternalChange,
   revealInFinder,
   onFocusMode,
   focusDisabled,
+  restoreScrollTop,
+  restoreKey,
+  onScrollTopChange,
 }: WorkspaceFileViewerProps) {
   const setPendingChatInsert = useChatStore((s) => s.setPendingChatInsert);
   const currentThreadId = useChatStore((s) => s.currentThreadId);
@@ -124,16 +138,16 @@ export function WorkspaceFileViewer({
     <div className="flex-1 flex flex-col min-h-0 animate-fade-in">
       {/* Tab bar */}
       {openTabs.length > 0 && (
-        <div className="flex bg-[#1E1E24] border-b border-[#2a2a32] overflow-x-auto scrollbar-none">
+        <div className="flex bg-[var(--ws-editor-bg)] border-b border-[var(--ws-editor-surface)] overflow-x-auto scrollbar-none">
           {openTabs.map((tab) => (
             <button
               key={tab}
               type="button"
               onClick={() => setOpenFile(tab)}
-              className={`group flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-mono border-r border-[#2a2a32] flex-shrink-0 transition-colors ${
+              className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border-r border-[var(--ws-editor-surface)] flex-shrink-0 transition-colors ${
                 tab === openFilePath
-                  ? 'bg-[#2a2a32] text-gray-200'
-                  : 'text-cafe-secondary hover:text-cafe-muted hover:bg-[#252530]'
+                  ? 'bg-[var(--ws-editor-surface)] text-cafe-muted'
+                  : 'text-cafe-secondary hover:text-cafe-muted hover:bg-[var(--ws-editor-hover)]'
               }`}
               title={tab}
             >
@@ -163,10 +177,10 @@ export function WorkspaceFileViewer({
       )}
 
       {/* Toolbar */}
-      <div className="px-3 py-1 bg-[#1E1E24] flex items-center justify-between">
+      <div className="px-3 py-1 bg-[var(--ws-editor-bg)] flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
           {file.size > 0 && (
-            <span className="text-[9px] text-cafe-secondary font-mono flex-shrink-0">
+            <span className="text-micro text-cafe-secondary font-mono flex-shrink-0">
               {file.size < 1024 ? `${file.size}B` : `${Math.round(file.size / 1024)}KB`}
             </span>
           )}
@@ -195,7 +209,7 @@ export function WorkspaceFileViewer({
               active={jsxPreview}
               onClick={onToggleJsxPreview}
               title={jsxPreview ? '\u5207\u6362\u5230\u6E90\u7801' : '\u9884\u89C8 JSX/TSX'}
-              activeClass="bg-blue-600/80 text-white hover:bg-blue-500"
+              activeClass="bg-blue-600/80 text-[var(--cafe-surface)] hover:bg-conn-blue-text"
             >
               {jsxPreview ? 'Preview' : 'Code'}
             </ToolbarBtn>
@@ -233,7 +247,7 @@ export function WorkspaceFileViewer({
               active={editMode}
               onClick={onToggleEdit}
               title={editMode ? '\u9000\u51FA\u7F16\u8F91' : '\u7F16\u8F91\u6587\u4EF6'}
-              activeClass="bg-green-600/80 text-white hover:bg-green-500"
+              activeClass="bg-green-600/80 text-[var(--cafe-surface)] hover:bg-conn-green-text"
             >
               {editMode ? '\u7F16\u8F91\u4E2D' : '\u7F16\u8F91'}
             </ToolbarBtn>
@@ -255,7 +269,23 @@ export function WorkspaceFileViewer({
       </div>
 
       {saveError && (
-        <div className="px-3 py-1.5 text-[10px] text-red-400 bg-red-900/20 border-b border-red-900/30">{saveError}</div>
+        <div className="px-3 py-1.5 text-micro text-conn-red-text bg-[var(--semantic-critical-surface)] border-b border-[var(--semantic-critical)]">
+          {saveError}
+        </div>
+      )}
+
+      {pendingExternalSha && (
+        <div className="px-3 py-1.5 text-micro text-conn-amber-text bg-[var(--semantic-warning-surface)] border-b border-[var(--semantic-warning)] flex items-center justify-between">
+          <span>文件已被外部修改</span>
+          <span className="flex gap-2">
+            <button type="button" onClick={onApplyExternalChange} className="underline hover:text-conn-amber-text">
+              重新加载
+            </button>
+            <button type="button" onClick={onDismissExternalChange} className="underline hover:text-conn-amber-text">
+              忽略
+            </button>
+          </span>
+        </div>
       )}
 
       {/* File content */}
@@ -276,12 +306,16 @@ export function WorkspaceFileViewer({
         mdHasSelection={mdHasSelection}
         onMdAddToChat={handleMdAddToChat}
         onSave={onSave}
+        onDirtyChange={onDirtyChange}
         rawUrl={rawUrl}
         revealInFinder={revealInFinder}
+        restoreScrollTop={restoreScrollTop}
+        restoreKey={restoreKey}
+        onScrollTopChange={onScrollTopChange}
       />
 
       {file.truncated && (
-        <div className="px-3 py-1.5 text-[10px] text-amber-400 bg-[#1E1E24] border-t border-amber-900/30">
+        <div className="px-3 py-1.5 text-micro text-conn-amber-text bg-[var(--ws-editor-bg)] border-t border-[var(--semantic-warning)]">
           \u6587\u4EF6\u5DF2\u622A\u65AD (超过 1MB)
         </div>
       )}
@@ -305,13 +339,13 @@ function ToolbarBtn({
   onClick: () => void;
   title: string;
 }) {
-  const ac = activeClass ?? 'bg-cocreator-primary/80 text-white hover:bg-cocreator-primary';
+  const ac = activeClass ?? 'bg-cafe-accent/80 text-[var(--cafe-surface)] hover:bg-cafe-accent';
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${active ? ac : 'text-cafe-secondary hover:text-cafe-muted hover:bg-cafe-surface/10'} ${disabled ? 'opacity-30 cursor-not-allowed' : ''}`}
+      className={`px-2 py-0.5 rounded text-micro font-medium transition-colors ${active ? ac : 'text-cafe-secondary hover:text-cafe-muted hover:bg-cafe-surface/10'} ${disabled ? 'opacity-30 cursor-not-allowed' : ''}`}
       title={title}
     >
       {children}

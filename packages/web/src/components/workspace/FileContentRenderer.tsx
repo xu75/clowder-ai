@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useRef } from 'react';
 import type { FileData, WorktreeEntry } from '@/hooks/useWorkspace';
 import { HubIcon } from '../hub-icons';
 import { MarkdownContent } from '../MarkdownContent';
@@ -23,8 +24,12 @@ export interface FileContentRendererProps {
   mdHasSelection: boolean;
   onMdAddToChat: () => void;
   onSave: (c: string) => Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
   rawUrl: (p: string) => string;
   revealInFinder: (path: string) => void;
+  restoreScrollTop?: number | null;
+  restoreKey?: string;
+  onScrollTopChange?: (scrollTop: number) => void;
 }
 
 /** Renders file content: binary (image/audio/video), markdown, HTML, JSX, or code. */
@@ -45,39 +50,81 @@ export function FileContentRenderer({
   mdHasSelection,
   onMdAddToChat,
   onSave,
+  onDirtyChange,
   rawUrl,
   revealInFinder,
+  restoreScrollTop,
+  restoreKey,
+  onScrollTopChange,
 }: FileContentRendererProps) {
+  const onScrollTopChangeRef = useRef(onScrollTopChange);
+  onScrollTopChangeRef.current = onScrollTopChange;
+  const restoreScrollTopRef = useRef(restoreScrollTop);
+  restoreScrollTopRef.current = restoreScrollTop;
+
+  const mdActive = isMarkdown && markdownRendered && !editMode;
+
+  useEffect(() => {
+    const el = mdContainerRef.current;
+    if (!el || !mdActive || !onScrollTopChangeRef.current) return;
+    let rafId = 0;
+    const handleScroll = () => {
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        onScrollTopChangeRef.current?.(el.scrollTop);
+      });
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', handleScroll);
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        onScrollTopChangeRef.current?.(el.scrollTop);
+      }
+    };
+  }, [mdContainerRef, onScrollTopChange, mdActive]);
+
+  useEffect(() => {
+    const el = mdContainerRef.current;
+    if (!el || !mdActive || !onScrollTopChangeRef.current) return;
+    const saved = restoreScrollTopRef.current;
+    if (saved != null) {
+      el.scrollTop = saved;
+    } else {
+      onScrollTopChangeRef.current(el.scrollTop);
+    }
+  }, [restoreKey, onScrollTopChange, mdActive, mdContainerRef]);
   if (file.binary) {
     if (file.mime.startsWith('image/'))
       return (
-        <div className="flex-1 flex items-center justify-center bg-[#1E1E24] p-4 overflow-auto">
+        <div className="flex-1 flex items-center justify-center bg-[var(--ws-editor-bg)] p-4 overflow-auto">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={rawUrl(file.path)} alt={file.path} className="max-w-full max-h-full object-contain rounded" />
         </div>
       );
     if (file.mime.startsWith('audio/'))
       return (
-        <div className="flex-1 flex flex-col items-center justify-center bg-[#1E1E24] p-6 gap-3">
+        <div className="flex-1 flex flex-col items-center justify-center bg-[var(--ws-editor-bg)] p-6 gap-3">
           <HubIcon name="music" className="h-8 w-8 text-cafe-secondary" />
           <audio controls src={rawUrl(file.path)} className="w-full max-w-md">
             浏览器不支持音频播放
           </audio>
-          <p className="text-[10px] text-cafe-secondary">
+          <p className="text-micro text-cafe-secondary">
             {file.mime} · {Math.round(file.size / 1024)}KB
           </p>
         </div>
       );
     if (file.mime.startsWith('video/'))
       return (
-        <div className="flex-1 flex items-center justify-center bg-[#1E1E24] p-4 overflow-auto">
+        <div className="flex-1 flex items-center justify-center bg-[var(--ws-editor-bg)] p-4 overflow-auto">
           <video controls src={rawUrl(file.path)} className="max-w-full max-h-full rounded">
             浏览器不支持视频播放
           </video>
         </div>
       );
     return (
-      <div className="flex flex-col items-center justify-center py-8 bg-[#1E1E24] text-cafe-secondary text-xs">
+      <div className="flex flex-col items-center justify-center py-8 bg-[var(--ws-editor-bg)] text-cafe-secondary text-xs">
         <svg
           viewBox="0 0 24 24"
           fill="none"
@@ -90,13 +137,13 @@ export function FileContentRenderer({
           <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7zM14 2v4a2 2 0 0 0 2 2h4M10 9H8M16 13H8M16 17H8" />
         </svg>
         <p>二进制文件</p>
-        <p className="text-[10px] mt-1">
+        <p className="text-micro mt-1">
           {file.mime} · {Math.round(file.size / 1024)}KB
         </p>
         <button
           type="button"
           onClick={() => void revealInFinder(file.path)}
-          className="mt-2 px-3 py-1 rounded bg-cocreator-light/20 text-cocreator-dark/60 hover:bg-cocreator-light/40 transition-colors text-[10px]"
+          className="mt-2 px-3 py-1 rounded bg-cafe-surface-sunken/20 text-cafe-interactive/60 hover:bg-cafe-surface-sunken/40 transition-colors text-micro"
         >
           在 Finder 中打开
         </button>
@@ -119,7 +166,7 @@ export function FileContentRenderer({
           <button
             type="button"
             onClick={onMdAddToChat}
-            className="absolute top-2 right-3 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cocreator-primary text-white text-[11px] font-medium shadow-lg hover:bg-cocreator-dark transition-colors z-10 animate-fade-in"
+            className="absolute top-2 right-3 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cafe-accent text-[var(--cafe-surface)] text-xs font-medium shadow-lg hover:bg-cafe-interactive transition-colors z-10 animate-fade-in"
             title="引用到聊天"
           >
             <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -135,7 +182,7 @@ export function FileContentRenderer({
   if (isHtml && htmlPreview && !editMode)
     return (
       <div className="flex-1 min-h-0 flex flex-col">
-        <div className="px-2 py-1 bg-amber-900/20 text-amber-400 text-[10px] border-b border-amber-900/30 flex-shrink-0">
+        <div className="px-2 py-1 bg-[var(--semantic-warning-surface)] text-conn-amber-text text-micro border-b border-[var(--semantic-warning)] flex-shrink-0">
           预览模式 — 相对资源路径（图片/CSS/JS）可能无法加载
         </div>
         <div className="flex-1 min-h-0 bg-cafe-surface">
@@ -160,7 +207,11 @@ export function FileContentRenderer({
       scrollToLine={scrollToLine}
       editable={editMode}
       onSave={onSave}
+      onDirtyChange={onDirtyChange}
       branch={currentWorktree?.branch}
+      restoreScrollTop={restoreScrollTop}
+      restoreKey={restoreKey}
+      onScrollTopChange={onScrollTopChange}
     />
   );
 }

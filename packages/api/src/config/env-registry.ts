@@ -34,7 +34,8 @@ export type EnvCategory =
   | 'evidence'
   | 'quota'
   | 'telemetry'
-  | 'antigravity';
+  | 'antigravity'
+  | 'audio';
 
 export interface EnvDefinition {
   /** The env var name, e.g. 'REDIS_URL' */
@@ -55,6 +56,8 @@ export interface EnvDefinition {
   runtimeEditable?: boolean;
   /** If true, this var should appear in .env.example (enforced by check:env-example) */
   exampleRecommended?: boolean;
+  /** Explicit allowed values for cycle-style toggles (e.g. ['off','shadow','on']) */
+  allowedValues?: string[];
 }
 
 export const ENV_CATEGORIES: Record<EnvCategory, string> = {
@@ -78,6 +81,7 @@ export const ENV_CATEGORIES: Record<EnvCategory, string> = {
   quota: '额度监控',
   telemetry: '可观测性 (OTel)',
   antigravity: '孟加拉猫 (Antigravity)',
+  audio: '会中实时智囊 (F195)',
 };
 
 export const ENV_VARS: EnvDefinition[] = [
@@ -98,6 +102,23 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'server',
     sensitive: false,
     runtimeEditable: true,
+  },
+  {
+    name: 'REDIS_PORT',
+    defaultValue: '6399',
+    description: 'Redis 端口（governance pack 用于生成外部项目规则）',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+    exampleRecommended: true,
+  },
+  {
+    name: 'REDIS_DEV_PORT',
+    defaultValue: '6398',
+    description: 'Redis 开发/测试端口（governance pack 用于生成外部项目规则）',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'API_SERVER_HOST',
@@ -171,6 +192,15 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: false,
   },
   {
+    name: 'CAT_CAFE_HOME',
+    defaultValue: '<repoRoot>/.cat-cafe',
+    description:
+      'Service install data root (Python interpreter, per-service venvs, Piper voice models, etc.). Honored by scripts/services/* and the venv-probe path in service-registry — override to share install state across users / containers / mounts.',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
     name: 'CAT_CAFE_INVOCATION_REGISTRY',
     defaultValue: '(自动：有 Redis 用 redis，否则 memory)',
     description: 'F174-B InvocationRegistry 后端选择：redis（重启不丢 callback 鉴权）/ memory（fallback / 测试）',
@@ -190,6 +220,14 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'CAT_CAFE_AGENT_KEY_FILE',
     defaultValue: '(空)',
     description: 'F178 Persistent MCP Agent-Key Auth — 密钥文件路径（CAT_CAFE_AGENT_KEY_SECRET 的备选）',
+    category: 'server',
+    sensitive: true,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_AGENT_KEY_FILES',
+    defaultValue: '(空)',
+    description: 'F178 Persistent MCP Agent-Key Auth — catId 到密钥文件路径的 JSON 映射（Antigravity variants）',
     category: 'server',
     sensitive: true,
     runtimeEditable: false,
@@ -223,6 +261,15 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'CAT_CAFE_TEST_REAL_HOME',
     defaultValue: '(未设置)',
     description: '测试真实 HOME 路径快照（用于阻止测试写回宿主 HOME）',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_SERVICES_CONFIG',
+    defaultValue: '(自动：~/.cat-cafe/services.json)',
+    description: '服务 lifecycle UI 的启用状态配置文件路径（测试/隔离环境可覆盖）',
     category: 'server',
     sensitive: false,
     hubVisible: false,
@@ -294,6 +341,13 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'PREVIEW_GATEWAY_ENABLED',
     defaultValue: '1（启用）',
     description: '设为 0 禁用 Preview Gateway（F120）',
+    category: 'server',
+    sensitive: false,
+  },
+  {
+    name: 'CHROME_EXECUTABLE_PATH',
+    defaultValue: '(未设置 → 自动检测系统 Chrome/Edge/Chromium)',
+    description: '对话导出截图使用的 Chromium 系浏览器路径。未设置时按 Chrome > Edge > Chromium 优先级自动检测',
     category: 'server',
     sensitive: false,
   },
@@ -521,6 +575,33 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: false,
   },
   {
+    name: 'CAT_CAFE_SUPERVISOR_PARENT_PID',
+    defaultValue: '(内部注入)',
+    description: 'CLI supervisor 内部父进程 PID，不需要手动设置',
+    category: 'cli',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_SUPERVISOR_POLL_MS',
+    defaultValue: '1000',
+    description: 'CLI supervisor 内部父进程存活检查间隔',
+    category: 'cli',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_SUPERVISOR_KILL_GRACE_MS',
+    defaultValue: '3003',
+    description: 'CLI supervisor 内部 SIGTERM 到 SIGKILL 的等待时间',
+    category: 'cli',
+    sensitive: false,
+    hubVisible: false,
+    runtimeEditable: false,
+  },
+  {
     name: 'CAT_TEMPLATE_PATH',
     defaultValue: '(repo 根 cat-template.json)',
     description: '猫猫模板文件路径',
@@ -642,6 +723,13 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: false,
   },
   {
+    name: 'CAT_CAFE_CALLBACK_FETCH_TIMEOUT_MS',
+    defaultValue: '10000',
+    description: 'Callback fetch 每次尝试超时（毫秒，防 hung socket 永久挂起，照 #1368）',
+    category: 'cli',
+    sensitive: false,
+  },
+  {
     name: 'CDP_DEBUG',
     defaultValue: '(未设置)',
     description: 'CDP Bridge 调试模式',
@@ -674,6 +762,14 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'CAT_CAFE_INVOCATION_ID',
     defaultValue: '(运行时注入)',
     description: '当前 invocation ID（由 API 进程注入 MCP Server 子进程 env）',
+    category: 'cli',
+    sensitive: false,
+    hubVisible: false,
+  },
+  {
+    name: 'CAT_CAFE_THREAD_ID',
+    defaultValue: '(运行时注入)',
+    description: '当前 thread ID（由 API 进程注入 MCP Server 子进程 env，用于跨线程 affordance 抑制本 thread 提示）',
     category: 'cli',
     sensitive: false,
     hubVisible: false,
@@ -976,6 +1072,15 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: false,
   },
   {
+    name: 'GITHUB_SELF_LOGIN',
+    defaultValue: '(未设置 → gh api /user 自动解析)',
+    description:
+      'F140 echo filter: GitHub 登录名，用于过滤自己发的 PR comment 避免回流消息总线。设置后跳过 gh api /user 解析，适用于 gh CLI 不可用的环境',
+    category: 'connector',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
     name: 'GITHUB_TOKEN',
     defaultValue: '(未设置)',
     description: 'GitHub Personal Access Token（Scheduler 仓库活跃度模板 HTTP 请求鉴权）',
@@ -1028,10 +1133,27 @@ export const ENV_VARS: EnvDefinition[] = [
   },
   {
     name: 'GEMINI_ADAPTER',
-    defaultValue: 'gemini-cli',
-    description: '暹罗猫适配器 (gemini-cli/antigravity)',
+    defaultValue: 'antigravity-cli',
+    description: '暹罗猫适配器 (antigravity-cli/gemini-cli/antigravity)',
     category: 'gemini',
     sensitive: false,
+  },
+  {
+    name: 'CAT_CAFE_AGY_PROFILE_ROOT',
+    defaultValue: '~/.cat-cafe/agy-profiles',
+    description: 'F210 Phase G：隔离 AGY profile HOME 根目录；每只 AGY profile 猫会在此目录下创建独立 HOME。',
+    category: 'gemini',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_AGY_CWD_ROOT',
+    defaultValue: '~/.cat-cafe/agy-cwd',
+    description:
+      'F210 cache-leak fix：无 agyProfile 时 AGY spawn cwd sandbox 根目录（每只 AGY 猫在此创建 <catId> 子目录），让 agy cwd-relative cache（cache/projects.json）落 sandbox 而非 repo root。',
+    category: 'gemini',
+    sensitive: false,
+    runtimeEditable: false,
   },
 
   // --- kimi ---
@@ -1168,6 +1290,15 @@ export const ENV_VARS: EnvDefinition[] = [
     runtimeEditable: false,
   },
 
+  {
+    name: 'THEME_CONFIG',
+    defaultValue: '(未设置)',
+    description: 'OKLCH 主题配置 JSON（清浏览器缓存后可从此恢复）',
+    category: 'frontend',
+    sensitive: false,
+    runtimeEditable: true,
+  },
+
   // --- push ---
   {
     name: 'VAPID_PUBLIC_KEY',
@@ -1263,9 +1394,12 @@ export const ENV_VARS: EnvDefinition[] = [
   {
     name: 'EMBED_MODE',
     defaultValue: 'off',
-    description: '向量检索模式 (off/shadow/on)，on = 开启 Qwen3 embedding rerank',
+    description:
+      '向量检索模式 (off/shadow/on)。留空时由 console 上 Embedding 服务的开关决定（启用 → on）。' +
+      '显式设了 shadow/on 会覆盖，但 EMBED_MODE=off 不会关掉已经在 console 启用的服务（防 foot-gun）。',
     category: 'evidence',
     sensitive: false,
+    allowedValues: ['off', 'shadow', 'on'],
   },
   {
     name: 'F102_ABSTRACTIVE',
@@ -1288,6 +1422,16 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
   },
+  // --- F200 Recall Telemetry ---
+  {
+    name: 'F200_CONSUMPTION_RERANK',
+    defaultValue: 'off',
+    description: 'F200 consumption-weighted rerank (off/shadow/on)',
+    category: 'evidence',
+    sensitive: false,
+    runtimeEditable: true,
+    allowedValues: ['off', 'shadow', 'on'],
+  },
   // --- F163 记忆熵减实验框架 ---
   {
     name: 'F163_AUTHORITY_BOOST',
@@ -1296,6 +1440,7 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
     runtimeEditable: true,
+    allowedValues: ['off', 'shadow', 'on'],
   },
   {
     name: 'F163_ALWAYS_ON_INJECTION',
@@ -1304,6 +1449,7 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
     runtimeEditable: true,
+    allowedValues: ['off', 'shadow', 'on'],
   },
   {
     name: 'F163_RETRIEVAL_RERANK',
@@ -1312,6 +1458,7 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
     runtimeEditable: true,
+    allowedValues: ['off', 'shadow', 'on'],
   },
   {
     name: 'F163_COMPRESSION',
@@ -1320,6 +1467,7 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
     runtimeEditable: true,
+    allowedValues: ['off', 'suggest', 'apply'],
   },
   {
     name: 'F163_PROMOTION_GATE',
@@ -1328,6 +1476,7 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
     runtimeEditable: true,
+    allowedValues: ['off', 'suggest', 'apply'],
   },
   {
     name: 'F163_CONTRADICTION_DETECTION',
@@ -1336,6 +1485,7 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
     runtimeEditable: true,
+    allowedValues: ['off', 'suggest', 'apply'],
   },
   {
     name: 'F163_REVIEW_QUEUE',
@@ -1344,6 +1494,7 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'evidence',
     sensitive: false,
     runtimeEditable: true,
+    allowedValues: ['off', 'suggest', 'apply'],
   },
   {
     name: 'EMBED_URL',
@@ -1363,6 +1514,27 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'GLOBAL_KNOWLEDGE_DB',
     defaultValue: '~/.cat-cafe/global_knowledge.sqlite',
     description: 'F-4: 全局知识 SQLite 路径（Skills + MEMORY.md 编译产物）',
+    category: 'evidence',
+    sensitive: false,
+  },
+  {
+    name: 'WORLD_DB',
+    defaultValue: '{repoRoot}/world.sqlite',
+    description: 'F093 World Engine SQLite 数据库路径',
+    category: 'evidence',
+    sensitive: false,
+  },
+  {
+    name: 'TASK_OUTCOME_DB',
+    defaultValue: '{repoRoot}/task-outcome-episodes.sqlite',
+    description: 'F192 Phase G Task Outcome Episode SQLite 数据库路径',
+    category: 'evidence',
+    sensitive: false,
+  },
+  {
+    name: 'EVENT_MEMORY_DB',
+    defaultValue: '{repoRoot}/event-memory.sqlite',
+    description: 'F227 Event Memory typed event index SQLite 数据库路径',
     category: 'evidence',
     sensitive: false,
   },
@@ -1490,6 +1662,20 @@ export const ENV_VARS: EnvDefinition[] = [
     category: 'telemetry',
     sensitive: false,
   },
+  {
+    name: 'PROMPT_CAPTURE',
+    defaultValue: 'off',
+    description: 'Prompt X-Ray 开关（on=启用 canonical prompt 捕获）',
+    category: 'telemetry',
+    sensitive: false,
+  },
+  {
+    name: 'PROMPT_CAPTURE_CATS',
+    defaultValue: '(未设置 → 全部猫)',
+    description: 'Prompt X-Ray 白名单：逗号分隔 catId（空=全部）',
+    category: 'telemetry',
+    sensitive: false,
+  },
   // --- antigravity (F061 Bridge) ---
   {
     name: 'ANTIGRAVITY_PORT',
@@ -1520,6 +1706,28 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: false,
   },
   {
+    name: 'ANTIGRAVITY_AUTO_RESUME',
+    defaultValue: 'true',
+    description: 'AC-G6 自动续跑：按 resume tier 在 fresh cascade 注入 resumeContext（设 false 关闭）',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'ANTIGRAVITY_YOLO_RUN_COMMAND',
+    defaultValue: 'true',
+    description:
+      'YOLO 模式：run_command 即使 SafeToAutoRun=false/missing 也走 native execution + writeback（设 false 回退 approval_pending）',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'ANTIGRAVITY_RUN_COMMAND_TIMEOUT_MS',
+    defaultValue: '600000',
+    description: '受控 YOLO run_command 单次原生命令执行超时（毫秒，1..3600000）；无效值回退默认值',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
     name: 'ANTIGRAVITY_TRACE_RAW',
     defaultValue: '(未设置 → 关闭)',
     description: '设为 1 启用 Antigravity 原始轨迹 dump（rpc raw response + step shape snapshot）',
@@ -1534,10 +1742,41 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: false,
   },
   {
+    name: 'CAT_CAFE_RIPGREP_PATH',
+    defaultValue: '(未设置 → 使用内置 @vscode/ripgrep，失败时回落 PATH rg)',
+    description: 'Antigravity grep_search native executor 的 ripgrep 二进制路径覆盖（异常部署/调试用）',
+    category: 'antigravity',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
     name: 'CAT_CAFE_READONLY',
     defaultValue: '(未设置 → 全量注册)',
     description: 'MCP Server 只读模式：跳过 post_message 等写操作工具注册（Antigravity 持久 MCP 用）',
     category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'CAT_CAFE_RUNTIME_SESSION_SEAL_REAPER_INTERVAL_MS',
+    defaultValue: '30000',
+    description: 'F211 runtime session pending seal reaper 轮询间隔（毫秒，启动时读取）',
+    category: 'antigravity',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  // --- audio (F195 会中实时智囊) ---
+  {
+    name: 'AUDIO_SERVICE_URL',
+    defaultValue: 'http://127.0.0.1:9881',
+    description: 'F195 Audio Capture Service 地址（Python aiohttp，管理音频采集 + ASR 转录）',
+    category: 'audio',
+    sensitive: false,
+  },
+  {
+    name: 'TRANSCRIPT_DIR',
+    defaultValue: 'scripts/meeting-copilot/transcripts',
+    description: 'F195 Phase D 转写持久化目录（Python 写 MD + meta.json，Node 读 meta 做路径注入）',
+    category: 'audio',
     sensitive: false,
   },
 ];

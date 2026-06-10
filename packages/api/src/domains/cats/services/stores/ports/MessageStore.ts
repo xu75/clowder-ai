@@ -31,6 +31,16 @@ export function isDelivered(msg: StoredMessage): boolean {
 /**
  * A tool event recorded during agent invocation (tool_use / tool_result).
  * Persisted alongside the assistant message so history reload can display them.
+ *
+ * F153 Phase J Slice J-B AC-J7: extends StoredToolEvent with the four-piece
+ * telemetry set (toolUseId / status / tracing / startTimeMs / endTimeMs) so
+ * the cold-start `hydrate-traces.ts` path can synthesize real-duration
+ * `cat_cafe.tool_use` child spans instead of degrading to flat
+ * `cat_cafe.invocation.restored` markers (per KD-39 / AC-J8).
+ *
+ * NEW fields are all optional for backward compat: legacy messages without
+ * Phase J wiring still load cleanly, hydrate just skips tool span synthesis
+ * for those entries (per KD-41: no fake duration when source signal absent).
  */
 export interface StoredToolEvent {
   id: string;
@@ -38,6 +48,32 @@ export interface StoredToolEvent {
   label: string;
   detail?: string;
   timestamp: number;
+  /** F153 Phase J AC-J7: native provider tool id, used to pair tool_use ↔ tool_result
+   *  and to key the synthesized span on hydrate. Set by provider transformer via
+   *  AgentMessage.toolUseId (AC-J2). */
+  toolUseId?: string;
+  /** F153 Phase J AC-J7: structured execution outcome, set on tool_result events.
+   *  Mapped from AgentMessage.toolResultStatus (AC-J2 execution edge); NEVER inferred
+   *  from content text (KD-38 honesty). */
+  status?: 'ok' | 'error' | 'unknown';
+  /** F153 Phase J AC-J7: OTel span context for the tool span. Persisted so hydrate
+   *  can re-parent the synthesized span under the invocation span (parentSpanId
+   *  points at the invocation span context written into message.extra.tracing). */
+  tracing?: { traceId: string; spanId: string; parentSpanId?: string };
+  /** F153 Phase J AC-J7: span start Unix timestamp (ms). Set on tool_use events
+   *  when the ToolSpanTracker opens the span. */
+  startTimeMs?: number;
+  /** F153 Phase J AC-J7: span end Unix timestamp (ms). Set on tool_result events
+   *  when the ToolSpanTracker closes the span. Together with `startTimeMs` enables
+   *  AC-J8 real-duration restore (vs flat `invocation.restored`). */
+  endTimeMs?: number;
+  /** R6 maintainer (Slice J-B): native tool name persisted as a separate data field
+   *  (decoupled from the UI display `label`). Hydrate's `synthesizeToolSpansFromEvents`
+   *  prefers this field for the synthesized span name; falls back to parsing `label`
+   *  only for legacy stored events that predate this field. Set on `tool_use` events
+   *  from `AgentMessage.toolName ?? 'unknown'`. Avoids silent degradation to `unknown`
+   *  or wrong tool names if the label arrow format / catId prefix / localization changes. */
+  toolName?: string;
 }
 
 /**
@@ -57,14 +93,23 @@ export interface StoredMessage {
   toolEvents?: readonly StoredToolEvent[];
   /** Provider/model metadata (for cat messages) */
   metadata?: MessageMetadata;
-  /** F22+F52+F098-C1+F153-F: Extensible extra data (rich blocks, stream metadata, cross-post origin, explicit targets, tracing pointers) */
+  /** F022+F052+F098-C1+F153-F: Extensible extra data (rich blocks, stream metadata, cross-post origin, explicit targets, tracing pointers) */
   extra?: {
     rich?: RichMessageExtra;
-    stream?: { invocationId: string };
+    /** #814/F224: explicit post_message callback bubble; history hydration must not merge it into stream output. */
+    isExplicitPost?: boolean;
+    /** F081 + F194 Phase Z3 dual id:
+     *    - `invocationId` = parent/chain invocation (legacy field, liveness/queue/cancel SoT)
+     *    - `turnInvocationId` = per-cat-turn invocation (Z3 new — bubble identity SoT for frontend
+     *      hydrate/merge stable key; required so same-parent multi-turn-same-cat bubbles do NOT merge)
+     *  Frontend prefers `turnInvocationId` (fallback `invocationId` for legacy messages). */
+    stream?: { invocationId: string; turnInvocationId?: string };
     crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
     targetCats?: string[];
     scheduler?: SchedulerMessageExtra['scheduler'];
     tracing?: { traceId: string; spanId: string; parentSpanId?: string };
+    systemKind?: 'a2a_routing';
+    a2aRouting?: { fromCatId?: string; targetCatId?: string; invocationId?: string };
   };
   /** CatIds mentioned in this message */
   mentions: readonly CatId[];
@@ -81,7 +126,7 @@ export interface StoredMessage {
   whisperTo?: readonly CatId[];
   /** F35: Timestamp when a whisper was revealed (made public). Present = revealed */
   revealedAt?: number;
-  /** F97: External connector source. Present = connector message (not user/cat) */
+  /** F097: External connector source. Present = connector message (not user/cat) */
   source?: ConnectorSource;
   /** F098-D: Timestamp when a queued message was actually dequeued and processed by a cat */
   deliveredAt?: number;
@@ -108,6 +153,95 @@ export type AppendMessageInput = Omit<StoredMessage, 'id' | 'threadId'> & {
    */
   idempotencyKey?: string;
 };
+
+/**
+ * Stream-only metadata collected by route-serial after a callback message was
+ * already persisted. It may augment the callback bubble, but must not replace
+ * its canonical content/origin.
+ */
+export interface StreamMetadataAugmentInput {
+  toolEvents?: readonly StoredToolEvent[];
+  metadata?: MessageMetadata;
+  thinking?: string;
+  replyTo?: string;
+  mentionsUser?: boolean;
+  extra?: NonNullable<StoredMessage['extra']>;
+}
+
+function richBlockDedupeKey(block: unknown, index: number): string {
+  if (block && typeof block === 'object' && 'id' in block) {
+    const id = (block as { id?: unknown }).id;
+    if (typeof id === 'string' && id.length > 0) return `id:${id}`;
+  }
+  try {
+    return `json:${JSON.stringify(block)}`;
+  } catch {
+    return `index:${index}`;
+  }
+}
+
+function mergeRichExtra(existing?: RichMessageExtra, incoming?: RichMessageExtra): RichMessageExtra | undefined {
+  if (!existing && !incoming) return undefined;
+  const blocks = [...(existing?.blocks ?? [])];
+  const seen = new Set(blocks.map((block, index) => richBlockDedupeKey(block, index)));
+  for (const block of incoming?.blocks ?? []) {
+    const key = richBlockDedupeKey(block, blocks.length);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    blocks.push(block);
+  }
+  return { v: 1, blocks };
+}
+
+export function mergeMessageExtra(
+  existing: StoredMessage['extra'] | undefined,
+  incoming: StoredMessage['extra'] | undefined,
+): StoredMessage['extra'] | undefined {
+  if (!existing && !incoming) return undefined;
+  const merged = { ...(existing ?? {}), ...(incoming ?? {}) };
+  const rich = mergeRichExtra(existing?.rich, incoming?.rich);
+  if (rich) merged.rich = rich;
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+export function mergeStoredToolEvents(
+  existing: readonly StoredToolEvent[] | undefined,
+  incoming: readonly StoredToolEvent[] | undefined,
+): readonly StoredToolEvent[] | undefined {
+  if (!incoming || incoming.length === 0) return existing;
+  if (!existing || existing.length === 0) return [...incoming];
+  const merged = [...existing];
+  const seen = new Set(merged.map((event) => event.id));
+  for (const event of incoming) {
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    merged.push(event);
+  }
+  return merged;
+}
+
+export function applyStreamMetadataAugment(msg: StoredMessage, patch: StreamMetadataAugmentInput): StoredMessage {
+  if (patch.thinking && patch.thinking.trim().length > 0) {
+    msg.thinking = patch.thinking;
+  }
+  if (patch.metadata) {
+    msg.metadata = { ...(msg.metadata ?? {}), ...patch.metadata };
+  }
+  if (patch.toolEvents && patch.toolEvents.length > 0) {
+    msg.toolEvents = mergeStoredToolEvents(msg.toolEvents, patch.toolEvents);
+  }
+  if (patch.replyTo && !msg.replyTo) {
+    msg.replyTo = patch.replyTo;
+  }
+  if (patch.mentionsUser) {
+    msg.mentionsUser = true;
+  }
+  if (patch.extra) {
+    const mergedExtra = mergeMessageExtra(msg.extra, patch.extra);
+    if (mergedExtra) msg.extra = mergedExtra;
+  }
+  return msg;
+}
 
 /**
  * Common interface for message stores (in-memory and Redis).
@@ -169,10 +303,27 @@ export interface IMessageStore {
     id: string,
     extra: NonNullable<StoredMessage['extra']>,
   ): StoredMessage | null | Promise<StoredMessage | null>;
+  /** #1462: augment callback-persisted messages with metadata collected only on the stream path. */
+  augmentStreamMetadata(
+    id: string,
+    patch: StreamMetadataAugmentInput,
+  ): StoredMessage | null | Promise<StoredMessage | null>;
   /** F098-D: Mark a queued message as delivered (set deliveredAt). Returns null if not found. */
   markDelivered(id: string, deliveredAt: number): StoredMessage | null | Promise<StoredMessage | null>;
   /** F117: Mark a queued message as canceled (withdraw/clear). Returns null if not found. */
   markCanceled(id: string): StoredMessage | null | Promise<StoredMessage | null>;
+  /**
+   * Atomic content-dedup claim. Returns true if this fingerprint was newly claimed
+   * (caller should proceed to append) or false if an identical claim is still live within
+   * the window (caller must treat the post as a duplicate). Closes the check-then-act race
+   * in the callback exact-duplicate scan: two concurrent byte-identical posts can both pass
+   * the recent-message read before either appends, so the append decision needs an atomic
+   * gate. In-memory: synchronous Map check+set (atomic within the event loop). Redis: SET NX PX.
+   */
+  claimContentDedupKey(key: string, ttlMs: number): boolean | Promise<boolean>;
+  /** #697: Find message IDs with a given deliveryStatus. Used by StartupReconciler
+   *  to recover orphaned queued messages after process restart. */
+  scanByDeliveryStatus?(status: NonNullable<StoredMessage['deliveryStatus']>): string[] | Promise<string[]>;
 }
 
 /** Max messages to keep in memory */
@@ -200,6 +351,8 @@ export class MessageStore {
   private messages: StoredMessage[] = [];
   private readonly maxMessages: number;
   private readonly idempotencyIndex = new Map<string, string>();
+  /** Content-dedup claims: fingerprint key → expiry timestamp (ms). Bounds the callback exact-duplicate race. */
+  private readonly contentDedupIndex = new Map<string, number>();
   /** F102 KD-34: Listener called after every successful append (fire-and-forget) */
   onAppend?: (msg: Pick<StoredMessage, 'id' | 'threadId' | 'timestamp' | 'content'>) => void;
 
@@ -395,6 +548,21 @@ export class MessageStore {
     return matches.reverse();
   }
 
+  getByThreadIncludingQueued(threadId: string, limit?: number, userId?: string): StoredMessage[] {
+    const n = limit ?? DEFAULT_LIMIT;
+    const matches: StoredMessage[] = [];
+
+    for (let i = this.messages.length - 1; i >= 0 && matches.length < n; i--) {
+      const msg = this.messages[i]!;
+      if (msg.threadId !== threadId) continue;
+      if (msg.deletedAt) continue;
+      if (msg.deliveryStatus === 'canceled') continue;
+      if (userId && msg.userId !== userId && !isSystemUserMessage(msg)) continue;
+      matches.push(msg);
+    }
+    return matches.reverse();
+  }
+
   /**
    * Get messages in a thread after a specific message ID (exclusive), oldest first.
    * If afterId is undefined, returns messages from thread start.
@@ -404,14 +572,29 @@ export class MessageStore {
     const bounded = Number.isFinite(limit as number) && (limit as number) > 0;
     const max = bounded ? (limit as number) : Number.MAX_SAFE_INTEGER;
     const matches: StoredMessage[] = [];
+    let cursorSeen = !afterId;
 
     for (let i = 0; i < this.messages.length && matches.length < max; i++) {
       const msg = this.messages[i]!;
       if (msg.threadId !== threadId) continue;
+      if (!cursorSeen) {
+        if (msg.id === afterId) cursorSeen = true;
+        continue;
+      }
       if (userId && msg.userId !== userId && !isSystemUserMessage(msg)) continue;
-      if (afterId && msg.id <= afterId) continue;
       if (!isDelivered(msg)) continue;
       matches.push(msg);
+    }
+
+    if (!cursorSeen && afterId) {
+      for (let i = 0; i < this.messages.length && matches.length < max; i++) {
+        const msg = this.messages[i]!;
+        if (msg.threadId !== threadId) continue;
+        if (msg.id <= afterId) continue;
+        if (userId && msg.userId !== userId && !isSystemUserMessage(msg)) continue;
+        if (!isDelivered(msg)) continue;
+        matches.push(msg);
+      }
     }
 
     return matches;
@@ -528,6 +711,12 @@ export class MessageStore {
     return msg;
   }
 
+  augmentStreamMetadata(id: string, patch: StreamMetadataAugmentInput): StoredMessage | null {
+    const msg = this.messages.find((m) => m.id === id);
+    if (!msg) return null;
+    return applyStreamMetadataAugment(msg, patch);
+  }
+
   /**
    * F098-D: Mark a queued message as delivered (set deliveredAt timestamp).
    */
@@ -546,6 +735,32 @@ export class MessageStore {
     if (!msg) return null;
     msg.deliveryStatus = 'canceled';
     return msg;
+  }
+
+  // #697: scanByDeliveryStatus intentionally NOT implemented for in-memory store.
+  // In-memory store uses a bounded sliding window (MAX_MESSAGES) — messages
+  // beyond the window would be silently ignored, masking real orphans visible
+  // in production Redis. StartupReconciler's guard `if (!messageStore?.scanByDeliveryStatus)`
+  // gracefully skips orphan recovery for in-memory mode. (LL-048 / PR #805 P2-2)
+
+  /**
+   * Atomic content-dedup claim (synchronous — atomic within the single-threaded event loop).
+   * Returns true on first claim within the window, false if an identical claim is still live.
+   */
+  claimContentDedupKey(key: string, ttlMs: number): boolean {
+    const now = Date.now();
+    const existing = this.contentDedupIndex.get(key);
+    if (existing !== undefined && existing > now) {
+      return false;
+    }
+    this.contentDedupIndex.set(key, now + ttlMs);
+    // Opportunistic prune so the index stays bounded under sustained traffic.
+    if (this.contentDedupIndex.size > 2048) {
+      for (const [k, exp] of this.contentDedupIndex) {
+        if (exp <= now) this.contentDedupIndex.delete(k);
+      }
+    }
+    return true;
   }
 
   /**
@@ -578,5 +793,41 @@ export async function hydrateReplyPreview(store: IMessageStore, replyToId: strin
     senderCatId: parent.catId,
     content: truncated,
     ...(parent.extra?.scheduler?.hiddenTrigger ? { kind: 'scheduler_trigger' as const } : {}),
+  };
+}
+
+/**
+ * F193 AC-B2: Hydrate cross-thread reply hint from a trigger message.
+ *
+ * When a cat is invoked because someone cross-posted into their thread
+ * (F052: source thread injected `extra.crossPost.sourceThreadId`),
+ * the receiving cat needs structured guidance on how to reply:
+ *   - sourceThreadId: where the message came from (full id, not slice(0,8))
+ *   - senderCatId: who to @ on the reply (their handle)
+ *
+ * Caller provides triggerMessageId from worklist `a2aTriggerMessageId` Map
+ * (route-serial) or callback-a2a-trigger queue backfill. We fetch the stored
+ * message and return structured fields ONLY if it has cross-post metadata.
+ *
+ * Returns null when:
+ *   - triggerMessageId not found (e.g. message expired / deleted)
+ *   - parent has no extra.crossPost (same-thread post — not cross-thread relay)
+ *
+ * KD-1 boundary: agent-key target-thread writes don't inject crossPost
+ * metadata at all (callbacks.ts:430 path), so this naturally returns null
+ * for agent-key triggers — receiver gets no reply hint, which is correct.
+ */
+export async function hydrateCrossThreadReplyHint(
+  store: IMessageStore,
+  triggerMessageId: string,
+): Promise<{ sourceThreadId: string; senderCatId: CatId } | null> {
+  const trigger = await store.getById(triggerMessageId);
+  if (!trigger) return null;
+  const sourceThreadId = trigger.extra?.crossPost?.sourceThreadId;
+  if (!sourceThreadId) return null;
+  if (!trigger.catId) return null; // user-authored messages have no catId — not a cross-thread relay
+  return {
+    sourceThreadId,
+    senderCatId: trigger.catId,
   };
 }

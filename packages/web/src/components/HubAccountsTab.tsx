@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/utils/api-client';
-import { HubAccountItem, type ProfileEditPayload } from './HubAccountItem';
+import { HubAccountItem } from './HubAccountItem';
 import type { AccountsResponse, ProfileItem } from './hub-accounts.types';
 import { normalizeBuiltinClientIds, resolveAccountActionId } from './hub-accounts.view';
+import { SettingsPrimaryButton, SettingsStatusStrip } from './settings/primitives';
 import { type UnifiedAuthEditData, UnifiedAuthModal } from './UnifiedAuthModal';
 
 export function HubAccountsTab() {
@@ -90,56 +91,28 @@ export function HubAccountsTab() {
     [callApi, fetchAccounts],
   );
 
-  const saveAccount = useCallback(
-    async (accountId: string, payload: ProfileEditPayload) => {
-      setBusyId(accountId);
-      setError(null);
-      try {
-        await callApi(`/api/accounts/${accountId}`, {
-          method: 'PATCH',
-          body: JSON.stringify(payload),
-        });
-        await fetchAccounts();
-        window.dispatchEvent(new CustomEvent('accounts-changed'));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setBusyId(null);
-      }
-    },
-    [callApi, fetchAccounts],
-  );
-
   const displayAccounts = useMemo(() => normalizeBuiltinClientIds(data?.providers ?? []), [data?.providers]);
   const builtinAccounts = useMemo(() => displayAccounts.filter((a) => a.builtin), [displayAccounts]);
   const customAccounts = useMemo(() => displayAccounts.filter((a) => !a.builtin), [displayAccounts]);
   const displayCards = useMemo(() => [...builtinAccounts, ...customAccounts], [builtinAccounts, customAccounts]);
 
-  if (loading) return <p className="text-sm text-cafe-muted">加载中...</p>;
-  if (!data) return <p className="text-sm text-cafe-muted">暂无数据</p>;
+  if (loading) return <SettingsStatusStrip tone="muted">加载中...</SettingsStatusStrip>;
+  if (!data) return <SettingsStatusStrip tone="muted">暂无数据</SettingsStatusStrip>;
 
   return (
     <div className="space-y-4">
-      {error && <p className="text-sm text-red-500 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
+      {error && <SettingsStatusStrip tone="error">{error}</SettingsStatusStrip>}
 
-      <div className="flex items-start justify-between gap-3 px-1">
-        <div>
-          <p className="text-[13px] font-semibold text-[#E29578]">系统配置 &gt; 账号配置</p>
-          <p className="mt-1 text-[13px] leading-6 text-[#8A776B]">
-            每个账号可添加或删除模型。账号配置全局共享，所有项目通用。
-          </p>
-        </div>
-        <button
-          type="button"
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+        <SettingsPrimaryButton
           data-guide-id="accounts.create-form"
           onClick={() => {
             setEditTarget(undefined);
             setShowAuthModal(true);
           }}
-          className="shrink-0 rounded-full bg-[#D49266] px-4 py-1.5 text-xs font-semibold text-white hover:bg-[#c47f52] transition"
         >
           + 新增账户认证
-        </button>
+        </SettingsPrimaryButton>
       </div>
 
       <div role="group" aria-label="Account List" className="space-y-4" data-guide-id="accounts.account-list">
@@ -148,17 +121,15 @@ export function HubAccountsTab() {
             key={account.id}
             profile={account}
             busy={busyId === resolveAccountActionId(account)}
-            onSave={(_id, payload) => saveAccount(resolveAccountActionId(account), payload)}
             onDelete={() => deleteAccount(resolveAccountActionId(account))}
             onEdit={handleEdit}
           />
         ))}
       </div>
 
-      <p className="text-[13px] text-[#B59A88]">点击卡片进入编辑 →</p>
-      <p className="text-xs leading-5 text-[#B59A88]">
-        secrets 存储在启动目录下 `.cat-cafe/credentials.json`，Git 忽略。
-      </p>
+      <SettingsStatusStrip tone="muted">
+        secrets 存储在 {data.projectPath}/.cat-cafe/credentials.json，已被 Git 忽略。
+      </SettingsStatusStrip>
 
       <UnifiedAuthModal
         key={editTarget?.id ?? 'create'}

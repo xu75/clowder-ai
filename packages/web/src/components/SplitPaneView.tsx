@@ -16,6 +16,7 @@ interface SplitPaneViewProps {
     overrideThreadId?: string,
     whisper?: WhisperOptions,
     deliveryMode?: DeliveryMode,
+    replyToId?: string,
   ) => void;
   onStop: (overrideThreadId?: string) => void;
   uploadStatus?: UploadStatus;
@@ -87,16 +88,16 @@ export function SplitPaneView({ onSend, onStop, uploadStatus, uploadError, onZoo
   return (
     <div className="flex flex-col h-screen h-dvh">
       {/* Toolbar — matches single-mode header style */}
-      <header className="border-b border-cocreator-light px-5 py-3 bg-cocreator-bg flex items-center gap-2 flex-shrink-0">
+      <header className="border-b border-cafe-subtle px-5 py-3 bg-cafe-surface flex items-center gap-2 flex-shrink-0">
         <PawIcon className="text-2xl" />
         <div className="flex-1 min-w-0">
           <h1 className="text-lg font-bold text-cafe-black">Clowder AI</h1>
           <p className="text-xs text-cafe-secondary">分屏模式</p>
         </div>
-        <span className="text-[10px] text-cafe-muted hidden sm:inline mr-1">⌘\ 切换</span>
+        <span className="text-micro text-cafe-muted hidden sm:inline mr-1">⌘\ 切换</span>
         <button
           onClick={handleBackToSingle}
-          className="p-1 rounded-lg hover:bg-cocreator-light transition-colors"
+          className="p-1 rounded-lg hover:bg-cafe-surface-sunken transition-colors"
           aria-label="切换单屏模式"
           title="返回单屏"
         >
@@ -132,9 +133,9 @@ export function SplitPaneView({ onSend, onStop, uploadStatus, uploadError, onZoo
           </div>
 
           {/* Shared input bar */}
-          <div className="border-t border-cocreator-light bg-cafe-surface px-3 py-2">
+          <div className="border-t border-cafe-subtle bg-cafe-surface px-3 py-2">
             <div className="flex items-center gap-2 mb-1">
-              <span className="text-[10px] text-cafe-muted">
+              <span className="text-micro text-cafe-muted">
                 {splitPaneTargetId
                   ? `发往: ${threadMap.get(splitPaneTargetId)?.title ?? splitPaneTargetId}`
                   : '请选择一个窗格'}
@@ -143,8 +144,8 @@ export function SplitPaneView({ onSend, onStop, uploadStatus, uploadError, onZoo
             <ChatInput
               key={splitPaneTargetId ?? 'no-target'}
               threadId={splitPaneTargetId ?? undefined}
-              onSend={(content, images, whisper, deliveryMode) =>
-                onSend(content, images, splitPaneTargetId ?? undefined, whisper, deliveryMode)
+              onSend={(content, images, whisper, deliveryMode, replyToId) =>
+                onSend(content, images, splitPaneTargetId ?? undefined, whisper, deliveryMode, replyToId)
               }
               onStop={() => onStop(splitPaneTargetId ?? undefined)}
               disabled={!splitPaneTargetId}

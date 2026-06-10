@@ -41,13 +41,31 @@ export interface IStreamableOutboundAdapter extends IOutboundAdapter {
   sendPlaceholder(externalChatId: string, text: string): Promise<string>;
   /** Edit an already-sent message in place. */
   editMessage(externalChatId: string, platformMessageId: string, text: string): Promise<void>;
-  /** Delete a message by platform message ID (cleanup after streaming). */
-  deleteMessage?(platformMessageId: string): Promise<void>;
+  /**
+   * Delete a message by platform message ID (cleanup after streaming).
+   * externalChatId should be provided by callers that have it (e.g. StreamingOutboundHook),
+   * because Telegram message_ids are only unique within a single chat.
+   */
+  deleteMessage?(platformMessageId: string, externalChatId?: string): Promise<void>;
   /**
    * F157: Edit a streaming placeholder to a minimal completion state (e.g. "✅ 已回复").
    * When present, cleanup prefers this over deleteMessage to avoid "recall" notifications.
    */
   finalizeStreamCard?(externalChatId: string, platformMessageId: string, catDisplayName: string): Promise<void>;
+  /**
+   * K2: Register a pending inline-final placeholder.
+   * The next sendReply/sendRichMessage to this chatId will edit this placeholder
+   * instead of sending a new message. Consumed on first use.
+   * When present, onStreamEnd uses this path instead of deleteMessage/finalizeStreamCard.
+   */
+  registerInlinePlaceholder?(externalChatId: string, platformMessageId: string): void;
+  /**
+   * K2: Clear a registered inline-final placeholder without delivering content.
+   * Called by StreamingOutboundHook.cleanupPlaceholders when delivery is skipped,
+   * so the stale entry does not corrupt the next delivery for this chatId.
+   * If the placeholder was already consumed by a successful delivery, this is a no-op.
+   */
+  clearInlinePlaceholder?(chatId: string, platformMessageId?: string): Promise<void>;
 }
 
 export interface ThreadMeta {

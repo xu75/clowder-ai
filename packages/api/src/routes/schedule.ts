@@ -19,6 +19,7 @@ import type {
   InvocationRecord,
   InvocationRegistry,
 } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
+import { resolveCatTarget } from '../domains/cats/services/agents/routing/cat-target-resolver.js';
 import type { ITaskStore } from '../domains/cats/services/stores/ports/TaskStore.js';
 import type { DynamicTaskStore } from '../infrastructure/scheduler/DynamicTaskStore.js';
 import type { GlobalControlStore } from '../infrastructure/scheduler/GlobalControlStore.js';
@@ -86,6 +87,7 @@ function addSubjectKeyWithAliases(target: Set<string>, subjectKey: string): void
   target.add(subjectKey);
   if (subjectKey.startsWith('pr:')) target.add(`pr-${subjectKey.slice(3)}`);
   if (subjectKey.startsWith('pr-')) target.add(`pr:${subjectKey.slice(3)}`);
+  // F202 Phase 2D: issue subject keys have no legacy alias format
 }
 
 type DeliveryThreadResolutionCode = 'STALE_INVOCATION';
@@ -179,6 +181,8 @@ export const scheduleRoutes: FastifyPluginAsync<ScheduleRoutesOptions> = async (
       if (t.subjectKey.startsWith('pr:') || t.subjectKey.startsWith('pr-')) activeThreadSubjectKinds.add('pr');
       else if (t.subjectKey.startsWith('thread:') || t.subjectKey.startsWith('thread-')) {
         activeThreadSubjectKinds.add('thread');
+      } else if (t.subjectKey.startsWith('issue:')) {
+        activeThreadSubjectKinds.add('issue');
       }
     }
     // Also match thread-prefixed subject keys (dynamic/thread-scoped tasks)
@@ -396,6 +400,16 @@ export const scheduleRoutes: FastifyPluginAsync<ScheduleRoutesOptions> = async (
     if (typeof params !== 'object' || params === null || Array.isArray(params)) {
       reply.status(400);
       return { error: 'params must be a plain object' };
+    }
+
+    // F182 AC-C2: B class — validate params.targetCatId is available (contract 400 on disabled)
+    if (params.targetCatId && typeof params.targetCatId === 'string') {
+      const resolved = resolveCatTarget(params.targetCatId);
+      if ('error' in resolved) {
+        reply.status(400);
+        return resolved.error;
+      }
+      params.targetCatId = resolved.ok;
     }
 
     const actor = deriveScheduleActor(request, body);

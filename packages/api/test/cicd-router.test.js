@@ -315,6 +315,77 @@ describe('CiCdRouter', () => {
     });
   });
 
+  // ── F192 Phase G: onPrLifecycle callback ────────────────────────
+
+  describe('F192 Phase G: onPrLifecycle callback', () => {
+    it('emits merge event on merged PR', async () => {
+      const events = [];
+      const router = new CiCdRouter({
+        taskStore: prTracking.taskStore,
+        deliveryDeps: { messageStore: messageMock.store, socketManager: socketMock.manager },
+        log: noopLog(),
+        onPrLifecycle: (e) => events.push(e),
+      });
+      prTracking.register({
+        repoFullName: 'zts212653/cat-cafe',
+        prNumber: 42,
+        catId: 'opus',
+        threadId: 'thread-abc',
+        userId: 'user-1',
+      });
+
+      await router.route(makePollResult({ prState: 'merged' }));
+
+      assert.strictEqual(events.length, 1);
+      assert.strictEqual(events[0].type, 'merge');
+      assert.strictEqual(events[0].outcome, 'success');
+      assert.strictEqual(events[0].threadId, 'thread-abc');
+      assert.strictEqual(events[0].ref, 'PR#42');
+    });
+
+    it('does NOT emit on closed PR (closed ≠ revert)', async () => {
+      const events = [];
+      const router = new CiCdRouter({
+        taskStore: prTracking.taskStore,
+        deliveryDeps: { messageStore: messageMock.store, socketManager: socketMock.manager },
+        log: noopLog(),
+        onPrLifecycle: (e) => events.push(e),
+      });
+      prTracking.register({
+        repoFullName: 'zts212653/cat-cafe',
+        prNumber: 42,
+        catId: 'opus',
+        threadId: 'thread-abc',
+        userId: 'user-1',
+      });
+
+      await router.route(makePollResult({ prState: 'closed' }));
+
+      assert.strictEqual(events.length, 0, 'closed PR must not emit A1 signal');
+    });
+
+    it('does NOT emit on open PR', async () => {
+      const events = [];
+      const router = new CiCdRouter({
+        taskStore: prTracking.taskStore,
+        deliveryDeps: { messageStore: messageMock.store, socketManager: socketMock.manager },
+        log: noopLog(),
+        onPrLifecycle: (e) => events.push(e),
+      });
+      prTracking.register({
+        repoFullName: 'zts212653/cat-cafe',
+        prNumber: 42,
+        catId: 'opus',
+        threadId: 'thread-abc',
+        userId: 'user-1',
+      });
+
+      await router.route(makePollResult({ prState: 'open', aggregateBucket: 'pass' }));
+
+      assert.strictEqual(events.length, 0);
+    });
+  });
+
   // ── AC-A10: patchCiState does not reset registeredAt ────────────
 
   describe('patchCiState preservation (AC-A10)', () => {
@@ -358,6 +429,58 @@ describe('CiCdRouter', () => {
       assert.strictEqual(result.kind, 'skipped');
       assert.ok(result.reason.includes('disabled'));
       assert.strictEqual(messageMock.messages.length, 0);
+    });
+
+    it('R2-P1-A: automation off calls notifySkip with threadId and reason', async () => {
+      const skipCalls = /** @type {Array<{threadId: string, reason: string}>} */ ([]);
+      const router = new CiCdRouter({
+        taskStore: prTracking.taskStore,
+        deliveryDeps: { messageStore: messageMock.store, socketManager: socketMock.manager },
+        log: noopLog(),
+        notifySkip: (threadId, reason) => {
+          skipCalls.push({ threadId, reason });
+        },
+      });
+      const task = prTracking.register({
+        repoFullName: 'zts212653/cat-cafe',
+        prNumber: 42,
+        catId: 'opus',
+        threadId: 'thread-abc',
+        userId: 'user-1',
+      });
+      prTracking.taskStore.patchAutomationState(task.id, { ci: { enabled: false } });
+
+      await router.route(makePollResult());
+
+      assert.strictEqual(skipCalls.length, 1, 'notifySkip must be called for automation off');
+      assert.strictEqual(skipCalls[0].threadId, 'thread-abc');
+      assert.strictEqual(skipCalls[0].reason, 'ci_automation_disabled');
+    });
+
+    it('cloud-P2: automation off notifySkip fires only once across multiple polls', async () => {
+      const skipCalls = /** @type {Array<{threadId: string, reason: string}>} */ ([]);
+      const router = new CiCdRouter({
+        taskStore: prTracking.taskStore,
+        deliveryDeps: { messageStore: messageMock.store, socketManager: socketMock.manager },
+        log: noopLog(),
+        notifySkip: (threadId, reason) => {
+          skipCalls.push({ threadId, reason });
+        },
+      });
+      const task = prTracking.register({
+        repoFullName: 'zts212653/cat-cafe',
+        prNumber: 42,
+        catId: 'opus',
+        threadId: 'thread-abc',
+        userId: 'user-1',
+      });
+      prTracking.taskStore.patchAutomationState(task.id, { ci: { enabled: false } });
+
+      await router.route(makePollResult());
+      await router.route(makePollResult());
+      await router.route(makePollResult());
+
+      assert.strictEqual(skipCalls.length, 1, 'notifySkip must fire only once, not on every poll cycle');
     });
   });
 

@@ -1,18 +1,30 @@
 'use client';
 
-import type { ReplyPreview, SchedulerMessageExtra } from '@cat-cafe/shared';
+import type { CliDiagnostics, ReplyPreview, SchedulerMessageExtra } from '@cat-cafe/shared';
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { getBubbleInvocationId, shouldForceReplaceHydrationForCachedMessages } from '@/debug/bubbleIdentity';
 import { recordDebugEvent } from '@/debug/invocationEventDebug';
+import { projectCanonicalBubbles } from '@/stores/bubble-projection';
 import type { QueueEntry, TaskProgressItem } from '@/stores/chat-types';
 import { type CatInvocationInfo, type ChatMessage as ChatMessageData, useChatStore } from '@/stores/chatStore';
 import type { TaskItem } from '@/stores/taskStore';
 import { useTaskStore } from '@/stores/taskStore';
+import { crossesUserTurnBoundary } from '@/stores/turn-boundary';
 import { apiFetch } from '@/utils/api-client';
+import { resolveCrossPostScrollTarget } from '@/utils/crosspost-scroll-target';
 import {
   loadThreadMessages as loadCachedMessages,
+  loadThreadActiveState,
   saveThreadMessages as saveMessagesSnapshot,
+  saveThreadActiveState,
 } from '@/utils/offline-store';
+import { scrollToMessage } from '@/utils/scrollToMessage';
+import {
+  peekPendingTeleport,
+  resolvePendingTeleport,
+  shouldLoadOlderForTeleport,
+  TELEPORT_RESOLVE_EVENT,
+} from '@/utils/teleport';
 
 type SavedScrollState = {
   top: number;
@@ -31,6 +43,21 @@ export function __resetTaskCacheForTest() {
   taskCacheByThread.clear();
 }
 
+export function deriveQueueHydrationTargetCats({
+  intentMode,
+  previousTargetCats,
+  activeCatIds,
+}: {
+  intentMode: 'execute' | 'ideate' | null | undefined;
+  previousTargetCats: string[];
+  activeCatIds: string[];
+}): string[] {
+  if (intentMode === 'ideate' && previousTargetCats.length > 0 && activeCatIds.length > 0) {
+    return Array.from(new Set([...previousTargetCats, ...activeCatIds]));
+  }
+  return activeCatIds;
+}
+
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.clientHeight - el.scrollTop <= SCROLL_BOTTOM_THRESHOLD_PX;
 }
@@ -46,6 +73,7 @@ const HISTORY_PAGE_SIZE = 50;
 // In export mode (?export=true), load all messages in one request for screenshot capture.
 // Normal browsing still uses 50-per-page pagination.
 const EXPORT_LIMIT = 10000;
+const DRAFT_LIVE_MERGE_ACTIVITY_WINDOW_MS = 5 * 60 * 1000;
 function isAbortError(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'name' in err && (err as { name?: string }).name === 'AbortError';
 }
@@ -65,19 +93,27 @@ type MessageExtra = NonNullable<ChatMessageData['extra']>;
 type MessageRichPayload = MessageExtra['rich'];
 
 function getHistoryInvocationId(msg: ChatMessageData): string | undefined {
+  if (msg.extra?.isExplicitPost) return undefined;
   return getBubbleInvocationId(msg);
 }
 
-function getLocalPlaceholderInvocationId(
+// Exported for unit testing (R20 cloud Codex P1: catInvocations fallback turn-priority).
+export function getLocalPlaceholderInvocationId(
   msg: ChatMessageData,
   currentCatInvocations: Record<string, CatInvocationInfo>,
 ): string | undefined {
-  if (msg.extra?.stream?.invocationId) return msg.extra.stream.invocationId;
-  // Fallback: draft messages have id = 'draft-{invocationId}' — extract even after
-  // isStreaming is cleared by the done handler (prevents duplicate bubbles).
-  if (msg.id.startsWith('draft-')) return msg.id.slice('draft-'.length);
+  if (msg.extra?.isExplicitPost) return undefined;
+  // F194 Phase Z3 P1-2 (砚砚 R): MUST share `getBubbleInvocationId` priority order
+  // (turnInvocationId > invocationId > draft id slice). Otherwise current/local placeholder uses
+  // parent key while history bubble uses turn key → 刷新前后 merge 路径不一致。
+  const bubbleInvId = getBubbleInvocationId(msg);
+  if (bubbleInvId) return bubbleInvId;
   if (msg.type !== 'assistant' || msg.origin !== 'stream' || !msg.isStreaming || !msg.catId) return undefined;
-  return currentCatInvocations[msg.catId]?.invocationId;
+  // F194 Phase Z3 R20 (cloud Codex P1): catInvocations fallback also prefers turn id when present.
+  // Otherwise placeholder (no extra.stream yet) resolves to parent while history bubble resolves
+  // to turn → same-parent multi-turn loses stable-key merge → both bubbles persist post-hydrate.
+  const catInv = currentCatInvocations[msg.catId];
+  return catInv?.turnInvocationId ?? catInv?.invocationId;
 }
 
 function getMessageRichness(msg: ChatMessageData): [number, number, number, number] {
@@ -135,8 +171,26 @@ function mergeMessageExtra(
   const targetCats = preferred?.targetCats ?? fallback?.targetCats;
   const scheduler = preferred?.scheduler ?? fallback?.scheduler;
   const timeoutDiagnostics = preferred?.timeoutDiagnostics ?? fallback?.timeoutDiagnostics;
+  // F212 Phase B: preserve cliDiagnostics when merging history (mirrors timeoutDiagnostics —
+  // diagnostics outlive a single live event and must survive hydration after F5 / re-fetch).
+  const cliDiagnostics = preferred?.cliDiagnostics ?? fallback?.cliDiagnostics;
   const governanceBlocked = preferred?.governanceBlocked ?? fallback?.governanceBlocked;
-  if (!rich && !crossPost && !stream && !targetCats && !scheduler && !timeoutDiagnostics && !governanceBlocked) {
+  const systemKind = preferred?.systemKind ?? fallback?.systemKind;
+  // #814 P2: preserve isExplicitPost so F5/thread-switch doesn't lose the
+  // "don't merge by invocation" semantic for explicit post_message callbacks.
+  const isExplicitPost = preferred?.isExplicitPost ?? fallback?.isExplicitPost;
+  if (
+    !rich &&
+    !crossPost &&
+    !stream &&
+    !targetCats &&
+    !scheduler &&
+    !timeoutDiagnostics &&
+    !cliDiagnostics &&
+    !governanceBlocked &&
+    !systemKind &&
+    !isExplicitPost
+  ) {
     return undefined;
   }
   return {
@@ -146,12 +200,55 @@ function mergeMessageExtra(
     ...(targetCats ? { targetCats } : {}),
     ...(scheduler ? { scheduler } : {}),
     ...(timeoutDiagnostics ? { timeoutDiagnostics } : {}),
+    ...(cliDiagnostics ? { cliDiagnostics } : {}),
     ...(governanceBlocked ? { governanceBlocked } : {}),
+    ...(systemKind ? { systemKind } : {}),
+    ...(isExplicitPost ? { isExplicitPost: true as const } : {}),
   };
 }
 
 function getMessageOrderTimestamp(msg: ChatMessageData): number {
   return msg.deliveredAt ?? msg.timestamp;
+}
+
+function getMessageActivityTimestamp(msg: ChatMessageData): number {
+  const toolTimestamps =
+    msg.toolEvents
+      ?.map((event) => event.timestamp)
+      .filter((timestamp): timestamp is number => typeof timestamp === 'number' && Number.isFinite(timestamp)) ?? [];
+  return Math.max(getMessageOrderTimestamp(msg), ...toolTimestamps);
+}
+
+function getComparableMessageText(msg: ChatMessageData): string {
+  return [msg.content, msg.thinking]
+    .filter((text): text is string => Boolean(text?.trim()))
+    .join('\n')
+    .trim();
+}
+
+function hasStreamActivity(msg: ChatMessageData): boolean {
+  if (getComparableMessageText(msg)) return true;
+  if (msg.toolEvents?.length) return true;
+  return Boolean(msg.extra?.rich?.blocks.length);
+}
+
+function hasContentProximity(current: ChatMessageData, draft: ChatMessageData): boolean {
+  const currentText = getComparableMessageText(current);
+  const draftText = getComparableMessageText(draft);
+  // Without text on both sides, same-cat + recency is not enough identity
+  // evidence: a stale tool-only bubble can otherwise capture a new draft.
+  if (!currentText) return false;
+  if (!draftText) return false;
+  if (currentText.includes(draftText)) return true;
+  return draftText.includes(currentText);
+}
+
+function canBindInvocationlessLiveToDraft(current: ChatMessageData, draft: ChatMessageData): boolean {
+  if (!hasStreamActivity(current)) return false;
+  const currentActivityAt = getMessageActivityTimestamp(current);
+  const draftActivityAt = getMessageActivityTimestamp(draft);
+  if (Math.abs(currentActivityAt - draftActivityAt) > DRAFT_LIVE_MERGE_ACTIVITY_WINDOW_MS) return false;
+  return hasContentProximity(current, draft);
 }
 
 function shouldPreferCurrentMessage(current: ChatMessageData, history: ChatMessageData): boolean {
@@ -231,7 +328,17 @@ function mergeSameIdHydrationMessage(history: ChatMessageData, current: ChatMess
   };
 }
 
-function mergeReplaceHydrationMessages(
+// F183 Phase B1 AC-B2: 简化到 ≤ 2 种匹配策略。
+// 旧版有 4 条逻辑分支（id 匹配 → mergeSameId / streamKey 匹配 → 偏好选择 / draft 孤儿
+// 守卫 / 默认保留），并各自重复 historyIds Set + historyIndexByStreamKey Map 两份索引。
+// 简化后：
+//   1. **stable-identity 匹配（统一）**：构建单一索引 `historyIndexByStableId`，
+//      同时收 (id) 和 (streamKey) 键 → 单次 lookup 拿到 history 目标 index
+//   2. **未匹配**：默认 keep，但走 draft-orphan 副过滤器（不算独立匹配策略）
+// 行为不变：matched-by-id 走 mergeSameIdHydrationMessage；matched-by-streamKey
+// 走 shouldPreferCurrentMessage。统计字段语义不变。
+/** Exported for unit testing — see __tests__/mergeReplaceHydrationMessages-idb.test.ts */
+export function mergeReplaceHydrationMessages(
   historyMsgs: ChatMessageData[],
   currentMsgs: ChatMessageData[],
   currentCatInvocations: Record<string, CatInvocationInfo>,
@@ -243,61 +350,114 @@ function mergeReplaceHydrationMessages(
     };
   }
 
-  const historyIds = new Set(historyMsgs.map((msg) => msg.id));
-  const mergedMsgs = [...historyMsgs];
-  const historyIndexByStreamKey = new Map<string, number>();
-
+  // 单一索引: id ∪ (catId:invocationId) streamKey 都进同一个 Map。
+  // matchKind 区分 lookup 命中是 id 还是 streamKey（决定 merge action）。
+  // 当一个 invocation 在 history 里有多条 bubble（如 stream + 后续 callback），
+  // streamKey 命名空间内取 **last wins**（与 refactor 前 historyIndexByStreamKey
+  // 直接 Map.set 覆盖语义一致）—— 否则 reconciliation 会瞄到 stale earlier
+  // 条目，让 local placeholder 替换掉早期 stream bubble，留下两条 invocation
+  // 重复气泡（cloud Codex P1）。id 命名空间不被 streamKey 覆盖。
+  const historyIndexByStableId = new Map<string, { index: number; matchKind: 'id' | 'stream-key' }>();
+  const uniqueDraftByCat = new Map<string, { index: number; invocationId: string; message: ChatMessageData }>();
+  const ambiguousDraftCats = new Set<string>();
   for (let i = 0; i < historyMsgs.length; i++) {
     const msg = historyMsgs[i]!;
+    historyIndexByStableId.set(msg.id, { index: i, matchKind: 'id' });
     const invocationId = msg.catId ? getHistoryInvocationId(msg) : undefined;
-    if (!msg.catId || !invocationId) continue;
-    historyIndexByStreamKey.set(`${msg.catId}:${invocationId}`, i);
+    if (msg.catId && invocationId) {
+      const streamKey = `${msg.catId}:${invocationId}`;
+      const existing = historyIndexByStableId.get(streamKey);
+      if (!existing || existing.matchKind === 'stream-key') {
+        historyIndexByStableId.set(streamKey, { index: i, matchKind: 'stream-key' });
+      }
+      if (msg.id.startsWith('draft-') && msg.origin === 'stream') {
+        if (uniqueDraftByCat.has(msg.catId)) {
+          uniqueDraftByCat.delete(msg.catId);
+          ambiguousDraftCats.add(msg.catId);
+          continue;
+        }
+        if (!ambiguousDraftCats.has(msg.catId)) {
+          uniqueDraftByCat.set(msg.catId, { index: i, invocationId, message: msg });
+        }
+      }
+    }
   }
 
+  const mergedMsgs = [...historyMsgs];
   let preservedLocalCount = 0;
   let reconciledToHistoryCount = 0;
   let replacedHistoryCount = 0;
 
   for (const msg of currentMsgs) {
-    if (historyIds.has(msg.id)) {
-      const historyIndex = mergedMsgs.findIndex((candidate) => candidate.id === msg.id);
-      if (historyIndex !== -1) {
-        mergedMsgs[historyIndex] = mergeSameIdHydrationMessage(mergedMsgs[historyIndex]!, msg);
+    // F183 Phase D AC-D2 (砚砚 R1 P1 fix): IDB-origin messages NEVER participate
+    // in the merge — server history is authoritative. Skip BEFORE id/streamKey
+    // matching so cached IDB never enters mergeSameIdHydrationMessage (which
+    // could spread cachedFrom into a "richer-current preferred" outcome) nor
+    // the streamKey replacement branch (which would write the cached msg
+    // verbatim into mergedMsgs). For matched cases history stays in mergedMsgs
+    // as-is; for unmatched, the cached copy is dropped. F164 AC-A3 instant
+    // render still works: IDB hydrates first paint, API hydration replaces
+    // cleanly without cache leakage.
+    if (msg.cachedFrom === 'idb') {
+      continue;
+    }
+
+    // Strategy: stable-identity lookup. id 优先于 streamKey（id 命中走 same-id 合并）。
+    const idHit = historyIndexByStableId.get(msg.id);
+    const invocationId = msg.catId ? getLocalPlaceholderInvocationId(msg, currentCatInvocations) : undefined;
+    const streamKey = msg.catId && invocationId ? `${msg.catId}:${invocationId}` : undefined;
+    const streamHit = streamKey ? historyIndexByStableId.get(streamKey) : undefined;
+    let target = idHit?.matchKind === 'id' ? idHit : streamHit?.matchKind === 'stream-key' ? streamHit : undefined;
+    let msgForMerge = msg;
+    if (
+      target?.matchKind === 'stream-key' &&
+      mergedMsgs[target.index]?.id !== msg.id &&
+      crossesUserTurnBoundary([...historyMsgs, ...currentMsgs], mergedMsgs[target.index]!, msg)
+    ) {
+      target = undefined;
+    }
+
+    // Live race: active stream may start as invocationless, while `/api/messages`
+    // already returns the running server draft `draft-{invocationId}` for the same
+    // cat. If catInvocations missed the binding, streamKey matching cannot fire and
+    // the UI keeps two bubbles. When there is exactly one server draft for that cat,
+    // backfill the draft invocationId into the local live bubble and merge them.
+    if (
+      !target &&
+      msg.type === 'assistant' &&
+      msg.catId &&
+      msg.origin === 'stream' &&
+      msg.isStreaming &&
+      !msg.extra?.stream?.invocationId
+    ) {
+      const draftCandidate = uniqueDraftByCat.get(msg.catId);
+      if (draftCandidate && canBindInvocationlessLiveToDraft(msg, draftCandidate.message)) {
+        target = { index: draftCandidate.index, matchKind: 'stream-key' };
+        msgForMerge = {
+          ...msg,
+          extra: mergeMessageExtra({ stream: { invocationId: draftCandidate.invocationId } }, msg.extra),
+        };
+      }
+    }
+
+    if (target) {
+      const historyMsg = mergedMsgs[target.index]!;
+      if (target.matchKind === 'id') {
+        mergedMsgs[target.index] = mergeSameIdHydrationMessage(historyMsg, msgForMerge);
+      } else if (shouldPreferCurrentMessage(msg, historyMsg)) {
+        mergedMsgs[target.index] = mergeSameIdHydrationMessage(historyMsg, msgForMerge);
+        replacedHistoryCount++;
+      } else {
+        reconciledToHistoryCount++;
       }
       continue;
     }
 
-    const invocationId = msg.catId ? getLocalPlaceholderInvocationId(msg, currentCatInvocations) : undefined;
-    const streamKey = msg.catId && invocationId ? `${msg.catId}:${invocationId}` : undefined;
-
-    if (streamKey) {
-      const historyIndex = historyIndexByStreamKey.get(streamKey);
-      if (historyIndex !== undefined) {
-        const historyMsg = mergedMsgs[historyIndex]!;
-        if (shouldPreferCurrentMessage(msg, historyMsg)) {
-          mergedMsgs[historyIndex] = msg;
-          replacedHistoryCount++;
-        } else {
-          reconciledToHistoryCount++;
-        }
-        continue;
-      }
-    }
-
-    // F173 Phase C Task 9 — narrow ghost-tolerance guard (cloud Codex P1).
-    // Drop only the precise orphan-draft shape: id startsWith 'draft-' AND
-    // no live invocation in catInvocations claims its invocationId.
-    //
-    // Why narrow to draft-*:
-    //   - IDB-cached orphan drafts (hotfix3-filtered) always carry id
-    //     'draft-{invocationId}' (DraftStore write path).
-    //   - Just-completed live bubbles use 'msg-{inv}-{cat}' shape and may
-    //     have catInvocations cleared by the done handler before the server
-    //     persists them. An overly broad guard would drop those legitimate
-    //     bubbles on a fast thread switch — Codex P1 caught this.
-    //
-    // Result: orphan IDB drafts dropped; live just-completed bubbles preserved
-    // until server GET returns authoritative replacement.
+    // Side filter (not a matching strategy): F173 Phase C Task 9 narrow ghost-tolerance.
+    // Drop only the precise orphan-draft shape — IDB-cached orphans carrying id
+    // 'draft-{invocationId}' AND no live invocation claims that invocationId.
+    // Live just-completed bubbles use 'msg-{inv}-{cat}' shape and survive (cloud
+    // Codex P1 — overly broad guard would drop legitimate bubbles on fast thread switch).
     if (invocationId && msg.id.startsWith('draft-')) {
       const knownToLiveInvocation = Object.values(currentCatInvocations).some(
         (info) => info.invocationId === invocationId,
@@ -346,6 +506,7 @@ export function useChatHistory(threadId: string) {
     updateThreadCatStatus,
     setQueue,
     setQueuePaused,
+    isOfflineSnapshot,
   } = useChatStore();
   const { setTasks } = useTaskStore();
 
@@ -432,6 +593,57 @@ export function useChatHistory(threadId: string) {
     [cancelPendingRestore],
   );
 
+  // F052: after a cross-post jump, retry scrolling to the source bubble until the message
+  // DOM has rendered (thread switch remounts + paginates async). Gives up after
+  // MAX_RESTORE_FRAMES so a paged-out source can't spin forever — the caller already fell
+  // back to default scroll-restore in that case. Stale-guarded by threadIdRef like scheduleRestore.
+  const scheduleScrollToMessage = useCallback(
+    (messageId: string) => {
+      // A cross-post jump preempts the default scroll-restore so the two raf loops don't fight
+      // over scrollTop (restore pulls to cached offset, this pulls to the target bubble).
+      cancelPendingRestore();
+      const scheduledForThread = threadIdRef.current;
+      let framesRemaining = MAX_RESTORE_FRAMES;
+      const tick = () => {
+        if (threadIdRef.current !== scheduledForThread) return;
+        if (scrollToMessage(messageId)) return;
+        framesRemaining -= 1;
+        if (framesRemaining <= 0) return;
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    },
+    [cancelPendingRestore],
+  );
+
+  // Fix: /queue returns before /messages. If /queue says idle it clears
+  // hasActiveInvocation. When /messages then returns draft messages (isDraft=true,
+  // meaning a cat is still streaming), we must restore the active invocation state
+  // so the cancel button stays visible.
+  const restoreActiveFromDrafts = useCallback(
+    (forThread: string, rawMessages: Array<{ isDraft?: boolean; catId?: string }>) => {
+      const draftCatIds = [...new Set(rawMessages.filter((m) => m.isDraft && m.catId).map((m) => m.catId!))];
+      if (draftCatIds.length === 0) return;
+
+      const store = useChatStore.getState();
+      const isCurrentThread = store.currentThreadId === forThread;
+      const threadState = store.threadStates[forThread];
+      const alreadyActive = isCurrentThread ? store.hasActiveInvocation : threadState?.hasActiveInvocation === true;
+      if (alreadyActive) return;
+
+      store.setThreadHasActiveInvocation(forThread, true);
+      for (const catId of draftCatIds) {
+        const syntheticId = `hydrated-${forThread}-${catId}`;
+        if (isCurrentThread) {
+          store.addActiveInvocation(syntheticId, catId, 'execute');
+        } else {
+          store.addThreadActiveInvocation(forThread, syntheticId, catId, 'execute');
+        }
+      }
+    },
+    [],
+  );
+
   // Fetch history page from API
   // When replace=true, clears existing messages before setting (used for force-refresh).
   const fetchHistory = useCallback(
@@ -465,7 +677,14 @@ export function useChatHistory(threadId: string) {
             content: string;
             contentBlocks?: unknown[];
             toolEvents?: unknown[];
-            metadata?: { provider: string; model: string; sessionId?: string };
+            metadata?: {
+              provider: string;
+              model: string;
+              sessionId?: string;
+              /** F212 Phase B (云端 codex P2 2026-05-27): stored CLI diagnostics on error events;
+               *  copied into extra.cliDiagnostics below so the folded panel survives cold hydration. */
+              cliDiagnostics?: CliDiagnostics;
+            };
             origin?: 'stream' | 'callback' | 'briefing';
             thinking?: string;
             extra?: {
@@ -473,6 +692,15 @@ export function useChatHistory(threadId: string) {
               crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
               stream?: { invocationId?: string };
               scheduler?: SchedulerMessageExtra['scheduler'];
+              systemKind?: 'a2a_routing';
+              /** #814: explicit post_message bypass — survives hydration so F5/thread-switch
+               *  preserves the "don't merge by invocation" semantic. */
+              isExplicitPost?: boolean;
+              /** #814: direction pills — persisted by API, must survive hydration. */
+              targetCats?: string[];
+              /** F212 Phase B: history-loader path may already carry cliDiagnostics under
+               *  extra (when client wrote it via active-path) — prefer it over metadata copy. */
+              cliDiagnostics?: CliDiagnostics;
             };
             timestamp: number;
             summary?: { id: string; topic: string; conclusions: string[]; openQuestions: string[]; createdBy: string };
@@ -504,16 +732,38 @@ export function useChatHistory(threadId: string) {
               ...(m.metadata ? { metadata: m.metadata } : {}),
               ...(m.origin ? { origin: m.origin } : {}),
               ...(m.thinking ? { thinking: m.thinking } : {}),
-              ...(m.extra?.rich || m.extra?.crossPost || m.extra?.stream || m.extra?.scheduler
-                ? {
-                    extra: {
-                      ...(m.extra.rich ? { rich: m.extra.rich } : {}),
-                      ...(m.extra.crossPost ? { crossPost: m.extra.crossPost } : {}),
-                      ...(m.extra.stream ? { stream: m.extra.stream } : {}),
-                      ...(m.extra.scheduler ? { scheduler: m.extra.scheduler } : {}),
-                    },
-                  }
-                : {}),
+              // F212 Phase B (云端 codex P2 2026-05-27): cliDiagnostics rides on stored
+              // message metadata (Phase A providers stamp __cliError/__cliTimeout payload
+              // there). Cold hydration / F5 / re-fetch must copy it into `extra.cliDiagnostics`
+              // so ChatMessage's folded panel renders — otherwise the diagnostic panel disappears
+              // on page reload even though the stored payload still has the data.
+              // Precedence: prefer extra.cliDiagnostics (active-path may write here) over
+              // metadata.cliDiagnostics (api-persisted authoritative copy).
+              ...(() => {
+                const cliDiag = m.extra?.cliDiagnostics ?? m.metadata?.cliDiagnostics;
+                const hasExtraField =
+                  m.extra?.rich ||
+                  m.extra?.crossPost ||
+                  m.extra?.stream ||
+                  m.extra?.scheduler ||
+                  m.extra?.systemKind ||
+                  m.extra?.isExplicitPost ||
+                  m.extra?.targetCats ||
+                  cliDiag;
+                if (!hasExtraField) return {};
+                return {
+                  extra: {
+                    ...(m.extra?.rich ? { rich: m.extra.rich } : {}),
+                    ...(m.extra?.crossPost ? { crossPost: m.extra.crossPost } : {}),
+                    ...(m.extra?.stream ? { stream: m.extra.stream } : {}),
+                    ...(m.extra?.scheduler ? { scheduler: m.extra.scheduler } : {}),
+                    ...(m.extra?.systemKind ? { systemKind: m.extra.systemKind } : {}),
+                    ...(m.extra?.isExplicitPost ? { isExplicitPost: true as const } : {}),
+                    ...(m.extra?.targetCats ? { targetCats: m.extra.targetCats } : {}),
+                    ...(cliDiag ? { cliDiagnostics: cliDiag } : {}),
+                  },
+                };
+              })(),
               ...(m.summary ? { summary: m.summary } : {}),
               ...(m.visibility ? { visibility: m.visibility } : {}),
               ...(m.whisperTo ? { whisperTo: m.whisperTo } : {}),
@@ -565,10 +815,27 @@ export function useChatHistory(threadId: string) {
           // (instead of bare replaceMessages + saveMessagesSnapshot pair).
           // AC-C10: server GET 是 authoritative，IDB snapshot 必须被 GET
           // 响应覆盖而不是合并。
-          hydrateThread(fetchForThread, mergedMsgs, data.hasMore ?? false);
+          // F194 Phase Z8 AC-Z22 (KD-27 + 砚砚 R1 OQ-3): writer boundary projection
+          // — same canonical bubble rule as live reducer wrapper
+          // (applyBubbleEventWithRecovery)。raw records 进 store 前 collapse
+          // 到 1 bubble per (catId, invocationId)，确保 hydrate ≡ live。
+          const projectedMerged = projectCanonicalBubbles({ records: mergedMsgs }).messages;
+          hydrateThread(fetchForThread, projectedMerged, data.hasMore ?? false);
+          restoreActiveFromDrafts(fetchForThread, data.messages ?? []);
           return true;
         }
-        prependHistory(historyMsgs, data.hasMore ?? false);
+        // F194 Phase Z8 AC-Z22 + R2 P2 (砚砚): page-boundary projection — project
+        // (new historyMsgs ∪ existing store messages) so cross-page same-(catId, invocationId)
+        // raw records collapse into one canonical bubble. Plain prependHistory only dedupes
+        // by id, leaving canonical siblings split across page boundary.
+        const beforePrepend = useChatStore.getState().messages;
+        const unionProjected = projectCanonicalBubbles({
+          records: [...historyMsgs, ...beforePrepend],
+        }).messages;
+        // Replace store with projected union (cleaner than prepend + post-merge).
+        // hasMore propagates older-history pagination state.
+        replaceMessages(unionProjected, data.hasMore ?? false);
+        restoreActiveFromDrafts(fetchForThread, data.messages ?? []);
         // F164: Snapshot fetched messages to IndexedDB (fire-and-forget)
         const snapshotState = useChatStore.getState();
         if (snapshotState.currentThreadId === fetchForThread) {
@@ -587,7 +854,7 @@ export function useChatHistory(threadId: string) {
         }
       }
     },
-    [setLoadingHistory, prependHistory, replaceMessages, hydrateThread, threadId],
+    [setLoadingHistory, prependHistory, replaceMessages, hydrateThread, restoreActiveFromDrafts, threadId],
   );
 
   const fetchTasks = useCallback(async () => {
@@ -677,6 +944,14 @@ export function useChatHistory(threadId: string) {
     }
   }, [threadId, setCatInvocation, replaceThreadTargetCats]);
 
+  // F194 Phase Z10 (砚砚 R1 P1): track which AbortController has had a successful
+  // fetchQueue completion (active OR idle). IDB restore checks this set — if
+  // fetchQueue already wrote server truth, IDB restore must NOT overwrite
+  // (otherwise stale IDB "active" resurrects after server confirmed idle).
+  // WeakSet keys on controller so cleanup happens when controller is GC'd.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const queueFetchedControllers = useRef(new WeakSet<AbortController>()).current;
+
   // F39 Bug 1: Fetch queue state on mount/thread-switch to survive F5 refresh
   const fetchQueue = useCallback(async () => {
     const fetchForThread = threadId;
@@ -703,9 +978,27 @@ export function useChatHistory(threadId: string) {
       // Uses thread-scoped APIs so it works correctly for both active and background threads,
       // and always overwrites stale snapshots restored by setCurrentThread().
       const store = useChatStore.getState();
+      // F194 Phase Z10 AC-Z28: write-through to IDB so F5 first paint
+      // restores last-known active state (avoids R14 fake-idle gap).
+      const activeStateSnapshot: Record<string, { catId: string; mode: string; startedAt?: number }> = {};
       if (data.activeInvocations && data.activeInvocations.length > 0) {
         const activeCatIds = data.activeInvocations.map((s) => s.catId);
-        replaceThreadTargetCats(fetchForThread, activeCatIds);
+        const livenessSnapshot =
+          fetchForThread === store.currentThreadId
+            ? { intentMode: store.intentMode, targetCats: store.targetCats, catStatuses: store.catStatuses }
+            : store.threadStates[fetchForThread];
+        const hydratedTargetCats = deriveQueueHydrationTargetCats({
+          intentMode: livenessSnapshot?.intentMode,
+          previousTargetCats: livenessSnapshot?.targetCats ?? [],
+          activeCatIds,
+        });
+        const previousStatuses = livenessSnapshot?.catStatuses ?? {};
+        replaceThreadTargetCats(fetchForThread, hydratedTargetCats);
+        for (const catId of hydratedTargetCats) {
+          if (!activeCatIds.includes(catId) && previousStatuses[catId]) {
+            updateThreadCatStatus(fetchForThread, catId, previousStatuses[catId]);
+          }
+        }
         for (const catId of activeCatIds) {
           updateThreadCatStatus(fetchForThread, catId, 'streaming');
         }
@@ -723,7 +1016,13 @@ export function useChatHistory(threadId: string) {
           } else {
             store.addThreadActiveInvocation(fetchForThread, syntheticId, slot.catId, 'execute', slot.startedAt);
           }
+          activeStateSnapshot[syntheticId] = { catId: slot.catId, mode: 'execute', startedAt: slot.startedAt };
         }
+        // F194 Phase Z10 AC-Z28: persist for next F5.
+        void saveThreadActiveState(fetchForThread, {
+          hasActiveInvocation: true,
+          activeInvocations: activeStateSnapshot,
+        }).catch(() => {});
       } else {
         // Server says no active invocations — clear any stale processing state
         // that may have been restored from a threadStates snapshot.
@@ -731,7 +1030,17 @@ export function useChatHistory(threadId: string) {
         // AND the activeInvocations slot map, preventing re-derivation bugs.
         store.clearThreadActiveInvocation(fetchForThread);
         replaceThreadTargetCats(fetchForThread, []);
+        // F194 Phase Z10 AC-Z28: persist idle snapshot so F5 doesn't show
+        // stale "active" — server truth wins.
+        void saveThreadActiveState(fetchForThread, {
+          hasActiveInvocation: false,
+          activeInvocations: {},
+        }).catch(() => {});
       }
+      // F194 Phase Z10 (砚砚 R1 P1): mark controller as fetched after server
+      // truth (active OR idle) has been applied. IDB restore skips overwriting
+      // if this controller is marked — prevents stale-active resurrection.
+      queueFetchedControllers.add(controller);
     } catch (err) {
       if (isAbortError(err)) return;
     }
@@ -790,6 +1099,35 @@ export function useChatHistory(threadId: string) {
     // a previous thread's aborted fetch never leaks to the new thread.
     useChatStore.getState().setOfflineSnapshot(false);
 
+    // F194 Phase Z10 AC-Z28 (R14): restore IDB active state snapshot for F5
+    // first paint so UI doesn't show fake "idle" gap while fetchQueue is
+    // pending. fetchQueue (running in parallel via hydrateSecondaryPanels)
+    // overwrites with server truth ~100ms later. If fetchQueue completes
+    // before IDB load (unlikely — IDB faster than network), the IDB restore
+    // skips so it doesn't regress fresh server truth.
+    void (async () => {
+      try {
+        const snapshot = await loadThreadActiveState(threadId);
+        if (abortRef.current !== controller || threadIdRef.current !== threadId) return;
+        if (!snapshot) return;
+        // F194 Phase Z10 (砚砚 R1 P1): if fetchQueue already wrote server truth
+        // (active OR idle), IDB restore must NOT overwrite. The previous
+        // `currentState.hasActiveInvocation === true` check only handled the
+        // server-active case; server-idle case let stale IDB active resurrect.
+        if (queueFetchedControllers.has(controller)) return;
+        if (snapshot.hasActiveInvocation) {
+          const store = useChatStore.getState();
+          store.clearThreadActiveInvocation(threadId);
+          store.setThreadHasActiveInvocation(threadId, true);
+          for (const [invId, slot] of Object.entries(snapshot.activeInvocations)) {
+            store.addThreadActiveInvocation(threadId, invId, slot.catId, slot.mode, slot.startedAt);
+          }
+        }
+      } catch {
+        // best-effort restore; fetchQueue is the authoritative source.
+      }
+    })();
+
     const bootstrap = async () => {
       if (!hasCachedMessages) {
         // F164: Try IndexedDB snapshot before API fetch
@@ -841,19 +1179,90 @@ export function useChatHistory(threadId: string) {
   }, [threadId, cancelPendingRestore, clearMessages, fetchHistory, fetchQueue, fetchTaskProgress, fetchTasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Bug C safety net: when useAgentMessages detects done(isFinal) with no
-  // streaming bubble, it bumps streamCatchUpVersion with a target threadId.
-  // Only fetch if this hook's threadId matches the request (P1: thread-scoped).
-  const catchUpVersion = useChatStore((s) => s.streamCatchUpVersion);
-  const catchUpThreadId = useChatStore((s) => s.streamCatchUpThreadId);
+  // streaming bubble, or processThreadSeq detects gap/epoch-change, it bumps
+  // `streamCatchUpVersionByThread[threadId]`.
+  //
+  // F183 Phase C cloud P2 fix (2026-05-02): subscribe to per-thread version
+  // slot (not the previous single-slot global `streamCatchUpVersion +
+  // streamCatchUpThreadId`). Per-thread counter ensures bg gap on thread B
+  // can't overwrite active thread A's pending signal — both threads
+  // independently trigger their own fetchHistory.
+  const catchUpVersion = useChatStore((s) => s.streamCatchUpVersionByThread[threadId] ?? 0);
+  const consumedCatchUpVersion = useChatStore((s) => s.lastConsumedCatchUpVersionByThread[threadId] ?? 0);
   useEffect(() => {
     if (catchUpVersion === 0) return; // Skip initial render
-    if (catchUpThreadId !== threadId) return; // P1: only act for matching thread
-    // Small delay: backend may still be persisting the final message
-    const timer = setTimeout(() => {
-      void fetchHistory(undefined, { replace: true });
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [catchUpVersion, catchUpThreadId, threadId, fetchHistory]);
+    // Cloud R3 P2 fix (2026-05-02): only fire if version has advanced beyond
+    // last consumed. Without this, thread-switch re-mounts re-fire fetchHistory
+    // on stale catchUpVersion (already-handled trigger) → unnecessary full-history
+    // reload + state churn on routine navigation.
+    if (catchUpVersion <= consumedCatchUpVersion) return;
+    // Cloud R3 P1 fix (2026-05-02): retry on skipped/failed fetch with exponential
+    // backoff. Without retry, fetchHistory's `loadingRef.current` early-out (when
+    // another fetch is in flight) returns undefined; my `result !== true` guard
+    // correctly skips ack, but no retry was scheduled — pending hangs forever
+    // if no future event triggers another version bump (e.g. dropped tail packet
+    // on quiet thread). 3 retries with 1s/2s/4s backoff cap.
+    //
+    // Cloud R4 P1 fix (2026-05-02): retry exhaustion does NOT mark consumed.
+    // Marking consumed on exhaustion permanently gates the effect on quiet
+    // threads (no future events to bump version), so pending gap never retries
+    // on remount/thread revisit — must manually F5. Instead: leave consumed
+    // unchanged on exhaustion. Next remount (thread switch back / page nav)
+    // re-runs effect → version > consumed (consumed didn't move) → fresh
+    // retry cycle. Consumed only advances on actual fetch success.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    let retries = 0;
+    const MAX_RETRIES = 3;
+
+    const tryFetch = async () => {
+      if (cancelled) return;
+      // F183 Phase C 砚砚 R6 P1 race fix: capture pending target at fetch start,
+      // NOT at ack time. If a newer gap arrives during fetch flight, we only
+      // advance lastSeq to capturedTarget and keep newer pending for next ack.
+      const targetAtStart = useChatStore.getState().pendingCatchUpTargetSeqByThread[threadId];
+      try {
+        const result = await fetchHistory(undefined, { replace: true });
+        if (cancelled) return;
+        if (result === true) {
+          // Success: ack catchup target + mark consumed (gates remount re-fire)
+          useChatStore.getState().setLastConsumedCatchUpVersion(threadId, catchUpVersion);
+          if (typeof targetAtStart === 'number' && targetAtStart > 0) {
+            useChatStore.getState().acknowledgeCatchUp(threadId, targetAtStart);
+          }
+          return;
+        }
+        // Skipped (loadingRef early-out / !res.ok / stale thread / abort) — retry
+        if (retries < MAX_RETRIES) {
+          retries++;
+          const backoff = 1000 * 2 ** (retries - 1); // 1s, 2s, 4s
+          timer = setTimeout(tryFetch, backoff);
+        }
+        // Cloud R4 P1 fix (2026-05-02): exhausted retries — DO NOT mark consumed.
+        // Marking consumed here permanently gates the effect on quiet threads
+        // (no future events to bump version), so the pending gap never retries
+        // on remount/thread revisit. Leave consumed unchanged — next remount
+        // (e.g. thread switch back, page navigation) re-runs the effect with
+        // fresh retry cycle. New gap event bumps version → still triggers normally.
+      } catch {
+        if (cancelled) return;
+        if (retries < MAX_RETRIES) {
+          retries++;
+          const backoff = 1000 * 2 ** (retries - 1);
+          timer = setTimeout(tryFetch, backoff);
+        }
+        // Cloud R4 P1: same — no setLastConsumedCatchUpVersion on exhaustion.
+      }
+    };
+
+    // Initial 600ms debounce: collapses bursts of catch-up requests (e.g. multiple
+    // gap events during a stream) into one fetchHistory call via timer cancel-restart.
+    timer = setTimeout(tryFetch, 600);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [catchUpVersion, consumedCatchUpVersion, threadId, fetchHistory]);
 
   // Snapshot scroll height before history load
   useEffect(() => {
@@ -889,6 +1298,9 @@ export function useChatHistory(threadId: string) {
     // Initial load (includes remount after thread switch — prevCountRef resets to 0).
     // clowder-ai#27: check module-level Map for a saved position before scrolling to bottom.
     if (prevCount === 0) {
+      // Default scroll-restore. A pending cross-post jump is handled by the dedicated effect
+      // below (it runs after this one and cancels this restore on a hit) — kept separate so the
+      // jump survives the IDB-snapshot → fresh-API two-phase load (砚砚 R1 P1).
       scheduleRestore(scrollPositionsByThread.get(threadId) ?? { top: 0, anchor: 'bottom' });
       return;
     }
@@ -916,6 +1328,64 @@ export function useChatHistory(threadId: string) {
       }
     }
   }, [messages, scheduleRestore, threadId]);
+
+  // F052 + 砚砚 R1 P1: resolve a pending cross-post scroll across BOTH the tentative IDB-snapshot
+  // phase and the authoritative fresh-API phase. Kept independent of the scroll-restore effect
+  // above so it re-runs when isOfflineSnapshot flips true→false (fresh page replaces the stale
+  // snapshot). A hit scrolls + consumes; a miss only gives up once authoritative
+  // (isOfflineSnapshot=false), so a stale-snapshot miss keeps the jump alive for the fresh page.
+  useEffect(() => {
+    if (messages.length === 0) return;
+    if (useChatStore.getState().currentThreadId !== threadId) return;
+    const targetId = resolveCrossPostScrollTarget(threadId, messages, { authoritative: !isOfflineSnapshot });
+    if (targetId) scheduleScrollToMessage(targetId);
+  }, [messages, threadId, isOfflineSnapshot, scheduleScrollToMessage]);
+
+  // F227: resolve a pending teleport (from cat_cafe_teleport → Event Memory) the
+  // same way as cross-post — across the tentative IDB snapshot + the authoritative
+  // fresh page. Takes a real messageId directly (no invocationId lookup).
+  // P1-1/P1 (砚砚): resolve a pending teleport — scroll if the target is loaded, else
+  // auto-load older pages (full-corpus events can be older than the loaded 50-msg window).
+  // Only finalize a miss (consume + give up) when this is the authoritative fresh page AND
+  // no older history remains. Reused by the messages-effect (cross-thread nav + the
+  // auto-load chain) and an explicit kick (same-thread teleport, where no route changes).
+  const resolveTeleport = useCallback(() => {
+    if (messages.length === 0) return;
+    if (useChatStore.getState().currentThreadId !== threadId) return;
+    const targetId = resolvePendingTeleport(
+      threadId,
+      messages.map((m) => m.id),
+      { authoritative: !isOfflineSnapshot && !hasMore },
+    );
+    if (targetId) {
+      scheduleScrollToMessage(targetId);
+      return;
+    }
+    if (
+      shouldLoadOlderForTeleport({
+        hasPending: peekPendingTeleport(threadId) !== null,
+        found: false,
+        isStale: isOfflineSnapshot,
+        hasMore,
+        isLoading: isLoadingHistory,
+      })
+    ) {
+      const oldest = messages.find((m) => !m.id.startsWith('draft-'));
+      if (oldest) void fetchHistory(`${oldest.deliveredAt ?? oldest.timestamp}:${oldest.id}`);
+    }
+  }, [messages, threadId, isOfflineSnapshot, hasMore, isLoadingHistory, scheduleScrollToMessage, fetchHistory]);
+
+  useEffect(() => {
+    resolveTeleport();
+  }, [resolveTeleport]);
+
+  // Same-thread teleport doesn't change the route, so the effect above never re-fires;
+  // the kick (cat_cafe_teleport / timeline same-thread click) re-runs the SAME resolver.
+  useEffect(() => {
+    const handler = () => resolveTeleport();
+    window.addEventListener(TELEPORT_RESOLVE_EVENT, handler);
+    return () => window.removeEventListener(TELEPORT_RESOLVE_EVENT, handler);
+  }, [resolveTeleport]);
 
   useEffect(() => {
     let rafId: number | null = null;

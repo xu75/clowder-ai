@@ -49,10 +49,14 @@ persist_user_bin() {
     local bin="$1" path=""; path="$(command -v "$bin" 2>/dev/null || true)"
     [[ -n "$path" ]] || return 0
     local real_src; real_src="$(resolve_realpath "$path")"
-    local target="$USER_BIN_DIR/$bin"
+    # Fallback default: callers that forget to initialize USER_BIN_DIR won't
+    # trip `set -u`. The global setup near OS detection sets this for all
+    # unix platforms, but defensive default keeps the function self-contained.
+    local user_bin="${USER_BIN_DIR:-$HOME/.local/bin}"
+    local target="$user_bin/$bin"
     # Guard: GNU ln -sfn errors when source and target resolve to the same path.
     [[ "$(resolve_realpath "$target" 2>/dev/null)" == "$real_src" ]] && return 0
-    $SUDO mkdir -p "$USER_BIN_DIR"
+    $SUDO mkdir -p "$user_bin"
     $SUDO ln -sfn "$real_src" "$target"
 }
 # Append a line to the user's shell profile (idempotent).
@@ -379,7 +383,18 @@ pnpm_install_needs_puppeteer_skip() {
 }
 warn_puppeteer_skip_fallback() {
     warn "Bundled Chrome download failed — skipped"
-    warn "Thread export / screenshot may be unavailable. To install later: npx puppeteer browsers install chrome"
+    warn "Thread export / screenshot may be unavailable. Install Chrome/Chromium or set CHROME_EXECUTABLE_PATH in .env"
+}
+sync_agent_hooks_best_effort() {
+    info "  Syncing Agent CLI hooks..."
+    local log_file; log_file="$(mktemp)"
+    if pnpm exec tsx scripts/sync-system-prompts.ts --apply --agent-hooks-only >"$log_file" 2>&1; then
+        ok "Agent CLI hooks synced"
+    else
+        warn "Agent CLI hook sync failed — continuing; Hub health check can repair it later"
+        tail -5 "$log_file" 2>/dev/null | sed 's/^/    /' || true
+    fi
+    rm -f "$log_file"
 }
 build_step() { local label="$1"; shift; info "  Building $label..."
     "$@" || { fail "$label build failed in $PROJECT_DIR"; exit 1; }; ok "$label done"; }
@@ -633,8 +648,8 @@ if [[ "$SOURCE_ONLY" == true ]]; then
     return 0 2>/dev/null || exit 0
 fi
 
-# ── [1/9] Environment detection ────────────────────────────
-step "[1/9] Detecting environment / 环境检测..."
+# ── [1/8] Environment detection ────────────────────────────
+step "[1/8] Detecting environment / 环境检测..."
 # macOS: Homebrew refuses to run as root — fail early with a clear message
 # so users don't sudo the whole script after seeing Homebrew's sudo prompt.
 if [[ "$PLATFORM" == "Darwin" && $EUID -eq 0 ]]; then
@@ -709,17 +724,20 @@ if [[ "$DISTRO_FAMILY" != "darwin" && $EUID -ne 0 ]]; then
     command -v sudo &>/dev/null || { fail "Not root and sudo not found / 请以 root 运行或安装 sudo"; exit 1; }
     SUDO="sudo"
 fi
-# On Darwin, /usr/local/bin often requires sudo which we skip.
-# Use ~/.local/bin for user-local binaries.
+# Per-user binary dir for symlinks created by persist_user_bin.
+# All unix platforms use ~/.local/bin (XDG-friendly). Earlier this was darwin-only
+# which left USER_BIN_DIR unset on Linux and tripped `set -u` once persist_user_bin
+# fired during the Node / pnpm install steps.
+USER_BIN_DIR="$HOME/.local/bin"
+mkdir -p "$USER_BIN_DIR"
+case ":$PATH:" in
+    *":$USER_BIN_DIR:"*) ;;
+    *) export PATH="$USER_BIN_DIR:$PATH" ;;
+esac
+# Persist ~/.local/bin into login profiles only on macOS — the same shell-profile
+# discovery (darwin_login_profiles) doesn't exist for Linux, and most Linux
+# distros already include ~/.local/bin in PATH via ~/.profile / ~/.bashrc.
 if [[ "$DISTRO_FAMILY" == "darwin" ]]; then
-    USER_BIN_DIR="$HOME/.local/bin"
-    mkdir -p "$USER_BIN_DIR"
-    case ":$PATH:" in
-        *":$USER_BIN_DIR:"*) ;;
-        *) export PATH="$USER_BIN_DIR:$PATH" ;;
-    esac
-    # Persist ~/.local/bin to login profiles unconditionally so that any later
-    # persist_user_bin symlinks survive in new terminals.
     for _prof in $(darwin_login_profiles); do
         append_to_profile 'export PATH="$HOME/.local/bin:$PATH"  # Cat Cafe user binaries' "$_prof"
     done
@@ -747,8 +765,8 @@ if [[ "$SKIP_PREFLIGHT" != true && -f "$PROJECT_DIR/scripts/preflight.sh" ]]; th
     fi
 fi
 
-# ── [2/9] Install system dependencies ──────────────────────
-step "[2/9] Checking system dependencies / 检测系统依赖..."
+# ── [2/8] Install system dependencies ──────────────────────
+step "[2/8] Checking system dependencies / 检测系统依赖..."
 NEED_PKGS=()
 for cmd in git curl; do
     if command -v "$cmd" &>/dev/null; then ok "$cmd found"
@@ -812,8 +830,8 @@ else
     esac
 fi
 
-# ── [3/9] Install Node.js 20+ ────────────────────────────
-step "[3/9] Checking Node.js / 检测 Node.js..."
+# ── [3/8] Install Node.js 20+ ────────────────────────────
+step "[3/8] Checking Node.js / 检测 Node.js..."
 node_needs_install() {
     command -v node &>/dev/null || return 0
     local v; v=$(node -v | sed 's/v//' | cut -d. -f1)
@@ -891,8 +909,8 @@ else
     ok "Node.js $(node -v) already installed (>= 20)"
 fi
 
-# ── [4/9] Install pnpm + Redis ─────────────────────────────
-step "[4/9] Checking pnpm & Redis / 检测 pnpm 和 Redis..."
+# ── [4/8] Install pnpm + Redis ─────────────────────────────
+step "[4/8] Checking pnpm & Redis / 检测 pnpm 和 Redis..."
 if ! command -v pnpm &>/dev/null; then
     warn "pnpm not found — installing"
     if command -v corepack &>/dev/null; then
@@ -950,8 +968,8 @@ else
     install_redis_local
 fi
 
-# ── [5/9] Build checked-out project ────────────────────────
-step "[5/9] Preparing current repo / 准备当前仓库..."
+# ── [5/8] Build checked-out project ────────────────────────
+step "[5/8] Preparing current repo / 准备当前仓库..."
 cd "$PROJECT_DIR"
 ok "Using project: $PROJECT_DIR"
 pnpm_install_with_fallback || { fail "pnpm install failed in $PROJECT_DIR"; exit 1; }
@@ -971,9 +989,10 @@ if [[ -d "$SKILLS_SOURCE" ]]; then
         done
     done; ok "Skills linked"
 else fail "cat-cafe-skills/ not found"; exit 1; fi
+sync_agent_hooks_best_effort
 
-# ── [6/9] Install AI agent CLI tools ─────────────────────
-step "[6/9] Installing AI CLI tools / 安装 AI 命令行工具..."
+# ── [6/8] Install AI agent CLI tools ─────────────────────
+step "[6/8] Installing AI CLI tools / 安装 AI 命令行工具..."
 info "  Cat Cafe spawns CLI subprocesses — these are required"
 install_npm_cli() {
     local name="$1" cmd="$2" pkg="$3"
@@ -998,18 +1017,59 @@ install_brew_cask() {
 }
 install_kimi_cli() {
     info "  Installing Kimi CLI..."
+    # kimi-cli requires Python >=3.12 (verified via pypi metadata). Resolution
+    # order matches the D-plan service install policy — reuse what the user
+    # already has, NEVER auto-install uv on their system:
+    #   1. uv (reuse only) → uv tool install isolates kimi in its own venv
+    #   2. pipx (reuse only) → similar isolation
+    #   3. python-resolve.sh resolver → falls back to ~/.cat-cafe/python/,
+    #      and we create ~/.cat-cafe/kimi-venv/ on top of it, then symlink
+    #      $USER_BIN_DIR/kimi to the venv's kimi executable.
+    local log_file; log_file="$(mktemp)"
+    local installer_tried=""
     if command -v uv &>/dev/null; then
-        uv tool install --python 3.13 kimi-cli >/dev/null 2>&1 || uv tool upgrade kimi-cli >/dev/null 2>&1 || true
+        installer_tried="uv (reused)"
+        if ! uv tool install --python 3.12 kimi-cli >"$log_file" 2>&1; then
+            uv tool upgrade kimi-cli >>"$log_file" 2>&1 || true
+        fi
     elif command -v pipx &>/dev/null; then
-        pipx install kimi-cli >/dev/null 2>&1 || pipx upgrade kimi-cli >/dev/null 2>&1 || true
-    elif command -v python3 &>/dev/null; then
-        python3 -m pip install --user --upgrade kimi-cli >/dev/null 2>&1 || true
+        installer_tried="pipx (reused)"
+        if ! pipx install kimi-cli >"$log_file" 2>&1; then
+            pipx upgrade kimi-cli >>"$log_file" 2>&1 || true
+        fi
     else
-        fail "Kimi install failed. Need uv, pipx, or python3 to install kimi-cli"
+        installer_tried="project-owned venv via python-resolve.sh"
+        # Source the resolver in a subshell to avoid leaking RESOLVED_* into
+        # the caller's environment unintentionally.
+        # shellcheck source=services/python-resolve.sh
+        . "$PROJECT_DIR/scripts/services/python-resolve.sh"
+        if ! resolve_python_312 >>"$log_file" 2>&1; then
+            rm -f "$log_file"
+            fail "Kimi install failed: no Python >=3.12 available and resolver couldn't bootstrap one"
+            info "    Recovery: install Python 3.12+ (system / brew / uv / pyenv) and rerun"
+            exit 1
+        fi
+        local kimi_venv="$HOME/.cat-cafe/kimi-venv"
+        if [[ ! -x "$kimi_venv/bin/kimi" ]]; then
+            "$RESOLVED_PYTHON" -m venv "$kimi_venv" >>"$log_file" 2>&1 || true
+        fi
+        "$kimi_venv/bin/pip" install --upgrade kimi-cli >>"$log_file" 2>&1 || true
+        # Symlink into $USER_BIN_DIR so `kimi` is on PATH.
+        local kimi_bin="${USER_BIN_DIR:-$HOME/.local/bin}"
+        mkdir -p "$kimi_bin"
+        ln -sfn "$kimi_venv/bin/kimi" "$kimi_bin/kimi"
+    fi
+    export PATH="${USER_BIN_DIR:-$HOME/.local/bin}:$PATH"; hash -r 2>/dev/null || true
+    if command -v kimi &>/dev/null; then
+        rm -f "$log_file"
+        ok "Kimi CLI installed via $installer_tried"
+    else
+        fail "Kimi install failed via $installer_tried — last output:"
+        tail -10 "$log_file" 2>/dev/null | sed 's/^/    /'
+        info "    Recovery: install one of uv / pipx / Python 3.12+ on your system, then rerun"
+        rm -f "$log_file"
         exit 1
     fi
-    export PATH="$HOME/.local/bin:$PATH"; hash -r 2>/dev/null || true
-    command -v kimi &>/dev/null || { fail "Kimi install failed. Try: uv tool install --python 3.13 kimi-cli"; exit 1; }; ok "Kimi CLI installed"
 }
 install_claude_cli() {
     info "  Installing Claude Code..."
@@ -1030,11 +1090,34 @@ install_codex_cli() {
         install_npm_cli "Codex CLI" "codex" "@openai/codex"
     fi
 }
+antigravity_cli_available() {
+    command -v agy &>/dev/null || [[ -x "$HOME/.local/bin/agy" ]]
+}
+install_antigravity_cli() {
+    info "  Installing Antigravity CLI..."
+    local installer_url="https://antigravity.google/cli/install.sh"
+    if ! command -v curl &>/dev/null; then
+        warn "curl not found — install Antigravity CLI manually: curl -fsSL $installer_url | bash"
+        return 1
+    fi
+    if curl -fsSL "$installer_url" | bash; then
+        [[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
+        hash -r 2>/dev/null || true
+        if antigravity_cli_available; then
+            ok "Antigravity CLI installed"
+        else
+            warn "Antigravity CLI installer completed but agy is not visible yet. Add ~/.local/bin to PATH or open a new shell."
+        fi
+    else
+        warn "Antigravity CLI install failed — run manually: curl -fsSL $installer_url | bash"
+        return 1
+    fi
+}
 # Detect missing CLIs
 MISSING_AGENTS=()
 command -v claude &>/dev/null && ok "Claude Code already installed" || MISSING_AGENTS+=("claude")
 command -v codex &>/dev/null && ok "Codex CLI already installed"  || MISSING_AGENTS+=("codex")
-command -v gemini &>/dev/null && ok "Gemini CLI already installed" || MISSING_AGENTS+=("gemini")
+antigravity_cli_available && ok "Antigravity CLI already installed" || MISSING_AGENTS+=("agy")
 command -v kimi &>/dev/null && ok "Kimi CLI already installed"   || MISSING_AGENTS+=("kimi")
 
 if [[ ${#MISSING_AGENTS[@]} -gt 0 ]]; then
@@ -1059,92 +1142,14 @@ if [[ ${#MISSING_AGENTS[@]} -gt 0 ]]; then
         case "$agent" in
             claude) install_claude_cli ;;
             codex)  install_codex_cli ;;
-            gemini) install_npm_cli "Gemini CLI" "gemini" "@google/gemini-cli" ;;
+            agy)    install_antigravity_cli ;;
             kimi)   install_kimi_cli ;;
         esac
     done
 fi
 
-# ── [7/9] Authentication setup / 认证配置 ─────────────────
-step "[7/9] Authentication setup / 认证配置..."
-configure_agent_auth() {
-    local name="$1" cmd="$2"
-    local allow_skip="${3:-false}"
-    command -v "$cmd" &>/dev/null || return 0
-
-    # Gemini CLI doesn't support custom API endpoints — always use OAuth
-    if [[ "$cmd" == "gemini" ]]; then
-        run_install_auth_config client-auth set \
-            --project-dir "$PROJECT_DIR" \
-            --client "$cmd" \
-            --mode oauth
-        ok "$name: OAuth mode (Gemini CLI only supports Google official API)"
-        return 0
-    fi
-
-    local auth_sel
-    local -a auth_options=(
-        "OAuth / Subscription (recommended / 推荐)"
-        "API Key"
-    )
-    [[ "$allow_skip" == true ]] && auth_options+=("Skip auth setup (default / configure later / 稍后配置)")
-    local skip_index=2
-    local default_auth_sel=0
-    [[ "$allow_skip" == true ]] && default_auth_sel="$skip_index"
-    TTY_SELECT_DEFAULT_INDEX="$default_auth_sel" tty_select auth_sel "  $name ($cmd) — auth mode:" "${auth_options[@]}"
-    if [[ "$allow_skip" == true && "$auth_sel" == "$skip_index" ]]; then
-        warn "$name: auth setup skipped"
-        return 0
-    fi
-    if [[ "$auth_sel" != "1" ]]; then
-        # Do not auto-delete installer API-key profiles here: accounts are global
-        # and we cannot prove other projects are not still bound to installer refs.
-        run_install_auth_config client-auth set \
-            --project-dir "$PROJECT_DIR" \
-            --client "$cmd" \
-            --mode oauth
-        ok "$name: OAuth mode (login on first use: run '$cmd')"
-        return 0
-    fi
-    local key="" base_url="" model=""
-    tty_read_secret "    API Key: " key
-    tty_read "    Base URL (Enter = default): " base_url
-    tty_read "    Model (Enter = default): " model
-
-    if [[ -n "$key" ]]; then
-        # All clients use the same install-auth-config.mjs to create provider profiles
-        local install_args=(
-            run_install_auth_config client-auth set
-            --project-dir "$PROJECT_DIR"
-            --client "$cmd"
-            --mode api_key
-            --base-url "${base_url:-}"
-        )
-        [[ -n "$model" ]] && install_args+=(--model "$model")
-        _INSTALLER_API_KEY="$key" "${install_args[@]}"
-        ok "$name: API key profile created in .cat-cafe/"
-    else
-        # No key provided — set OAuth mode via unified path
-        # Do not auto-delete installer API-key profiles here: accounts are global
-        # and we cannot prove other projects are not still bound to installer refs.
-        run_install_auth_config client-auth set \
-            --project-dir "$PROJECT_DIR" \
-            --client "$cmd" \
-            --mode oauth
-        warn "$name: no key provided, keeping OAuth"
-    fi
-}
-
-if [[ "$HAS_TTY" == true ]]; then
-    info "  Configure each agent / 逐个配置每只猫的认证方式："
-    configure_agent_auth "Claude (布偶猫)" "claude"; configure_agent_auth "Codex (缅因猫)" "codex"
-    configure_agent_auth "Gemini (暹罗猫)" "gemini"; configure_agent_auth "Kimi (月之暗面)" "kimi" true
-else
-    info "  Non-interactive — skipping auth. Run each CLI to log in: claude / codex / gemini / kimi"
-fi
-
-# ── [8/9] Generate .env with all collected config ─────────
-step "[8/9] Generating config / 生成配置..."
+# ── [7/8] Generate .env with all collected config ─────────
+step "[7/8] Generating config / 生成配置..."
 if [[ -f .env ]]; then
     warn ".env already exists — not overwriting. To regenerate: cp .env.example .env"
 elif [[ -f .env.example ]]; then
@@ -1156,12 +1161,24 @@ fi
 for key in ${ENV_DELETE_KEYS[@]+"${ENV_DELETE_KEYS[@]}"}; do delete_env_key "$key"; done
 for i in ${ENV_KEYS[@]+"${!ENV_KEYS[@]}"}; do write_env_key "${ENV_KEYS[$i]}" "${ENV_VALUES[$i]}"; done
 [[ ${#ENV_KEYS[@]} -gt 0 ]] && ok "Auth config written to .env"
+# #675/#705: Generate TELEMETRY_HMAC_SALT if missing, quoted-empty, or whitespace-only
+_raw_salt="$(sed -n 's/^TELEMETRY_HMAC_SALT=//p' .env 2>/dev/null || true)"
+_trimmed_salt="$(printf '%s' "$_raw_salt" | tr -d "\"' \t\n\r")"
+if [[ -z "$_trimmed_salt" ]]; then
+    _salt="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64 2>/dev/null || python3 -c 'import secrets;print(secrets.token_hex(32))' 2>/dev/null || echo '')"
+    if [[ -n "$_salt" ]]; then
+        write_env_key "TELEMETRY_HMAC_SALT" "$_salt"
+        ok "Generated TELEMETRY_HMAC_SALT"
+    fi
+    unset _salt
+fi
+unset _raw_salt _trimmed_salt
 # Auto-detect Docker: only set host default on a freshly generated .env.
 maybe_write_docker_api_host
 chmod 600 .env 2>/dev/null || true
 
-# ── [9/9] Done ──────────────────────────────────────────────
-step "[9/9] Installation complete! / 安装完成！"
+# ── [8/8] Done ──────────────────────────────────────────────
+step "[8/8] Installation complete! / 安装完成！"
 echo -e "\n  ${GREEN}══ Cat Cafe is ready! 猫猫咖啡已就绪！══${NC}\n  Project: $PROJECT_DIR"
 START_CMD="cd $PROJECT_DIR && pnpm start"; [[ "$MEMORY_MODE" == true ]] && START_CMD+=" --memory"
 # The script runs as a subprocess — PATH changes don't propagate to the parent

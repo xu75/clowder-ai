@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useFileEditing } from '@/hooks/useFileEditing';
 import { useFileManagement } from '@/hooks/useFileManagement';
 import { useIMEGuard } from '@/hooks/useIMEGuard';
 import { usePersistedState } from '@/hooks/usePersistedState';
@@ -9,6 +10,7 @@ import { useWorkspace } from '@/hooks/useWorkspace';
 import { useChatStore } from '@/stores/chatStore';
 import { API_URL, apiFetch } from '@/utils/api-client';
 import { CommunityPanel } from './CommunityPanel';
+import { EventTimeline } from './event-memory/EventTimeline';
 import { RecallFeed } from './memory/RecallFeed';
 import { TaskBoardPanel } from './TaskBoardPanel';
 import { useConfirm } from './useConfirm';
@@ -62,7 +64,7 @@ function SearchResultItem({
     return (
       <>
         {content.slice(0, idx)}
-        <mark className="bg-cocreator-light text-cocreator-dark rounded px-0.5">
+        <mark className="bg-cafe-surface-sunken text-cafe-interactive rounded px-0.5">
           {content.slice(idx, idx + query.length)}
         </mark>
         {content.slice(idx + query.length)}
@@ -74,15 +76,15 @@ function SearchResultItem({
     <button
       type="button"
       onClick={onClick}
-      className="w-full text-left px-3 py-1.5 hover:bg-cocreator-bg/60 transition-colors group"
+      className="w-full text-left px-3 py-1.5 hover:bg-cafe-surface/60 transition-colors group"
     >
       <div className="flex items-center gap-1.5">
         <FileIcon name={fileName} />
         <span className="text-xs font-medium text-cafe-black truncate">{fileName}</span>
-        {line > 0 && <span className="text-[10px] text-cocreator-dark/50 font-mono">:{line}</span>}
+        {line > 0 && <span className="text-micro text-cafe-interactive/50 font-mono">:{line}</span>}
       </div>
-      {dir && <div className="text-[10px] text-cafe-muted truncate ml-5">{dir}</div>}
-      {content && <div className="text-[10px] text-cafe-secondary truncate font-mono ml-5 mt-0.5">{highlighted}</div>}
+      {dir && <div className="text-micro text-cafe-muted truncate ml-5">{dir}</div>}
+      {content && <div className="text-micro text-cafe-secondary truncate font-mono ml-5 mt-0.5">{highlighted}</div>}
     </button>
   );
 }
@@ -104,7 +106,7 @@ const CloseIcon = () => (
 
 const SearchIcon = () => (
   <svg
-    className="w-3.5 h-3.5 text-cocreator-dark/40 flex-shrink-0"
+    className="w-3.5 h-3.5 text-cafe-interactive/40 flex-shrink-0"
     viewBox="0 0 16 16"
     fill="currentColor"
     aria-hidden="true"
@@ -118,12 +120,7 @@ const SearchIcon = () => (
 );
 
 const MenuIcon = () => (
-  <svg
-    className="w-4 h-4 text-cocreator-primary flex-shrink-0"
-    viewBox="0 0 20 20"
-    fill="currentColor"
-    aria-hidden="true"
-  >
+  <svg className="w-4 h-4 text-cafe-accent flex-shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
     <path
       fillRule="evenodd"
       d="M2 4.75A.75.75 0 012.75 4h14.5a.75.75 0 010 1.5H2.75A.75.75 0 012 4.75zM2 10a.75.75 0 01.75-.75h14.5a.75.75 0 010 1.5H2.75A.75.75 0 012 10zm0 5.25a.75.75 0 01.75-.75h14.5a.75.75 0 010 1.5H2.75a.75.75 0 01-.75-.75z"
@@ -151,6 +148,10 @@ export function WorkspacePanel() {
     fetchSubtree,
     fetchWorktrees,
     revealInFinder,
+    pendingExternalSha,
+    setEditDirty,
+    applyExternalChange,
+    dismissExternalChange,
   } = useWorkspace();
 
   const setWorktreeId = useChatStore((s) => s.setWorkspaceWorktreeId);
@@ -159,26 +160,50 @@ export function WorkspacePanel() {
   const closeTab = useChatStore((s) => s.closeWorkspaceTab);
   const openFilePath = useChatStore((s) => s.workspaceOpenFilePath);
   const scrollToLine = useChatStore((s) => s.workspaceOpenFileLine);
+  const workspaceFileSetAt = useChatStore((s) => s._workspaceFileSetAt);
   const setRightPanelMode = useChatStore((s) => s.setRightPanelMode);
   const setPendingChatInsert = useChatStore((s) => s.setPendingChatInsert);
   const currentThreadId = useChatStore((s) => s.currentThreadId);
-  const editToken = useChatStore((s) => s.workspaceEditToken);
-  const editTokenExpiry = useChatStore((s) => s.workspaceEditTokenExpiry);
-  const setEditToken = useChatStore((s) => s.setWorkspaceEditToken);
+  const { editMode, setEditMode, saveError, canEdit, handleToggleEdit, handleSave } = useFileEditing({
+    worktreeId,
+    openFilePath,
+    file,
+    fetchFile,
+  });
 
   const pendingPreviewAutoOpen = useChatStore((s) => s.pendingPreviewAutoOpen);
   const consumePreviewAutoOpen = useChatStore((s) => s.consumePreviewAutoOpen);
   const storeRevealPath = useChatStore((s) => s.workspaceRevealPath);
   const setStoreRevealPath = useChatStore((s) => s.setWorkspaceRevealPath);
+  const presentationLock = useChatStore((s) => s.presentationLock);
+  const enablePresentationLock = useChatStore((s) => s.enablePresentationLock);
+  const disablePresentationLock = useChatStore((s) => s.disablePresentationLock);
+  const setPresentationLockViewport = useChatStore((s) => s.setPresentationLockViewport);
+  const workspaceScrollTop = useChatStore((s) => s.workspaceScrollTop);
+  // F226: presentation surface — tear-off current file into a floating window
+  const detachToFloat = useChatStore((s) => s.detachToFloat);
+  const presentationSurface = useChatStore((s) => s.presentationSurface);
   const { createFile, createDir, deleteItem, renameItem, uploadFile } = useFileManagement();
 
+  const viewportRestoreKey = `${currentThreadId}:${openFilePath}`;
+  const handleScrollTopChange = useCallback(
+    (scrollTop: number) => {
+      setPresentationLockViewport(scrollTop);
+    },
+    [setPresentationLockViewport],
+  );
+
   const [viewMode, setViewMode] = useState<'files' | 'changes' | 'git' | 'terminal' | 'browser'>('files');
+  // F227: recall mode sub-tab — 记忆流 (RecallFeed) vs 拉闸记录 (EventTimeline)
+  const [recallTab, setRecallTab] = useState<'feed' | 'events'>('feed');
   // Phase H: Workspace mode switcher (dev tools vs knowledge feed)
   const workspaceMode = useChatStore((s) => s.workspaceMode);
   const setWorkspaceMode = useChatStore((s) => s.setWorkspaceMode);
   const [previewPort, setPreviewPort] = useState<number | undefined>();
   const [previewPath, setPreviewPath] = useState<string>('/');
   const [focusedPane, setFocusedPane] = useState<'browser' | 'changes' | 'file' | 'git' | 'terminal' | null>(null);
+  const previousOpenFilePathRef = useRef(openFilePath);
+  const previousWorkspaceFileSetTsRef = useRef(workspaceFileSetAt.ts);
 
   // Keep parent state in sync with BrowserPanel navigation (focus mode state preservation)
   const handleBrowserNavigate = useCallback((port: number, path: string) => {
@@ -210,6 +235,18 @@ export function WorkspacePanel() {
       setViewMode('browser');
     }
   }, [pendingPreviewAutoOpen, consumePreviewAutoOpen]);
+
+  useEffect(() => {
+    const previousOpenFilePath = previousOpenFilePathRef.current;
+    const previousWorkspaceFileSetTs = previousWorkspaceFileSetTsRef.current;
+    previousOpenFilePathRef.current = openFilePath;
+    previousWorkspaceFileSetTsRef.current = workspaceFileSetAt.ts;
+
+    const freshOpenForCurrentThread =
+      workspaceFileSetAt.ts !== previousWorkspaceFileSetTs &&
+      (!workspaceFileSetAt.threadId || workspaceFileSetAt.threadId === currentThreadId);
+    if (openFilePath && (openFilePath !== previousOpenFilePath || freshOpenForCurrentThread)) setViewMode('files');
+  }, [currentThreadId, openFilePath, workspaceFileSetAt.threadId, workspaceFileSetAt.ts]);
   const [portDiscoveryToast, setPortDiscoveryToast] = useState<{ port: number; framework?: string } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'content' | 'filename' | 'all'>('all');
@@ -245,8 +282,10 @@ export function WorkspacePanel() {
   // F168: Auto-switch workspace mode based on thread's preferredWorkspaceMode.
   // Also resets from 'community' when switching to a thread without a preference,
   // preventing mode leakage across threads.
+  // F063 AC-PL6: skip auto-switch when presentation lock is active to preserve focus mode.
   useEffect(() => {
     if (!currentThreadId) return;
+    if (presentationLock) return;
     let cancelled = false;
     apiFetch(`/api/threads/${currentThreadId}`)
       ?.then((res) => res.json())
@@ -263,7 +302,7 @@ export function WorkspacePanel() {
     return () => {
       cancelled = true;
     };
-  }, [currentThreadId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentThreadId, presentationLock]); // eslint-disable-line react-hooks/exhaustive-deps
   // F120: Listen for port discovery via Socket.IO
   useEffect(() => {
     let cancelled = false;
@@ -293,11 +332,9 @@ export function WorkspacePanel() {
     };
   }, [worktreeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [editMode, setEditMode] = useState(false);
   const [markdownRendered, setMarkdownRendered] = useState(true);
   const [htmlPreview, setHtmlPreview] = useState(false);
   const [jsxPreview, setJsxPreview] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
   // F063: vertical resize — treeBasis as percentage (20-80), persisted
   const [treeBasis, setTreeBasis, resetTreeBasis] = usePersistedState('cat-cafe:treeBasis', 40);
   const panelRef = useRef<HTMLElement>(null);
@@ -432,7 +469,7 @@ export function WorkspacePanel() {
         if (result) {
           fetchTree();
           setOpenFile(path);
-          setEditMode(true); // Auto-enter edit mode for new files
+          setEditMode(true);
         }
         return !!result;
       },
@@ -479,95 +516,17 @@ export function WorkspacePanel() {
         fetchTree();
       },
     }),
-    [createFile, createDir, deleteItem, renameItem, uploadFile, fetchTree, setOpenFile, closeTab, confirm],
+    [createFile, createDir, deleteItem, renameItem, uploadFile, fetchTree, setOpenFile, closeTab, confirm, setEditMode],
   );
 
-  const isTokenValid = editToken && editTokenExpiry && editTokenExpiry > Date.now();
-  const canEdit = file && !file.binary && !file.truncated;
   const isMarkdown = !!(openFilePath && (openFilePath.endsWith('.md') || openFilePath.endsWith('.mdx')));
   const isHtml = !!(openFilePath && /\.html?$/i.test(openFilePath));
   const isJsx = !!(openFilePath && /\.[jt]sx$/i.test(openFilePath));
 
-  const handleToggleEdit = useCallback(async () => {
-    // If already editing with a valid token, toggle off
-    if (editMode && isTokenValid) {
-      setEditMode(false);
-      return;
-    }
-    if (!worktreeId) return;
-    setSaveError(null);
-
-    // Get or refresh token (also handles expired-token-while-editing case)
-    if (!isTokenValid) {
-      try {
-        const res = await apiFetch('/api/workspace/edit-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ worktreeId }),
-        });
-        if (!res.ok) {
-          setSaveError('无法获取编辑权限');
-          return;
-        }
-        const data = await res.json();
-        setEditToken(data.token, data.expiresIn);
-      } catch {
-        setSaveError('网络错误');
-        return;
-      }
-    }
-    setEditMode(true);
-  }, [editMode, worktreeId, isTokenValid, setEditToken]);
-
-  const handleSave = useCallback(
-    async (newContent: string) => {
-      if (!worktreeId || !openFilePath || !file) return;
-      if (!editToken) {
-        setSaveError('编辑会话过期，请点击「编辑」按钮刷新权限后重试保存');
-        return;
-      }
-      setSaveError(null);
-      try {
-        const res = await apiFetch('/api/workspace/file', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            worktreeId,
-            path: openFilePath,
-            content: newContent,
-            baseSha256: file.sha256,
-            editSessionToken: editToken,
-          }),
-        });
-        if (res.status === 409) {
-          setSaveError('冲突：文件已被修改，请重新加载');
-          return;
-        }
-        if (res.status === 401) {
-          setEditToken(null);
-          // Keep editMode=true so unsaved edits aren't lost.
-          // User can click the edit toggle to re-acquire a token and retry.
-          setSaveError('编辑会话过期，请点击「编辑」按钮刷新权限后重试保存');
-          return;
-        }
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({ error: 'Unknown error' }));
-          setSaveError(data.error || '保存失败');
-          return;
-        }
-        // Re-fetch file to get new content + sha256
-        if (openFilePath) await fetchFile(openFilePath);
-      } catch {
-        setSaveError('网络错误');
-      }
-    },
-    [worktreeId, openFilePath, file, editToken, setEditToken, fetchFile],
-  );
-
   return (
     <aside
       ref={panelRef}
-      className="hidden lg:flex flex-1 min-w-0 border-l border-cocreator-light bg-cafe-white/95 flex-col overflow-hidden animate-slide-in-right"
+      className="hidden lg:flex flex-1 min-w-0 bg-[var(--console-panel-bg)] flex-col overflow-hidden animate-slide-in-right"
     >
       {/* ── Focus mode overlay ── */}
       {focusedPane === 'browser' && workspaceMode === 'dev' && viewMode === 'browser' ? (
@@ -606,7 +565,14 @@ export function WorkspacePanel() {
             onToggleHtmlPreview={() => setHtmlPreview((p) => !p)}
             onToggleJsxPreview={() => setJsxPreview((p) => !p)}
             onSave={handleSave}
+            onDirtyChange={setEditDirty}
+            pendingExternalSha={pendingExternalSha}
+            onApplyExternalChange={applyExternalChange}
+            onDismissExternalChange={dismissExternalChange}
             revealInFinder={revealInFinder}
+            restoreScrollTop={presentationLock ? workspaceScrollTop : undefined}
+            restoreKey={presentationLock ? viewportRestoreKey : undefined}
+            onScrollTopChange={presentationLock ? handleScrollTopChange : undefined}
           />
         </WorkspaceFocusShell>
       ) : focusedPane === 'changes' && workspaceMode === 'dev' && viewMode === 'changes' ? (
@@ -622,7 +588,7 @@ export function WorkspacePanel() {
           {worktreeId ? (
             <TerminalTab worktreeId={worktreeId} />
           ) : (
-            <div className="flex items-center justify-center h-full text-sm text-cocreator-dark/50">
+            <div className="flex items-center justify-center h-full text-sm text-cafe-interactive/50">
               请先选择一个 Worktree
             </div>
           )}
@@ -630,35 +596,90 @@ export function WorkspacePanel() {
       ) : (
         <>
           {/* Header */}
-          <div className="px-3 py-2.5 border-b border-cocreator-light flex items-center justify-between bg-cocreator-bg/50">
+          <div className="px-3 py-2.5 border-b border-cafe-subtle flex items-center justify-between bg-cafe-surface/50">
             <div className="flex items-center gap-2 min-w-0">
               <MenuIcon />
               <span className="text-sm font-semibold text-cafe-black">Workspace</span>
             </div>
-            <button
-              type="button"
-              onClick={() => setRightPanelMode('status')}
-              className="w-6 h-6 flex items-center justify-center rounded-md text-cocreator-dark/40 hover:text-cocreator-dark hover:bg-cocreator-light/60 transition-colors"
-              title="切换到状态面板"
-            >
-              <CloseIcon />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={presentationLock ? disablePresentationLock : enablePresentationLock}
+                className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors ${
+                  presentationLock
+                    ? 'text-cafe-accent bg-cafe-accent/10 hover:bg-cafe-accent/20'
+                    : 'text-cafe-interactive/40 hover:text-cafe-interactive hover:bg-cafe-surface-sunken/60'
+                }`}
+                title={
+                  presentationLock
+                    ? '点击退出锁定 — 恢复各 thread 自己的文件视图'
+                    : '锁定当前文件视图 — 切换 thread 时右侧保持不变，适合演示/讲解'
+                }
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                  {presentationLock ? (
+                    <path d="M8 1a3.5 3.5 0 0 0-3.5 3.5V6H3a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-1.5V4.5A3.5 3.5 0 0 0 8 1Zm2 5H6V4.5a2 2 0 1 1 4 0V6Z" />
+                  ) : (
+                    <path d="M8 1a3.5 3.5 0 0 0-3.5 3.5V6H3a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1H6V4.5a2 2 0 1 1 4 0 .75.75 0 0 0 1.5 0A3.5 3.5 0 0 0 8 1Z" />
+                  )}
+                </svg>
+              </button>
+              {/* F226: detach current file into a floating window (dev mode only — 烁烁 P2-2) */}
+              {workspaceMode === 'dev' && (
+                <button
+                  type="button"
+                  onClick={detachToFloat}
+                  disabled={!openFilePath || !!presentationSurface}
+                  className="w-6 h-6 flex items-center justify-center rounded-md text-cafe-interactive/40 hover:text-cafe-interactive hover:bg-cafe-surface-sunken/60 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  title="浮出文档窗口 — 讲稿浮起来，右侧腾出来切定时任务/记忆/毛线球"
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M5 3H3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2M9 2h5v5M14 2 7 9"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              )}
+              {presentationLock && (
+                <span className="text-micro font-medium px-1.5 py-0.5 rounded-full bg-cafe-accent/15 text-cafe-accent">
+                  Locked
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setRightPanelMode('status')}
+                className="w-6 h-6 flex items-center justify-center rounded-md text-cafe-interactive/40 hover:text-cafe-interactive hover:bg-cafe-surface-sunken/60 transition-colors"
+                title="切换到状态面板"
+              >
+                <CloseIcon />
+              </button>
+            </div>
           </div>
 
           {/* Worktree indicator */}
           {currentWorktree && (
-            <div className="px-3 py-2 border-b border-cocreator-light/60 bg-cocreator-bg/30">
+            <div className="px-3 py-2 border-b border-cafe-subtle/60 bg-cafe-surface/30">
               <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" />
+                <span className="w-2 h-2 rounded-full bg-[var(--semantic-success)] flex-shrink-0" />
                 <span className="text-xs font-medium text-cafe-black truncate">{currentWorktree.branch}</span>
-                <span className="text-[10px] font-mono text-cocreator-dark/50">{currentWorktree.head}</span>
+                <span className="text-micro font-mono text-cafe-interactive/50">{currentWorktree.head}</span>
               </div>
               {worktrees.length > 1 && (
                 <div className="flex items-center gap-1 mt-1.5">
                   <select
                     value={worktreeId ?? ''}
                     onChange={(e) => setWorktreeId(e.target.value || null)}
-                    className="flex-1 text-[10px] border border-cocreator-light rounded-md px-2 py-1 bg-cafe-surface/80 text-cafe-black focus:outline-none focus:border-cocreator-primary"
+                    className="flex-1 text-micro border border-cafe-subtle rounded-md px-2 py-1 bg-cafe-surface/80 text-cafe-black focus:outline-none focus:border-cafe-accent"
                   >
                     {worktrees.map((w) => (
                       <option key={w.id} value={w.id}>
@@ -674,8 +695,8 @@ export function WorkspacePanel() {
           )}
 
           {/* Search bar */}
-          <form onSubmit={handleSearchSubmit} className="px-3 py-2 border-b border-cocreator-light/40">
-            <div className="flex items-center gap-1.5 bg-cafe-surface/80 border border-cocreator-light rounded-lg px-2.5 py-1.5 focus-within:border-cocreator-primary focus-within:ring-1 focus-within:ring-cocreator-primary/20 transition-all">
+          <form onSubmit={handleSearchSubmit} className="px-3 py-2 border-b border-cafe-subtle/40">
+            <div className="flex items-center gap-1.5 bg-cafe-surface/80 border border-cafe-subtle rounded-lg px-2.5 py-1.5 focus-within:border-cafe-accent focus-within:ring-1 focus-within:ring-cafe-accent/20 transition-all">
               <SearchIcon />
               <input
                 type="text"
@@ -697,17 +718,17 @@ export function WorkspacePanel() {
                       ? '搜索文件名/路径...'
                       : '搜索全部...'
                 }
-                className="flex-1 text-xs bg-transparent text-cafe-black placeholder:text-cocreator-dark/30 focus:outline-none"
+                className="flex-1 text-xs bg-transparent text-cafe-black placeholder:text-cafe-interactive/30 focus:outline-none"
               />
               <button
                 type="button"
                 onClick={() => setSearchMode((m) => (m === 'all' ? 'filename' : m === 'filename' ? 'content' : 'all'))}
-                className={`text-[10px] px-1.5 py-0.5 rounded-md font-medium transition-colors ${
+                className={`text-micro px-1.5 py-0.5 rounded-md font-medium transition-colors ${
                   searchMode === 'all'
-                    ? 'bg-cocreator-primary/15 text-cocreator-primary'
+                    ? 'bg-cafe-accent/15 text-cafe-accent'
                     : searchMode === 'filename'
-                      ? 'bg-cocreator-light text-cocreator-dark'
-                      : 'text-cocreator-dark/40 hover:text-cocreator-dark/60'
+                      ? 'bg-cafe-surface-sunken text-cafe-interactive'
+                      : 'text-cafe-interactive/40 hover:text-cafe-interactive/60'
                 }`}
                 title={
                   searchMode === 'all'
@@ -727,10 +748,10 @@ export function WorkspacePanel() {
             <button
               type="button"
               onClick={() => setWorkspaceMode('dev')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-all ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-micro font-semibold transition-all ${
                 workspaceMode === 'dev'
-                  ? 'bg-cocreator-bg text-cocreator-dark border border-cocreator-light/60'
-                  : 'text-cocreator-dark/40 hover:text-cocreator-dark/60'
+                  ? 'bg-cafe-surface text-cafe-interactive border border-cafe-subtle/60'
+                  : 'text-cafe-interactive/40 hover:text-cafe-interactive/60'
               }`}
             >
               <span className="text-xs">&lt;/&gt;</span> 开发
@@ -738,10 +759,10 @@ export function WorkspacePanel() {
             <button
               type="button"
               onClick={() => setWorkspaceMode('recall')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-all ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-micro font-semibold transition-all ${
                 workspaceMode === 'recall'
-                  ? 'bg-cocreator-primary/10 text-cocreator-primary border border-cocreator-primary/30'
-                  : 'text-cocreator-dark/40 hover:text-cocreator-dark/60'
+                  ? 'bg-cafe-accent/10 text-cafe-accent border border-cafe-accent/30'
+                  : 'text-cafe-interactive/40 hover:text-cafe-interactive/60'
               }`}
             >
               <svg
@@ -762,10 +783,10 @@ export function WorkspacePanel() {
             <button
               type="button"
               onClick={() => setWorkspaceMode('schedule')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-all ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-micro font-semibold transition-all ${
                 workspaceMode === 'schedule'
-                  ? 'bg-cocreator-bg text-cocreator-dark border border-cocreator-light/60'
-                  : 'text-cocreator-dark/40 hover:text-cocreator-dark/60'
+                  ? 'bg-cafe-surface text-cafe-interactive border border-cafe-subtle/60'
+                  : 'text-cafe-interactive/40 hover:text-cafe-interactive/60'
               }`}
             >
               <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
@@ -776,10 +797,10 @@ export function WorkspacePanel() {
             <button
               type="button"
               onClick={() => setWorkspaceMode('tasks')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-all ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-micro font-semibold transition-all ${
                 workspaceMode === 'tasks'
-                  ? 'bg-cocreator-bg text-cocreator-dark border border-cocreator-light/60'
-                  : 'text-cocreator-dark/40 hover:text-cocreator-dark/60'
+                  ? 'bg-cafe-surface text-cafe-interactive border border-cafe-subtle/60'
+                  : 'text-cafe-interactive/40 hover:text-cafe-interactive/60'
               }`}
             >
               <svg
@@ -799,10 +820,10 @@ export function WorkspacePanel() {
             <button
               type="button"
               onClick={() => setWorkspaceMode('community')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-all ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-micro font-semibold transition-all ${
                 workspaceMode === 'community'
-                  ? 'bg-cocreator-bg text-cocreator-dark border border-cocreator-light/60'
-                  : 'text-cocreator-dark/40 hover:text-cocreator-dark/60'
+                  ? 'bg-cafe-surface text-cafe-interactive border border-cafe-subtle/60'
+                  : 'text-cafe-interactive/40 hover:text-cafe-interactive/60'
               }`}
             >
               <svg
@@ -824,8 +845,27 @@ export function WorkspacePanel() {
 
           {/* Knowledge / Schedule / Tasks / Dev mode routing */}
           {workspaceMode === 'recall' ? (
-            <div className="flex-1 min-h-0 overflow-y-auto">
-              <RecallFeed />
+            <div className="flex-1 min-h-0 flex flex-col">
+              {/* F227: 记忆流 vs 拉闸记录 (Event Memory timeline) */}
+              <div className="flex gap-1 px-3 py-1.5 border-b border-cafe-subtle/40">
+                {(['feed', 'events'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setRecallTab(tab)}
+                    className={`px-2.5 py-1 rounded-full text-micro font-semibold transition-all ${
+                      recallTab === tab
+                        ? 'bg-cafe-accent/10 text-cafe-accent border border-cafe-accent/30'
+                        : 'text-cafe-interactive/40 hover:text-cafe-interactive/60'
+                    }`}
+                  >
+                    {tab === 'feed' ? '记忆流' : '拉闸记录'}
+                  </button>
+                ))}
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                {recallTab === 'feed' ? <RecallFeed /> : <EventTimeline />}
+              </div>
             </div>
           ) : workspaceMode === 'schedule' ? (
             <SchedulePanel />
@@ -836,7 +876,7 @@ export function WorkspacePanel() {
           ) : (
             <>
               {/* Files / Changes toggle */}
-              <div className="flex border-b border-cocreator-light/40">
+              <div className="flex border-b border-cafe-subtle/40">
                 {(['files', 'changes', 'git', 'terminal', 'browser'] as const).map((mode) => {
                   const labels: Record<typeof mode, string> = {
                     files: 'Files',
@@ -850,10 +890,10 @@ export function WorkspacePanel() {
                       key={mode}
                       type="button"
                       onClick={() => setViewMode(mode)}
-                      className={`flex-1 py-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors ${
+                      className={`flex-1 py-1.5 text-micro font-semibold uppercase tracking-wider transition-colors ${
                         viewMode === mode
-                          ? 'text-cocreator-primary border-b-2 border-cocreator-primary'
-                          : 'text-cocreator-dark/40 hover:text-cocreator-dark/60'
+                          ? 'text-cafe-accent border-b-2 border-cafe-accent'
+                          : 'text-cafe-interactive/40 hover:text-cafe-interactive/60'
                       }`}
                     >
                       {labels[mode]}
@@ -864,26 +904,28 @@ export function WorkspacePanel() {
 
               {/* Error */}
               {error && (
-                <div className="px-3 py-2 text-xs text-red-600 bg-red-50/80 border-b border-red-100">{error}</div>
+                <div className="px-3 py-2 text-xs text-conn-red-text bg-conn-red-bg/80 border-b border-conn-red-ring">
+                  {error}
+                </div>
               )}
 
               {/* F120: Port Discovery Toast — matches design Scene 2 */}
               {portDiscoveryToast && (
-                <div className="mx-3 my-2 p-4 rounded-xl bg-cafe-surface shadow-md border border-[#E8E7E5]">
+                <div className="mx-3 my-2 p-4 rounded-xl bg-cafe-surface shadow-md border border-[var(--console-border-soft)]">
                   <div className="flex items-start justify-between mb-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-[#E29578] text-base">◉</span>
-                      <span className="text-sm font-semibold text-[#1A1918]">Dev Server Detected</span>
+                      <span className="text-cafe-accent text-base">◉</span>
+                      <span className="text-sm font-semibold text-cafe">Dev Server Detected</span>
                     </div>
                     <button
                       type="button"
-                      className="text-[#9C9B99] hover:text-[#5a4a42] text-xs"
+                      className="text-cafe-muted hover:text-cafe text-xs"
                       onClick={() => setPortDiscoveryToast(null)}
                     >
                       ✕
                     </button>
                   </div>
-                  <p className="text-xs text-[#6D6C6A] ml-6 mb-3">
+                  <p className="text-xs text-cafe-secondary ml-6 mb-3">
                     localhost:{portDiscoveryToast.port} is now listening
                     {portDiscoveryToast.framework && portDiscoveryToast.framework !== 'unknown'
                       ? ` (${portDiscoveryToast.framework})`
@@ -892,7 +934,7 @@ export function WorkspacePanel() {
                   <div className="flex items-center gap-2 ml-6">
                     <button
                       type="button"
-                      className="px-3 py-1.5 rounded-md bg-[#E29578] text-white text-xs font-medium hover:bg-[#d4856a] transition-colors"
+                      className="px-3 py-1.5 rounded-md bg-cafe-accent text-[var(--cafe-surface)] text-xs font-medium hover:bg-cafe-accent-hover transition-colors"
                       onClick={() => {
                         setPreviewPort(portDiscoveryToast.port);
                         setViewMode('browser');
@@ -903,7 +945,7 @@ export function WorkspacePanel() {
                     </button>
                     <button
                       type="button"
-                      className="px-3 py-1.5 text-xs text-[#5a4a42]/70 hover:text-[#5a4a42]"
+                      className="px-3 py-1.5 text-xs text-cafe-secondary hover:text-cafe"
                       onClick={() => setPortDiscoveryToast(null)}
                     >
                       Dismiss
@@ -935,7 +977,7 @@ export function WorkspacePanel() {
                   {worktreeId ? (
                     <TerminalTab worktreeId={worktreeId} />
                   ) : (
-                    <div className="flex items-center justify-center h-full text-sm text-cocreator-dark/50">
+                    <div className="flex items-center justify-center h-full text-sm text-cafe-interactive/50">
                       请先选择一个 Worktree
                     </div>
                   )}
@@ -958,8 +1000,8 @@ export function WorkspacePanel() {
                 <>
                   {/* Search loading indicator */}
                   {searchLoading && (
-                    <div className="border-b border-cocreator-light/40 px-3 py-3 text-xs text-cocreator-dark/70 flex items-center gap-2">
-                      <span className="inline-block w-3 h-3 border-2 border-cocreator-primary border-t-transparent rounded-full animate-spin" />
+                    <div className="border-b border-cafe-subtle/40 px-3 py-3 text-xs text-cafe-interactive/70 flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 border-2 border-cafe-accent border-t-transparent rounded-full animate-spin" />
                       搜索中...
                     </div>
                   )}
@@ -972,12 +1014,12 @@ export function WorkspacePanel() {
                       const contentHits = searchResults.filter((r) => r.matchType === 'content');
                       const isGrouped = fileHits.length > 0 || contentHits.length > 0;
                       return (
-                        <div className="border-b border-cocreator-light/40 max-h-64 overflow-y-auto">
+                        <div className="border-b border-cafe-subtle/40 max-h-64 overflow-y-auto">
                           {searchResults.length > 0 ? (
                             <>
                               {isGrouped && fileHits.length > 0 && (
                                 <>
-                                  <div className="px-3 py-1.5 text-[10px] text-cocreator-dark/50 font-semibold uppercase tracking-wider sticky top-0 bg-cafe-white/95 backdrop-blur-sm">
+                                  <div className="px-3 py-1.5 text-micro text-cafe-interactive/50 font-semibold uppercase tracking-wider sticky top-0 bg-cafe-white/95 backdrop-blur-sm">
                                     文件名匹配 ({fileHits.length})
                                   </div>
                                   {fileHits.map((r, i) => (
@@ -994,7 +1036,7 @@ export function WorkspacePanel() {
                               )}
                               {isGrouped && contentHits.length > 0 && (
                                 <>
-                                  <div className="px-3 py-1.5 text-[10px] text-cocreator-dark/50 font-semibold uppercase tracking-wider sticky top-0 bg-cafe-white/95 backdrop-blur-sm">
+                                  <div className="px-3 py-1.5 text-micro text-cafe-interactive/50 font-semibold uppercase tracking-wider sticky top-0 bg-cafe-white/95 backdrop-blur-sm">
                                     内容匹配 ({contentHits.length})
                                   </div>
                                   {contentHits.map((r, i) => (
@@ -1011,7 +1053,7 @@ export function WorkspacePanel() {
                               )}
                               {!isGrouped && (
                                 <>
-                                  <div className="px-3 py-1.5 text-[10px] text-cocreator-dark/50 font-semibold uppercase tracking-wider sticky top-0 bg-cafe-white/95 backdrop-blur-sm">
+                                  <div className="px-3 py-1.5 text-micro text-cafe-interactive/50 font-semibold uppercase tracking-wider sticky top-0 bg-cafe-white/95 backdrop-blur-sm">
                                     {searchResults.length} 个结果
                                   </div>
                                   {searchResults.map((r, i) => (
@@ -1028,11 +1070,11 @@ export function WorkspacePanel() {
                               )}
                             </>
                           ) : (
-                            <div className="px-3 py-3 text-xs text-cocreator-dark/70">
+                            <div className="px-3 py-3 text-xs text-cafe-interactive/70">
                               <div className="font-medium text-cafe-black">
                                 未在 {currentWorktree?.branch ?? '当前工作区'} 中找到 “{searchQuery.trim()}”
                               </div>
-                              <div className="mt-1 text-[11px] text-cocreator-dark/55">
+                              <div className="mt-1 text-xs text-cafe-interactive/55">
                                 当前模式：
                                 {searchMode === 'all' ? '全部' : searchMode === 'filename' ? '文件名' : '内容'}
                                 {searchMode === 'content' ? '。可以试试切到 File 或 All。' : '。'}
@@ -1093,8 +1135,15 @@ export function WorkspacePanel() {
                           onToggleHtmlPreview={() => setHtmlPreview((p) => !p)}
                           onToggleJsxPreview={() => setJsxPreview((p) => !p)}
                           onSave={handleSave}
+                          onDirtyChange={setEditDirty}
+                          pendingExternalSha={pendingExternalSha}
+                          onApplyExternalChange={applyExternalChange}
+                          onDismissExternalChange={dismissExternalChange}
                           revealInFinder={revealInFinder}
                           onFocusMode={() => setFocusedPane('file')}
+                          restoreScrollTop={presentationLock ? workspaceScrollTop : undefined}
+                          restoreKey={presentationLock ? viewportRestoreKey : undefined}
+                          onScrollTopChange={presentationLock ? handleScrollTopChange : undefined}
                         />
                       )}
                     </>

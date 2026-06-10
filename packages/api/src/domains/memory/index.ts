@@ -2,8 +2,13 @@
 
 // F152 Phase A: Scanners
 export { CatCafeScanner } from './CatCafeScanner.js';
+export type { CollectionRebuildResult } from './CollectionIndexBuilder.js';
+// F186 Phase B: Collection scanners
+export { CollectionIndexBuilder } from './CollectionIndexBuilder.js';
 // Phase C: embedding + vector
 export { EmbeddingService } from './EmbeddingService.js';
+export { loadExternalCollections, resolveCollectionStorePath, saveExternalCollection } from './external-collections.js';
+export { FlatScanner } from './FlatScanner.js';
 export type { MemoryConfig, MemoryServices } from './factory.js';
 // Factory
 export { createMemoryServices } from './factory.js';
@@ -56,10 +61,13 @@ export {
 export { KnowledgeResolver } from './KnowledgeResolver.js';
 export { MarkerQueue } from './MarkerQueue.js';
 export { MaterializationService } from './MaterializationService.js';
+export { PassageVectorStore, parsePassageVectorKey, passageVectorKey } from './PassageVectorStore.js';
 export { ReflectionService } from './ReflectionService.js';
 export { SemanticReranker } from './SemanticReranker.js';
 // Implementations
 export type { PassageResult } from './SqliteEvidenceStore.js';
 export { SqliteEvidenceStore } from './SqliteEvidenceStore.js';
-export { ensureVectorTable } from './schema.js';
+export { StructuredScanner } from './StructuredScanner.js';
+export { detectScannerLevel, resolveCollectionScanner } from './scanner-resolver.js';
+export { ensurePassageVectorTable, ensureVectorTable } from './schema.js';
 export { VectorStore } from './VectorStore.js';

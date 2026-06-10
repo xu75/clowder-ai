@@ -11,9 +11,10 @@
  * 6. 只在猫回复完整结束后解析 (由调用方保证)
  */
 
-import type { CatId } from '@cat-cafe/shared';
+import type { CatId, CatRoutingError } from '@cat-cafe/shared';
 import { catRegistry } from '@cat-cafe/shared';
 import { isCatAvailable } from '../../../../../config/cat-config-loader.js';
+import { resolveCatTarget } from './cat-target-resolver.js';
 
 /** Max A2A chain depth, configurable via env (read at call time for hot-reload) */
 export function getMaxA2ADepth(): number {
@@ -27,10 +28,34 @@ export const TOKEN_BOUNDARY_RE = /[\s,.:;!?()[\]{}<>，。！？、：；（）�
 /** @internal Exported for a2a-shadow-detection.ts. */
 export const HANDLE_CONTINUATION_RE = /[a-z0-9_.-]/;
 const LEADING_MARKDOWN_MENTION_PREFIX_RE = /^(?:(?:>\s*)|(?:[-*+]\s+)|(?:\d+[.)]\s+))+/;
+const LINE_START_MARKDOWN_PREFIX_PATTERN = String.raw`\s*(?:(?:>\s*)|(?:[-*+]\s+)|(?:\d+[.)]\s+))*`;
+const HANDLE_BOUNDARY_PATTERN = String.raw`(?=$|[\s,.:;!?()\[\]{}<>，。！？、：；（）【】《》「」『』〈〉]|[^a-z0-9_.-])`;
 
 interface MentionPatternEntry {
   readonly catId: CatId;
   readonly pattern: string;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildWhitespaceTolerantMentionPattern(pattern: string): RegExp {
+  const interleaved = Array.from(pattern)
+    .map((ch) => escapeRegExp(ch))
+    .join(String.raw`\s*`);
+  return new RegExp(`(^|\\n)(${LINE_START_MARKDOWN_PREFIX_PATTERN})${interleaved}${HANDLE_BOUNDARY_PATTERN}`, 'giu');
+}
+
+function repairLineStartMentionWhitespace(text: string, entries: readonly MentionPatternEntry[]): string {
+  let repaired = text;
+  for (const entry of entries) {
+    repaired = repaired.replace(
+      buildWhitespaceTolerantMentionPattern(entry.pattern),
+      (_match, lineStart: string, prefix: string) => `${lineStart}${prefix}${entry.pattern}`,
+    );
+  }
+  return repaired;
 }
 
 /** @deprecated Suppression system removed — line-start mentions always route. Kept for backward compat. */
@@ -46,6 +71,8 @@ export interface A2AMentionAnalysis {
   readonly mentions: CatId[];
   /** @deprecated Always empty — suppression system removed. */
   readonly suppressed: SuppressedA2AMention[];
+  /** F182: routing errors for disabled cats detected in text @ parsing */
+  readonly routing_warnings: CatRoutingError[];
 }
 
 /** #417: Inline @mention paired with action words — missed handoff candidate. */
@@ -77,7 +104,7 @@ export function analyzeA2AMentions(
   currentCatId?: CatId,
   _options: A2AMentionParseOptions = {},
 ): A2AMentionAnalysis {
-  if (!text) return { mentions: [], suppressed: [] };
+  if (!text) return { mentions: [], suppressed: [], routing_warnings: [] };
 
   // 1. Strip fenced code blocks
   const stripped = text.replace(/```[\s\S]*?```/g, '');
@@ -86,20 +113,23 @@ export function analyzeA2AMentions(
   const allConfigs = catRegistry.getAllConfigs();
 
   // 2. Build patterns and sort longest-first to avoid prefix collisions
+  // F182 KD-10: include ALL cats (including disabled) so patterns participate in matching;
+  // availability is checked at match-time via resolveCatTarget, not here.
   const entries: MentionPatternEntry[] = [];
   for (const [id, config] of Object.entries(allConfigs)) {
     if (currentCatId && id === currentCatId) continue; // 4. Filter self (skip when cross-thread)
-    if (!isCatAvailable(id)) continue;
     for (const pattern of config.mentionPatterns) {
       entries.push({ catId: id as CatId, pattern: pattern.toLowerCase() });
     }
   }
   entries.sort((a, b) => b.pattern.length - a.pattern.length);
+  const normalizedText = repairLineStartMentionWhitespace(stripped, entries);
 
   // 3. Line-start matching with token boundary — always actionable (no keyword gate)
   const found: CatId[] = [];
   const seen = new Set<string>();
-  const lines = stripped.split(/\r?\n/);
+  const routing_warnings: CatRoutingError[] = [];
+  const lines = normalizedText.split(/\r?\n/);
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const rawLine = lines[lineIndex]!;
     if (found.length >= MAX_A2A_MENTION_TARGETS) break; // 5. Safety limit
@@ -120,7 +150,14 @@ export function analyzeA2AMentions(
         const charAfter = segment[entry.pattern.length];
         const isBoundary = !charAfter || TOKEN_BOUNDARY_RE.test(charAfter) || !HANDLE_CONTINUATION_RE.test(charAfter);
         if (!isBoundary) continue;
-        if (!seen.has(entry.catId)) {
+        // F182 KD-10: resolver check at match-time (not at pattern-build time)
+        const resolved = resolveCatTarget(entry.catId);
+        if ('error' in resolved) {
+          if (!seen.has(entry.catId)) {
+            seen.add(entry.catId);
+            routing_warnings.push(resolved.error);
+          }
+        } else if (!seen.has(entry.catId)) {
           seen.add(entry.catId);
           found.push(entry.catId);
         }
@@ -140,7 +177,7 @@ export function analyzeA2AMentions(
     }
   }
 
-  return { mentions: found, suppressed: [] };
+  return { mentions: found, suppressed: [], routing_warnings };
 }
 
 /**

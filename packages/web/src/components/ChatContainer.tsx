@@ -1,21 +1,26 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useAgentHookHealth } from '@/hooks/useAgentHookHealth';
 import { useAgentMessages } from '@/hooks/useAgentMessages';
 import { useAuthorization } from '@/hooks/useAuthorization';
 import { useCatData } from '@/hooks/useCatData';
 import { useChatHistory } from '@/hooks/useChatHistory';
 import { useChatSocketCallbacks } from '@/hooks/useChatSocketCallbacks';
+import { useCoCreatorConfig } from '@/hooks/useCoCreatorConfig';
 import { useConnectionStatus } from '@/hooks/useConnectionStatus';
 import { godAction, submitAction } from '@/hooks/useGameApi';
 import { reconnectGame } from '@/hooks/useGameReconnect';
 import { useGovernanceStatus } from '@/hooks/useGovernanceStatus';
 import { useIndexState } from '@/hooks/useIndexState';
+import { useIsDesktop } from '@/hooks/useIsDesktop';
 import { usePersistedState } from '@/hooks/usePersistedState';
 import { usePreviewAutoOpen } from '@/hooks/usePreviewAutoOpen';
 import { useSendMessage } from '@/hooks/useSendMessage';
 import { useSocket } from '@/hooks/useSocket';
 import { useSplitPaneKeys } from '@/hooks/useSplitPaneKeys';
+import { useTeleport } from '@/hooks/useTeleport';
 import { useThreadLiveness, useThreadMessages } from '@/hooks/useThreadScopedSelectors';
 import { useVadInterrupt } from '@/hooks/useVadInterrupt';
 import { useVoiceAutoPlay } from '@/hooks/useVoiceAutoPlay';
@@ -24,14 +29,16 @@ import { useWorkspaceNavigate } from '@/hooks/useWorkspaceNavigate';
 import { type ChatMessage as ChatMessageData, type Thread, useChatStore } from '@/stores/chatStore';
 import { useGameStore } from '@/stores/gameStore';
 import { useGuideStore } from '@/stores/guideStore';
+import { useSidebarStore } from '@/stores/sidebarStore';
 import { useTaskStore } from '@/stores/taskStore';
 import { apiFetch } from '@/utils/api-client';
+import { computeCliDiagnosticsDedup } from '@/utils/cli-diagnostics-dedup';
 import { computeScrollRecomputeSignal } from '@/utils/scrollRecomputeSignal';
 import { getUserId } from '@/utils/userId';
+import { AgentHookHealthNotice, shouldRenderAgentHookHealthNotice } from './AgentHookHealthNotice';
 import { AuthorizationCard } from './AuthorizationCard';
 import { BootcampListModal } from './BootcampListModal';
 import { BootstrapOrchestrator } from './BootstrapOrchestrator';
-import { CatCafeHub } from './CatCafeHub';
 import { ChatContainerHeader } from './ChatContainerHeader';
 import { ChatInput } from './ChatInput';
 import { ChatMessage } from './ChatMessage';
@@ -43,7 +50,8 @@ import { syncLocalBootcampState } from './first-run-quest/syncLocalBootcampState
 import { useFirstProjectMistakeTipGate } from './first-run-quest/useFirstProjectMistakeTipGate';
 import { useFirstProjectPreviewAutoOpen } from './first-run-quest/useFirstProjectPreviewAutoOpen';
 import { GameOverlayConnector } from './game/GameOverlayConnector';
-import { HubListModal } from './HubListModal';
+import { HubCatEditor } from './HubCatEditor';
+import { HubCoCreatorEditor } from './HubCoCreatorEditor';
 import { BootcampIcon } from './icons/BootcampIcon';
 import { PawIcon } from './icons/PawIcon';
 import { MessageActions } from './MessageActions';
@@ -62,7 +70,9 @@ import { assignDocumentRoute, pushThreadRouteWithHistory } from './ThreadSidebar
 import { VoteActiveBar } from './VoteActiveBar';
 import { type VoteConfig, VoteConfigModal } from './VoteConfigModal';
 import { WorkspacePanel } from './WorkspacePanel';
+import { FloatingTranscriptContainer } from './workspace/FloatingTranscriptContainer';
 import { ResizeHandle } from './workspace/ResizeHandle';
+import { TranscriptPanel } from './workspace/TranscriptPanel';
 
 interface ChatContainerProps {
   threadId: string;
@@ -87,7 +97,28 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // component's `threadId` prop, not the flat current-thread mirror. Closes
   // AC-C6 race window for the entire ChatContainer surface (Task 2 only
   // covered hasActiveInvocation; this finishes the job).
-  const messages = useThreadMessages(threadId);
+  const allMessages = useThreadMessages(threadId);
+
+  // #697: Filter out messages that are still queued (not yet delivered).
+  // Without this, queued messages render in the chat stream AND in QueuePanel,
+  // causing visual duplication until the queue processor dequeues them.
+  const queueRaw = useChatStore((s) => s.queue);
+  const queuedMessageIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!queueRaw || queueRaw.length === 0) return ids;
+    for (const entry of queueRaw) {
+      if (entry.status !== 'queued') continue;
+      if (entry.messageId) ids.add(entry.messageId);
+      if (entry.mergedMessageIds) {
+        for (const mid of entry.mergedMessageIds) ids.add(mid);
+      }
+    }
+    return ids;
+  }, [queueRaw]);
+  const messages = useMemo(
+    () => (queuedMessageIds.size === 0 ? allMessages : allMessages.filter((m) => !queuedMessageIds.has(m.id))),
+    [allMessages, queuedMessageIds],
+  );
   const {
     hasActive: hasActiveInvocation,
     activeInvocations,
@@ -127,15 +158,19 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // AC-6: research=multi hint from Signal study "多猫研究" button
   const isResearchMode = searchParams?.get('research') === 'multi';
   const { clearTasks } = useTaskStore();
-  const { cats, getCatById, isLoading, hasFetched } = useCatData();
+  const { cats, getCatById, refresh: refreshCats, isLoading, hasFetched } = useCatData();
   const workspaceWorktreeId = useChatStore((s) => s.workspaceWorktreeId);
   usePreviewAutoOpen(workspaceWorktreeId, threadId);
   useWorkspaceNavigate(workspaceWorktreeId, threadId);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  useTeleport(); // F227: drive the Hub to a teleport target message (thread:teleport)
+  const { isOpen: sidebarOpen, open: openSidebar, close: closeSidebar, toggle: toggleSidebar } = useSidebarStore();
   const [statusPanelOpen, setStatusPanelOpen] = useState(true);
   const [mobileStatusOpen, setMobileStatusOpen] = useState(false);
   const [showBootcampList, setShowBootcampList] = useState(false);
-  const [showHubList, setShowHubList] = useState(false);
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
+  const editingCat = editingCatId ? (getCatById(editingCatId) ?? null) : null;
+  const [coCreatorEditorOpen, setCoCreatorEditorOpen] = useState(false);
+  const coCreator = useCoCreatorConfig();
   const [showFirstRunQuestPrompt, setShowFirstRunQuestPrompt] = useState(false);
   const [showQuestWizard, setShowQuestWizard] = useState(false);
   // F106: fetch bootcamp count independently of sidebar lifecycle
@@ -170,12 +205,6 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     'cat-cafe:statusPanelWidth',
     STATUS_PANEL_DEFAULT,
   );
-  // F063 Gap 6: sidebar width in px, persisted
-  const SIDEBAR_DEFAULT = 240;
-  const [sidebarWidth, setSidebarWidth, resetSidebarWidth] = usePersistedState(
-    'cat-cafe:sidebarWidth',
-    SIDEBAR_DEFAULT,
-  );
   const containerRef = useRef<HTMLDivElement>(null);
   const handleHorizontalResize = useCallback(
     (delta: number) => {
@@ -187,12 +216,6 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     },
     [setChatBasis],
   );
-  const handleSidebarResize = useCallback(
-    (delta: number) => {
-      setSidebarWidth((prev) => Math.min(480, Math.max(180, prev + delta)));
-    },
-    [setSidebarWidth],
-  );
   // clowder-ai#28: drag-to-resize for right status panel (negative delta = panel wider)
   const handleStatusPanelResize = useCallback(
     (delta: number) => {
@@ -201,20 +224,21 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     [setStatusPanelWidth],
   );
 
-  // F063: auto-open panel when message file path click triggers workspace mode
+  // F063/F195: auto-open panel when workspace or transcript mode is set
   useEffect(() => {
-    if (rightPanelMode === 'workspace' && !statusPanelOpen) {
+    if ((rightPanelMode === 'workspace' || rightPanelMode === 'transcript') && !statusPanelOpen) {
       setStatusPanelOpen(true);
     }
   }, [rightPanelMode, statusPanelOpen]);
 
+  const isDesktop = useIsDesktop();
+
   // Desktop: open sidebar before first paint (useLayoutEffect avoids false→true flicker).
-  // SSR parity: both server and client start with false, layoutEffect flips before paint.
   useLayoutEffect(() => {
-    if (typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 768px)').matches) {
-      setSidebarOpen(true);
+    if (isDesktop) {
+      openSidebar();
     }
-  }, []);
+  }, [isDesktop, openSidebar]);
 
   const { handleAgentMessage, handleStop: stopHandler, resetRefs, resetTimeout, clearDoneTimeout } = useAgentMessages();
   const { handleScroll, scrollContainerRef, messagesEndRef, isLoadingHistory, hasMore } = useChatHistory(threadId);
@@ -302,7 +326,12 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   const storeThreads = useChatStore((s) => s.threads);
   const setThreads = useChatStore((s) => s.setThreads);
   const handleSkipFirstRunQuest = useCallback(() => {
-    // Session-only skip — next refresh will re-check backend state
+    // #707: Persist skip to localStorage so refreshing doesn't re-trigger
+    try {
+      localStorage.setItem('cat-cafe:first-run-quest-skipped', '1');
+    } catch {
+      /* localStorage may be unavailable in some contexts */
+    }
     setShowFirstRunQuestPrompt(false);
   }, []);
   const handleStartFirstRunQuest = useCallback(() => {
@@ -377,6 +406,12 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     // Only show first-run prompt after a successful cat fetch — prevents false
     // positives when /api/cats fails transiently (returns [] on network error).
     if (!hasFetched) return;
+    // #707: Don't re-show if user previously skipped
+    try {
+      if (localStorage.getItem('cat-cafe:first-run-quest-skipped') === '1') return;
+    } catch {
+      /* localStorage unavailable */
+    }
     setShowFirstRunQuestPrompt(true);
   }, [cats.length, isLoading, hasFetched, storeThreads, threadId]);
 
@@ -528,6 +563,8 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // F113-E: Fetch governance status for the current project (drives ProjectSetupCard)
   const currentProjectPath = useChatStore((s) => s.currentProjectPath);
   const { status: govStatus, refetch: govRefetch } = useGovernanceStatus(currentProjectPath);
+  const isProjectThread = !!currentProjectPath && currentProjectPath !== 'default' && currentProjectPath !== 'lobby';
+  const agentHookHealth = useAgentHookHealth({ enabled: isProjectThread });
   const [setupDone, setSetupDone] = useState(false);
   // Show card when: needs setup (idle) OR just completed setup (done) — only in empty threads
   const showSetupCard = !!(
@@ -544,6 +581,15 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
       setSetupDone(false);
     }
   }, [threadId]);
+  const showAgentHookNotice =
+    isProjectThread &&
+    !showSetupCard &&
+    shouldRenderAgentHookHealthNotice({
+      health: agentHookHealth.health,
+      error: agentHookHealth.error,
+      syncing: agentHookHealth.syncing,
+      synced: agentHookHealth.synced,
+    });
 
   // F152 Phase B: memory bootstrap state
   const {
@@ -569,13 +615,28 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     onIndexEvent: handleIndexSocketEvent,
   });
 
+  const handleEditCat = useCallback((catId: string) => setEditingCatId(catId), []);
+  const handleEditCoCreator = useCallback(() => setCoCreatorEditorOpen(true), []);
+  // F212 follow-up — UI-layer dedup for adjacent identical CliDiagnostics panels.
+  // Compute once per messages change; map is keyed by messageId.
+  const cliDedupMap = useMemo(() => computeCliDiagnosticsDedup(messages), [messages]);
   const renderSingleMessage = useCallback(
-    (msg: ChatMessageData) => (
-      <MessageActions key={msg.id} message={msg} threadId={threadId}>
-        <ChatMessage message={msg} getCatById={getCatById} />
-      </MessageActions>
-    ),
-    [threadId, getCatById],
+    (msg: ChatMessageData) => {
+      const dedupInfo = cliDedupMap.get(msg.id);
+      return (
+        <MessageActions key={msg.id} message={msg} threadId={threadId}>
+          <ChatMessage
+            message={msg}
+            getCatById={getCatById}
+            onEditCat={handleEditCat}
+            onEditCoCreator={handleEditCoCreator}
+            hideDiagnosticsPanel={dedupInfo?.hideDiagnosticsPanel}
+            dedupCount={dedupInfo?.dedupCount}
+          />
+        </MessageActions>
+      );
+    },
+    [threadId, getCatById, handleEditCat, handleEditCoCreator, cliDedupMap],
   );
 
   const { cancelInvocation, syncRooms, socketConnected } = useSocket(socketCallbacks, threadId);
@@ -586,9 +647,12 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // queue hydration or a missed intent_mode event). In that case we still need
   // the top cancel affordance — otherwise the thread looks active in the
   // execution bar but offers no single-cat cancel control.
+  const activeInvocationCount = Object.keys(activeInvocations).length;
+  const singleSpawningTarget =
+    targetCats.length === 1 && targetCats[0] !== undefined && catStatuses[targetCats[0]] === 'spawning';
   const showThinkingIndicator =
     intentMode === 'execute' ||
-    (intentMode == null && hasActiveInvocation && Object.keys(activeInvocations).length === 1);
+    (intentMode == null && hasActiveInvocation && (activeInvocationCount === 1 || singleSpawningTarget));
 
   useVoiceAutoPlay();
   useVoiceStream();
@@ -738,7 +802,6 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
           uploadError={uploadError}
           onZoomToThread={handleZoomToThread}
         />
-        <CatCafeHub />
       </>
     );
   }
@@ -748,7 +811,10 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   if (isExport) {
     const exportReady = !isLoadingHistory && messages.length > 0 && !isLoading;
     return (
-      <div className="min-h-screen bg-cafe-surface" {...(exportReady ? { 'data-export-ready': 'true' } : {})}>
+      <div
+        className="min-h-screen bg-[var(--console-shell-bg)]"
+        {...(exportReady ? { 'data-export-ready': 'true' } : {})}
+      >
         <div className="max-w-4xl mx-auto p-4">{messages.map(renderSingleMessage)}</div>
       </div>
     );
@@ -756,27 +822,16 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
 
   return (
     <div ref={containerRef} className="flex h-screen h-dvh">
-      {sidebarOpen && (
+      {/* Mobile-only sidebar overlay — desktop sidebar is in AppShell */}
+      {sidebarOpen && !isDesktop && (
         <>
-          {/* Backdrop — mobile only */}
           <div
-            className="fixed inset-0 bg-black/30 z-20 md:hidden"
-            onClick={() => setSidebarOpen(false)}
+            className="fixed inset-0 bg-[var(--console-overlay-backdrop)] backdrop-blur-sm z-20"
+            onClick={closeSidebar}
             aria-hidden="true"
           />
-          <div
-            className="fixed inset-y-0 left-0 z-30 md:static md:z-auto flex-shrink-0"
-            style={{ width: sidebarWidth }}
-          >
-            <ThreadSidebar
-              onClose={() => setSidebarOpen(false)}
-              className="w-full"
-              onBootcampClick={() => setShowBootcampList(true)}
-              onHubClick={() => setShowHubList(true)}
-            />
-          </div>
-          <div className="hidden md:flex items-center">
-            <ResizeHandle direction="horizontal" onResize={handleSidebarResize} onDoubleClick={resetSidebarWidth} />
+          <div className="fixed inset-y-0 left-0 z-30 w-[240px]">
+            <ThreadSidebar onClose={closeSidebar} className="w-full" />
           </div>
         </>
       )}
@@ -784,14 +839,14 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
       <div
         className="flex flex-col min-w-0"
         style={
-          statusPanelOpen && rightPanelMode === 'workspace'
+          statusPanelOpen && (rightPanelMode === 'workspace' || rightPanelMode === 'transcript')
             ? { flexBasis: `${chatBasis}%`, flexGrow: 0, flexShrink: 0 }
             : { flex: '1 1 0%' }
         }
       >
         <ChatContainerHeader
           sidebarOpen={sidebarOpen}
-          onToggleSidebar={() => setSidebarOpen((v) => !v)}
+          onToggleSidebar={toggleSidebar}
           threadId={threadId}
           authPendingCount={authPending.length}
           viewMode={viewMode}
@@ -803,7 +858,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
         />
 
         {intentMode === 'ideate' && <ParallelStatusBar onStop={handleStop} threadId={threadId} />}
-        {showThinkingIndicator && <ThinkingIndicator onCancel={cancelInvocation} />}
+        {showThinkingIndicator && <ThinkingIndicator onCancel={cancelInvocation} threadId={threadId} />}
 
         <div className="flex-1 relative overflow-hidden">
           <main
@@ -823,14 +878,27 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
               checkedAt={connectionStatus.checkedAt}
               isOfflineSnapshot={isOfflineSnapshot}
             />
+            {showAgentHookNotice && (
+              <div className="mb-3 flex justify-center text-left">
+                <div className="max-w-[85%] w-full">
+                  <AgentHookHealthNotice
+                    health={agentHookHealth.health}
+                    error={agentHookHealth.error}
+                    syncing={agentHookHealth.syncing}
+                    synced={agentHookHealth.synced}
+                    onSync={agentHookHealth.sync}
+                  />
+                </div>
+              </div>
+            )}
             {!hasMore && messages.length > 0 && (
               <div className="text-center py-3 text-xs text-cafe-muted">没有更多消息了</div>
             )}
             {messages.length === 0 && !isLoadingHistory ? (
               <div className="text-center mt-20">
-                <PawIcon className="w-12 h-12 text-cocreator-light mx-auto mb-4" />
+                <PawIcon className="w-12 h-12 text-cafe-muted mx-auto mb-4" />
                 <p className="text-lg text-cafe-secondary mb-1">欢迎来到 Clowder AI!</p>
-                <p className="text-sm text-cafe-muted">
+                <p className="text-sm text-cafe-muted" suppressHydrationWarning>
                   {cats.length > 0 ? '输入 @布偶 召唤布偶猫开始聊天' : '还没有可用成员，先开始新手教程创建第一只猫猫'}
                 </p>
                 {showSetupCard && govStatus && (
@@ -841,6 +909,11 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
                       isEmptyDir={govStatus.isEmptyDir}
                       isGitRepo={govStatus.isGitRepo}
                       gitAvailable={govStatus.gitAvailable}
+                      agentHookHealth={agentHookHealth.health}
+                      agentHookHealthError={agentHookHealth.error}
+                      agentHookSyncing={agentHookHealth.syncing}
+                      agentHookSynced={agentHookHealth.synced}
+                      onSyncAgentHooks={agentHookHealth.sync}
                       onComplete={() => {
                         setSetupDone(true);
                         govRefetch();
@@ -880,7 +953,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
                       <button
                         type="button"
                         onClick={() => setShowBootcampList(true)}
-                        className="mt-6 inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors text-sm font-medium"
+                        className="mt-6 inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-cafe-accent/20 bg-accent-50 text-cafe-accent hover:bg-accent-100 transition-colors text-sm font-medium"
                         data-testid="empty-state-bootcamp-list"
                       >
                         <BootcampIcon className="w-4 h-4" />
@@ -892,7 +965,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
                     <button
                       type="button"
                       onClick={() => setShowBootcampList(true)}
-                      className="mt-6 inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors text-sm font-medium"
+                      className="mt-6 inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-cafe-accent/20 bg-accent-50 text-cafe-accent hover:bg-accent-100 transition-colors text-sm font-medium"
                       data-testid="empty-state-bootcamp"
                     >
                       <BootcampIcon className="w-4 h-4" />
@@ -917,14 +990,14 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
 
         <div ref={attachBottomChromeRef}>
           {authPending.length > 0 && (
-            <div className="border-t border-amber-200 bg-amber-50/40 py-2">
+            <div className="border-t border-conn-amber-ring bg-conn-amber-bg/40 py-2">
               {authPending.map((req) => (
                 <AuthorizationCard key={req.requestId} request={req} onRespond={authRespond} />
               ))}
             </div>
           )}
 
-          <ThreadExecutionBar />
+          <ThreadExecutionBar threadId={threadId} />
           <QueuePanel threadId={threadId} />
           <VoteActiveBar threadId={threadId} onEnd={() => {}} />
 
@@ -948,7 +1021,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
             })()}
 
           {isResearchMode && (
-            <div className="mx-4 mb-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+            <div className="mx-4 mb-2 rounded-lg border border-[var(--semantic-success)] bg-[var(--semantic-success-surface)] px-3 py-2 text-xs text-conn-emerald-text">
               多猫研究模式 — 文章上下文已注入。请输入研究问题，猫猫会自动调用 multi_mention 邀请其他猫参与分析。
             </div>
           )}
@@ -971,8 +1044,8 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
             <ChatInput
               key={threadId}
               threadId={threadId}
-              onSend={(content, images, whisper, deliveryMode) =>
-                handleSend(content, images, undefined, whisper, deliveryMode)
+              onSend={(content, images, whisper, deliveryMode, replyToId) =>
+                handleSend(content, images, undefined, whisper, deliveryMode, replyToId)
               }
               onStop={handleStop}
               disabled={connectionStatus.isReadonly}
@@ -986,7 +1059,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
           {isGameActive && overlayMinimized && gameView?.threadId === threadId && (
             <button
               onClick={() => useGameStore.getState().restoreOverlay()}
-              className="mx-4 mb-2 flex items-center justify-center gap-2 rounded-lg border border-purple-300 bg-purple-50 px-3 py-2 text-sm text-purple-700 hover:bg-purple-100 transition-colors"
+              className="mx-4 mb-2 flex items-center justify-center gap-2 rounded-lg border border-[var(--color-cafe-accent)] bg-[var(--accent-50)] px-3 py-2 text-sm text-[var(--color-cafe-accent)] hover:bg-[var(--color-cocreator-surface)] transition-colors"
             >
               🎮 返回游戏
             </button>
@@ -1054,7 +1127,9 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
           <div className="hidden lg:flex">
             <ResizeHandle
               direction="horizontal"
+              label="右侧状态栏"
               onResize={handleStatusPanelResize}
+              onCollapse={() => setStatusPanelOpen(false)}
               onDoubleClick={resetStatusPanelWidth}
             />
           </div>
@@ -1073,10 +1148,29 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
       )}
       {statusPanelOpen && rightPanelMode === 'workspace' && (
         <>
-          <ResizeHandle direction="horizontal" onResize={handleHorizontalResize} onDoubleClick={resetChatBasis} />
+          <ResizeHandle
+            direction="horizontal"
+            label="右侧工作区"
+            onResize={handleHorizontalResize}
+            onCollapse={() => setStatusPanelOpen(false)}
+            onDoubleClick={resetChatBasis}
+          />
           <WorkspacePanel />
         </>
       )}
+      {statusPanelOpen && rightPanelMode === 'transcript' && (
+        <>
+          <ResizeHandle
+            direction="horizontal"
+            label="右侧转录栏"
+            onResize={handleHorizontalResize}
+            onCollapse={() => setStatusPanelOpen(false)}
+            onDoubleClick={resetChatBasis}
+          />
+          <TranscriptPanel />
+        </>
+      )}
+      <FloatingTranscriptContainer />
       <MobileStatusSheet
         open={mobileStatusOpen}
         onClose={() => setMobileStatusOpen(false)}
@@ -1089,44 +1183,62 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
         threadId={threadId}
         messageSummary={messageSummary}
       />
-      {showFirstRunQuestPrompt && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-4">
-          <div
-            className="w-full max-w-md rounded-2xl border border-amber-200 bg-white p-6 shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h3 className="text-lg font-semibold text-gray-900">开始猫猫新手教程？</h3>
-            <p className="mt-2 text-sm text-gray-600">
-              当前还没有可用成员。我们可以先带你创建第一只猫猫，再开始首个协作任务。
-            </p>
-            <div className="mt-5 flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={handleSkipFirstRunQuest}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-              >
-                跳过
-              </button>
-              <button
-                type="button"
-                onClick={handleStartFirstRunQuest}
-                className="rounded-lg bg-amber-500 px-3 py-2 text-sm font-medium text-white hover:bg-amber-600"
-              >
-                开始教程
-              </button>
+      {showFirstRunQuestPrompt &&
+        createPortal(
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[var(--console-overlay-medium)] px-4 backdrop-blur-sm">
+            <div
+              className="w-full max-w-md rounded-2xl border border-conn-amber-ring bg-[var(--console-card-bg)] p-6 shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-cafe">开始猫猫新手教程？</h3>
+              <p className="mt-2 text-sm text-cafe-secondary">
+                当前还没有可用成员。我们可以先带你创建第一只猫猫，再开始首个协作任务。
+              </p>
+              <div className="mt-5 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={handleSkipFirstRunQuest}
+                  className="rounded-lg border border-[var(--console-border-soft)] px-3 py-2 text-sm text-cafe-secondary hover:bg-[var(--console-hover-bg)]"
+                >
+                  跳过
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStartFirstRunQuest}
+                  className="rounded-lg bg-cafe-accent px-3 py-2 text-sm font-medium text-[var(--cafe-surface)] hover:opacity-90"
+                >
+                  开始教程
+                </button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
-      <CatCafeHub />
+          </div>,
+          document.body,
+        )}
       <FirstRunQuestWizard
         open={showQuestWizard}
         onClose={() => setShowQuestWizard(false)}
         onCreated={handleQuestCreated}
       />
       <BootcampListModal open={showBootcampList} onClose={handleBootcampModalClose} currentThreadId={threadId} />
-      <HubListModal open={showHubList} onClose={() => setShowHubList(false)} currentThreadId={threadId} />
       {showVoteModal && <VoteConfigModal onSubmit={handleVoteSubmit} onCancel={() => setShowVoteModal(false)} />}
+      {editingCat && (
+        <HubCatEditor
+          open
+          cat={editingCat}
+          draft={null}
+          onClose={() => setEditingCatId(null)}
+          onSaved={async () => {
+            await refreshCats();
+            setEditingCatId(null);
+          }}
+        />
+      )}
+      <HubCoCreatorEditor
+        open={coCreatorEditorOpen}
+        coCreator={coCreator}
+        onClose={() => setCoCreatorEditorOpen(false)}
+        onSaved={() => setCoCreatorEditorOpen(false)}
+      />
       {/* Bootcamp guide overlay: intro phase tips + lifecycle tips (phase-7.5 uses guide engine) */}
       {(() => {
         if (showFirstRunQuestPrompt || showQuestWizard) return null;

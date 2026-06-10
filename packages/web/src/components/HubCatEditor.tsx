@@ -1,14 +1,16 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { CatData } from '@/hooks/useCatData';
 import { apiFetch } from '@/utils/api-client';
 import type { ConfigData } from './config-viewer-types';
 import type { TemplateCard } from './first-run-quest/TemplateStep';
 import type { AccountsResponse, ProfileItem } from './hub-accounts.types';
-import { buildEditorLoadingNote, uploadAvatarAsset } from './hub-cat-editor.client';
+import { uploadAvatarAsset, uploadRefAudioAsset } from './hub-cat-editor.client';
 import {
   autoSlug,
+  buildCatPatchPayload,
   buildCatPayload,
   buildCodexConfigPatches,
   buildStrategyPayload,
@@ -25,6 +27,7 @@ import {
   splitMentionPatterns,
   toCodexRuntimeSettings,
   toStrategyForm,
+  withDefaultModelMentionPattern,
 } from './hub-cat-editor.model';
 import { AccountSection, IdentitySection, RoutingSection } from './hub-cat-editor.sections';
 import { AdvancedRuntimeSection } from './hub-cat-editor-advanced';
@@ -248,14 +251,19 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
     });
   }, [availableProfiles, cat, draft, form.clientId]);
 
+  // Auto-fill first available model only on profile/client change — NOT when
+  // the user clears the field. Previous code had form.defaultModel in deps,
+  // which re-filled immediately after the user cleared the input (#802).
   useEffect(() => {
     if (form.clientId === 'antigravity' || modelOptions.length === 0) return;
-    if (form.defaultModel.trim().length > 0) return;
     setForm((prev) => {
       if (prev.clientId === 'antigravity' || prev.defaultModel.trim().length > 0) return prev;
       return { ...prev, defaultModel: modelOptions[0] ?? '' };
     });
-  }, [form.clientId, form.defaultModel, modelOptions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally
+    // excludes form.defaultModel: auto-fill runs on profile change, not on
+    // user clearing the model input.
+  }, [form.clientId, modelOptions]);
 
   useEffect(() => {
     if (form.clientId !== 'antigravity') return;
@@ -352,6 +360,14 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
     }
   };
 
+  const handleRefAudioUpload = async (file: File) => {
+    setError(null);
+    await uploadRefAudioAsset(file).then(
+      (result) => patchForm({ voiceRefAudio: result.url }),
+      (err) => setError(err instanceof Error ? err.message : '参考音频上传失败'),
+    );
+  };
+
   const handleSave = async () => {
     const errors: Record<string, boolean> = {};
     const errorMessages: string[] = [];
@@ -389,7 +405,8 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
         errors.account = true;
         errorMessages.push('请使用 provider/model 格式（如 minimax/MiniMax-M2.7），或填写 Provider 名称');
       }
-      if (splitMentionPatterns(form.mentionPatterns).length === 0) {
+      const effectiveCreateForm = selectedProfile?.authType === 'api_key' ? withDefaultModelMentionPattern(form) : form;
+      if (splitMentionPatterns(effectiveCreateForm.mentionPatterns).length === 0) {
         errors.routing = true;
         errorMessages.push('别名');
       }
@@ -409,7 +426,9 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
       }
     };
     try {
-      const catPayload = buildCatPayload(form, cat);
+      const effectiveForm =
+        !cat && selectedProfile?.authType === 'api_key' ? withDefaultModelMentionPattern(form) : form;
+      const catPayload = cat ? buildCatPatchPayload(effectiveForm, cat) : buildCatPayload(effectiveForm, cat);
       const rollbackCatPayload = cat ? buildCatPayload(initialState(cat, null), cat) : null;
       const strategyEditable = Boolean(
         cat && form.sessionChain === 'true' && (strategyForm?.sessionChainEnabled ?? true),
@@ -522,78 +541,53 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
     }
   };
 
-  const handleDelete = async () => {
-    if (!cat || saving) return;
-    const ok = await confirm({
-      title: '删除确认',
-      message: `确认删除成员「${cat.displayName || cat.name || cat.id}」吗？该操作不可撤销。`,
-      variant: 'danger',
-      confirmLabel: '删除',
-    });
-    if (!ok) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await apiFetch(`/api/cats/${cat.id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const payload = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-        setError((payload.error as string) ?? `删除失败 (${res.status})`);
-        return;
-      }
-      await onSaved();
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '删除失败');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-[var(--console-overlay-medium)] px-4 backdrop-blur-sm"
       onClick={requestClose}
       data-bootcamp-host="cat-editor-modal"
     >
       <div
-        className="flex max-h-[88vh] w-full max-w-[560px] flex-col rounded-[32px] border border-[#F0DDCD] bg-[#FFF8F2] shadow-2xl"
+        className="member-editor-modal flex max-h-[88vh] w-full max-w-[720px] flex-col overflow-hidden rounded-[28px] bg-[var(--console-card-bg)] shadow-[0_22px_48px_rgba(43,33,26,0.13)]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="member-editor-title"
         data-guide-id="member-editor.profile"
         onClick={(event) => event.stopPropagation()}
         data-bootcamp-step="cat-editor"
       >
-        <div className="flex shrink-0 items-start justify-between border-b border-[#F0DDCD] px-7 py-5">
-          <div>
-            <p className="text-[13px] font-semibold text-[#77A777]">
-              成员协作 &gt; 总览 &gt; {cat ? '编辑成员' : '添加成员'}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={requestClose}
-              className="text-2xl leading-none text-[#B59A88]"
-              aria-label="关闭"
-            >
-              ×
-            </button>
-          </div>
+        <div className="flex shrink-0 items-start justify-between px-7 py-5">
+          <p id="member-editor-title" className="text-compact font-extrabold text-[var(--console-modal-title)]">
+            {cat ? cat.displayName || cat.name || cat.id : '添加成员'}
+          </p>
+          <button
+            type="button"
+            onClick={requestClose}
+            className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[var(--console-modal-close-bg)] text-lg font-extrabold leading-none text-[var(--console-modal-close-fg)] transition hover:opacity-80"
+            aria-label="关闭"
+          >
+            ×
+          </button>
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-7 py-5">
           {!cat && templates.length > 0 && (
             <section
               data-guide-id="add-member.template-picker"
-              className="space-y-2 rounded-[20px] border border-[#F1E7DF] bg-[#FFFDFC] p-[18px]"
+              className="space-y-3 rounded-[18px] bg-[var(--console-card-bg)] p-[18px] shadow-[0_8px_22px_rgba(43,33,26,0.04)]"
             >
-              <h4 className="text-[15px] font-bold text-[#2D2118]">模板快选（可选）</h4>
-              <div className="flex flex-wrap gap-2">
+              <h4 className="text-base font-extrabold text-cafe">成员模板</h4>
+              <p className="text-xs font-semibold text-cafe-secondary">
+                从内置成员模板开始，选择后自动填充身份、模型与运行时默认值。
+              </p>
+              <div className="flex flex-wrap gap-2.5">
                 <button
                   type="button"
                   onClick={() => handleTemplateSelect(null)}
-                  className={`rounded-full px-3 py-1.5 text-sm transition ${
+                  className={`h-8 rounded-2xl px-3.5 text-compact font-extrabold transition ${
                     selectedTemplateId === 'custom'
-                      ? 'bg-[#D49266] text-white'
-                      : 'bg-[#F7EEE6] text-[#5C4B42] hover:bg-[#EDE0D5]'
+                      ? 'bg-[var(--cafe-accent)] text-[var(--cafe-surface)]'
+                      : 'bg-[var(--console-field-bg)] text-[var(--console-template-text)]'
                   }`}
                 >
                   自定义
@@ -603,10 +597,10 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
                     key={t.id}
                     type="button"
                     onClick={() => handleTemplateSelect(selectedTemplateId === t.id ? null : t)}
-                    className={`rounded-full px-3 py-1.5 text-sm transition ${
+                    className={`h-8 rounded-2xl px-3.5 text-compact font-extrabold transition ${
                       selectedTemplateId === t.id
-                        ? 'bg-[#D49266] text-white'
-                        : 'bg-[#F7EEE6] text-[#5C4B42] hover:bg-[#EDE0D5]'
+                        ? 'bg-[var(--cafe-accent)] text-[var(--cafe-surface)]'
+                        : 'bg-[var(--console-field-bg)] text-[var(--console-template-text)]'
                     }`}
                   >
                     {t.nickname ?? t.name}
@@ -622,6 +616,7 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
             avatarUploading={uploadingAvatar}
             onChange={patchForm}
             onAvatarUpload={handleAvatarUpload}
+            onRefAudioUpload={handleRefAudioUpload}
           />
           <AccountSection
             form={form}
@@ -653,43 +648,21 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
             onCodexChange={patchCodex}
           />
           <PersistenceBanner />
-          {error ? <p className="rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-600">{error}</p> : null}
+          {error ? <p className="rounded-2xl bg-conn-red-bg px-4 py-3 text-sm text-conn-red-text">{error}</p> : null}
         </div>
 
-        <div className="flex shrink-0 items-center justify-between border-t border-[#F0DDCD] bg-[#FFF3EA] px-7 py-4">
-          <div className="text-xs leading-5 text-[#8A776B]">
-            {buildEditorLoadingNote({ loadingProfiles, loadingStrategy, loadingCodexSettings })}
-          </div>
-          <div className="flex gap-2">
-            {cat ? (
-              <button
-                type="button"
-                aria-label="删除成员"
-                onClick={handleDelete}
-                disabled={saving}
-                className="rounded-full bg-red-50 px-5 py-2.5 text-sm font-semibold text-red-600 transition hover:bg-red-100 disabled:opacity-50"
-              >
-                删除成员
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={requestClose}
-              className="rounded-full bg-[#F7F3F0] px-5 py-2.5 text-sm font-semibold text-[#8A776B] transition hover:bg-[#F7EEE6]"
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving || saveBlockedByProfileBinding}
-              className="rounded-full bg-[#D49266] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#C88254] disabled:opacity-50"
-            >
-              {saving ? '保存中…' : cat ? '保存修改' : '保存'}
-            </button>
-          </div>
+        <div className="flex items-center justify-end px-7 pb-5 pt-4">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving || saveBlockedByProfileBinding}
+            className="h-8 rounded-[10px] bg-[var(--cafe-accent)] px-4 text-compact font-extrabold text-[var(--cafe-surface)] transition hover:bg-[var(--cafe-accent-hover)] disabled:opacity-50"
+          >
+            {saving ? '保存中…' : '保存'}
+          </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -41,7 +41,18 @@ export type ResumeFailureKind = 'missing_session' | 'cli_exit' | 'auth' | 'inval
 export function classifyResumeFailure(message: string | undefined): ResumeFailureKind | null {
   if (!message) return null;
 
-  if (/(No conversation found with session ID|no rollout found|missing_rollout)/i.test(message)) {
+  // Claude: "No conversation found with session ID: <uuid>"
+  // Codex:  "no rollout found for thread id <uuid>"
+  // Gemini: "Error resuming session: Invalid session identifier \"<id>\""
+  //   (narrowed to "Invalid session identifier" to avoid matching auth/rate-limit
+  //   errors that also start with "Error resuming session:")
+  // OpenCode: "Session not found"
+  // (Kimi silently accepts any session ID — no error produced)
+  if (
+    /(No conversation found with session ID|no rollout found|missing_rollout|Invalid session identifier|Session not found)/i.test(
+      message,
+    )
+  ) {
     return 'missing_session';
   }
   if (/CLI 异常退出 \(code:\s*(?:\d+|null)(?:,\s*signal:\s*[^)]+)?\)/i.test(message)) {
@@ -87,9 +98,21 @@ export function isPromptTokenLimitExceededError(message: string | undefined): bo
   return /(prompt token count|input tokens?).*exceeds the limit of \d+/i.test(message);
 }
 
+export function isContextWindowOverflowError(message: string | undefined): boolean {
+  if (!message) return false;
+  return /ran out of room|context window|context_window/i.test(message);
+}
+
 export function isCliTimeoutError(message: string | undefined): boolean {
   if (!message) return false;
   return /CLI (?:响应超时|idle-silent 超时)/i.test(message);
+}
+
+/** F215: Detect malformed tool-call error emitted by ClaudeAgentService (form A / B).
+ *  Used in invoke-single-cat to trigger seal+fresh-context+46接力 fallback chain. */
+export function isMalformedToolCallError(message: string | undefined): boolean {
+  if (!message) return false;
+  return message.startsWith('malformed_toolcall:');
 }
 
 /* ── Pre-flight timeout guard ────────────────────────────── */
@@ -111,8 +134,8 @@ export const PREFLIGHT_TIMEOUT_MS = Number(process.env.CAT_CAFE_PREFLIGHT_TIMEOU
  * The original promise is NOT cancelled (no way to do so generically)
  * but the caller can proceed instead of hanging forever.
  */
-export function preflightRace<T>(promise: Promise<T>, label: string, signal?: AbortSignal): Promise<T> {
-  if (signal?.aborted) return Promise.reject(signal.reason);
+export async function preflightRace<T>(promise: Promise<T>, label: string, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw signal.reason;
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   const cleanup = (): void => {

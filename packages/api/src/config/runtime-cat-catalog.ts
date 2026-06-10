@@ -9,6 +9,7 @@ import type {
   ClientId,
   CoCreatorConfig,
   ContextBudget,
+  VoiceConfig,
 } from '@cat-cafe/shared';
 import { createCatId } from '@cat-cafe/shared';
 import { clearBudgetCache } from './cat-budgets.js';
@@ -41,6 +42,7 @@ export interface RuntimeCatInput {
   commandArgs?: string[];
   cliConfigArgs?: string[];
   contextBudget?: ContextBudget;
+  voiceConfig?: VoiceConfig;
   /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
   provider?: string;
 }
@@ -67,6 +69,7 @@ export interface RuntimeCatUpdate {
   commandArgs?: string[];
   cliConfigArgs?: string[];
   contextBudget?: ContextBudget | null;
+  voiceConfig?: VoiceConfig | null;
   /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
   provider?: string | null;
   available?: boolean;
@@ -76,6 +79,7 @@ export interface RuntimeCoCreatorUpdate {
   name?: string;
   aliases?: string[];
   mentionPatterns?: string[];
+  timeZone?: string;
   avatar?: string | null;
   color?: CatColor | null;
 }
@@ -222,6 +226,7 @@ function createBreedFromInput(input: RuntimeCatInput): CatBreed {
         ...(input.cliConfigArgs && input.cliConfigArgs.length > 0 ? { cliConfigArgs: input.cliConfigArgs } : {}),
         ...(input.provider ? { provider: input.provider } : {}),
         ...(input.contextBudget ? { contextBudget: input.contextBudget } : {}),
+        ...(input.voiceConfig !== undefined ? { voiceConfig: input.voiceConfig } : {}),
         ...(input.personality != null && input.personality.trim().length > 0 ? { personality: input.personality } : {}),
         ...(input.teamStrengths != null && input.teamStrengths.trim().length > 0
           ? { teamStrengths: input.teamStrengths.trim() }
@@ -399,6 +404,13 @@ export function updateRuntimeCat(projectRoot: string, catId: string, patch: Runt
       delete variant.contextBudget;
     }
   }
+  if (patch.voiceConfig !== undefined) {
+    if (patch.voiceConfig) {
+      variant.voiceConfig = patch.voiceConfig;
+    } else {
+      delete variant.voiceConfig;
+    }
+  }
   if (patch.commandArgs !== undefined) {
     if (patch.commandArgs.length > 0) {
       variant.commandArgs = patch.commandArgs;
@@ -465,6 +477,10 @@ export function updateRuntimeCoCreator(projectRoot: string, patch: RuntimeCoCrea
       : {}),
   };
 
+  if (patch.timeZone !== undefined) {
+    nextOwner.timeZone = patch.timeZone.trim();
+  }
+
   if (patch.avatar !== undefined) {
     if (patch.avatar && patch.avatar.trim().length > 0) {
       nextOwner.avatar = patch.avatar.trim();
@@ -487,6 +503,7 @@ export function updateRuntimeCoCreator(projectRoot: string, patch: RuntimeCoCrea
     mentionPatterns: Array.isArray(nextOwner.mentionPatterns)
       ? (nextOwner.mentionPatterns as string[])
       : [...currentOwner.mentionPatterns],
+    ...(typeof nextOwner.timeZone === 'string' ? { timeZone: nextOwner.timeZone } : {}),
     ...(typeof nextOwner.avatar === 'string' ? { avatar: nextOwner.avatar } : {}),
     ...(nextOwner.color ? { color: nextOwner.color as CatColor } : {}),
   };

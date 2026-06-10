@@ -29,7 +29,7 @@ import type {
   SkillHealthSummary,
 } from '@cat-cafe/shared';
 import { catRegistry } from '@cat-cafe/shared';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { parse as parseYaml } from 'yaml';
 import { appendAuditEntry } from '../config/capabilities/capability-audit.js';
 import {
@@ -37,18 +37,28 @@ import {
   type DiscoveryPaths,
   deduplicateDiscoveredMcpServers,
   discoverExternalMcpServers,
-  ensureCatCafeMainServer,
   generateCliConfigs,
-  migrateLegacyCatCafeCapability,
-  migrateResolverBackedCapabilities,
+  healCatCafeMcpTopology,
   readCapabilitiesConfig,
-  realignManagedCatCafeServerPaths,
   resolveServersForCat,
   toCapabilityEntry,
   withCapabilityLock,
   writeCapabilitiesConfig,
 } from '../config/capabilities/capability-orchestrator.js';
+import { sanitizeCapabilityForResponse } from '../config/capabilities/capability-redaction.js';
+import {
+  requireCapabilityWriteOwner,
+  requireLocalCapabilityWriteRequest,
+  resolveCapabilityWriteSessionUserId,
+} from '../config/capabilities/capability-write-guards.js';
 import { isManagedSkill, readSkillsState } from '../config/governance/skills-state.js';
+import { resourceCapId } from '../domains/plugin/PluginRegistry.js';
+import { parsePluginManifest } from '../domains/plugin/plugin-manifest.js';
+import {
+  ManagedSkillWritebackConflictError,
+  mountManagedSkillSymlinks,
+  unmountManagedSkillSymlinks,
+} from '../utils/managed-skill-writeback.js';
 import { validateProjectPath } from '../utils/project-path.js';
 import { resolveUserId } from '../utils/request-identity.js';
 import {
@@ -59,6 +69,9 @@ import {
 import { type McpProbeResult, probeMcpCapability } from './mcp-probe.js';
 
 // ────────── Helpers ──────────
+
+const MODULE_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const CANONICAL_PLUGINS_DIR = join(MODULE_REPO_ROOT, 'plugins');
 
 /**
  * Returns subdirectory names.
@@ -99,6 +112,70 @@ async function listSkillSubdirs(dir: string, exclude?: string[]): Promise<string
   return names;
 }
 
+async function collectDeclaredPluginSkillIds(
+  pluginsDir: string,
+  declaredSkillIds: Map<string, Set<string>>,
+): Promise<boolean> {
+  const pluginDirs = await listSubdirs(pluginsDir);
+  if (pluginDirs === null) return false;
+
+  for (const dirName of pluginDirs) {
+    const manifestPath = join(pluginsDir, dirName, 'plugin.yaml');
+    if (!existsSync(manifestPath)) continue;
+
+    try {
+      const manifest = parsePluginManifest(manifestPath);
+      if (manifest.id !== dirName) continue;
+      const skillIds = new Set(
+        manifest.resources
+          .filter((resource) => resource.type === 'skill')
+          .map((resource) => resourceCapId(manifest.id, resource)),
+      );
+      declaredSkillIds.set(manifest.id, skillIds);
+    } catch {}
+  }
+
+  return true;
+}
+
+async function readDeclaredPluginSkillIds(projectRoot: string): Promise<Map<string, Set<string>> | null> {
+  const declaredSkillIds = new Map<string, Set<string>>();
+  const pluginsDirs = [CANONICAL_PLUGINS_DIR];
+  const projectPluginsDir = join(projectRoot, 'plugins');
+  if (resolve(projectPluginsDir) !== resolve(CANONICAL_PLUGINS_DIR)) {
+    pluginsDirs.push(projectPluginsDir);
+  }
+
+  for (const pluginsDir of pluginsDirs) {
+    const ok = await collectDeclaredPluginSkillIds(pluginsDir, declaredSkillIds);
+    if (!ok) return null;
+  }
+
+  return declaredSkillIds;
+}
+
+function isDeclaredPluginSkill(
+  cap: CapabilityEntry,
+  allSkillNames: Set<string>,
+  declaredPluginSkillIds: Map<string, Set<string>> | null,
+): boolean {
+  if (!cap.pluginId) return false;
+  if (declaredPluginSkillIds === null) return true;
+  const declaredIds = declaredPluginSkillIds.get(cap.pluginId);
+  if (!declaredIds) return allSkillNames.has(cap.id);
+  return declaredIds.has(cap.id);
+}
+
+function shouldKeepSkillCapability(
+  cap: CapabilityEntry,
+  allSkillNames: Set<string>,
+  declaredPluginSkillIds: Map<string, Set<string>> | null,
+): boolean {
+  if (cap.type !== 'skill') return true;
+  if (cap.pluginId) return isDeclaredPluginSkill(cap, allSkillNames, declaredPluginSkillIds);
+  return allSkillNames.has(cap.id);
+}
+
 /** Walk up from CWD to find pnpm-workspace.yaml — the monorepo root. */
 function findMonorepoRoot(): string {
   let dir = process.cwd();
@@ -113,6 +190,36 @@ const PROJECT_ROOT = findMonorepoRoot();
 
 function getProjectRoot(): string {
   return PROJECT_ROOT;
+}
+
+function canReadSensitiveMcpConfig(request: FastifyRequest): boolean {
+  const sessionUserId = resolveCapabilityWriteSessionUserId(request);
+  return !!sessionUserId && !requireCapabilityWriteOwner(sessionUserId, { requireConfiguredOwner: true });
+}
+
+function buildBoardMcpServer(
+  cap: CapabilityEntry,
+  options?: { includeLaunchFields?: boolean },
+): CapabilityBoardItem['mcpServer'] | undefined {
+  const sanitized = sanitizeCapabilityForResponse(cap);
+  const server = sanitized?.mcpServer;
+  if (!server) return undefined;
+
+  const boardServer: CapabilityBoardItem['mcpServer'] = {
+    ...(server.transport && { transport: server.transport }),
+    ...(server.resolver && { resolver: server.resolver }),
+  };
+  if (options?.includeLaunchFields) {
+    if (server.command) boardServer.command = server.command;
+    if (Array.isArray(server.args)) boardServer.args = [...server.args];
+    if (server.url) boardServer.url = server.url;
+  }
+  if (server.env) boardServer.env = { ...server.env };
+  if (server.headers) boardServer.headers = { ...server.headers };
+
+  const envKeys = Object.keys(cap.mcpServer?.env ?? {});
+  if (envKeys.length > 0) boardServer.envKeys = envKeys;
+  return boardServer;
 }
 
 /**
@@ -335,6 +442,7 @@ const MCP_DESCRIPTIONS: Record<string, string> = {
   'cat-cafe-collab': '三猫协作工具 — 消息、上下文、任务、权限等（协作核心）',
   'cat-cafe-memory': '三猫记忆工具 — 证据检索、反思、会话链回放',
   'cat-cafe-signals': '信号猎手工具 — inbox 检索、搜索、摘要',
+  'cat-cafe-finance': '金融事实工具 — 只读查询基金与宏观数据，返回 source/asOf/confidence/snapshot_id',
 };
 const MAX_CONCURRENT_MCP_PROBES = 4;
 const DOCKER_GATEWAY_DESCRIPTION_BASE =
@@ -412,6 +520,7 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     // Multi-project: accept ?projectPath=... to manage capabilities for any project
     const query = request.query as { projectPath?: string; probe?: string | boolean };
     const probeEnabled = query.probe === true || query.probe === 'true' || query.probe === '1';
+    const includeMcpLaunchFields = canReadSensitiveMcpConfig(request);
     let projectRoot = getProjectRoot();
     if (query.projectPath) {
       const validated = await validateProjectPath(query.projectPath);
@@ -434,15 +543,10 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
         catCafeRepoRoot,
       });
     } else {
-      const migrated = migrateLegacyCatCafeCapability(config, { catCafeRepoRoot });
-      const resolverMigrated = migrateResolverBackedCapabilities(migrated.config);
-      const mainServerMigrated = ensureCatCafeMainServer(resolverMigrated.config, { catCafeRepoRoot });
-      const pathRealigned = realignManagedCatCafeServerPaths(mainServerMigrated.config, { catCafeRepoRoot });
-      if (migrated.migrated || resolverMigrated.migrated || mainServerMigrated.migrated || pathRealigned.migrated) {
-        config = pathRealigned.config;
+      const healed = healCatCafeMcpTopology(config, { catCafeRepoRoot });
+      config = healed.config;
+      if (healed.migrated) {
         await writeCapabilitiesConfig(projectRoot, config);
-      } else {
-        config = pathRealigned.config;
       }
     }
 
@@ -556,8 +660,11 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     // Prune stale skills no longer on filesystem.
     // Guard: only prune when ALL provider scans succeeded (no null returns).
     if (allScansOk) {
+      const declaredPluginSkillIds = await readDeclaredPluginSkillIds(projectRoot);
       const before = config.capabilities.length;
-      config.capabilities = config.capabilities.filter((c) => c.type !== 'skill' || allSkillNames.has(c.id));
+      config.capabilities = config.capabilities.filter((c) =>
+        shouldKeepSkillCapability(c, allSkillNames, declaredPluginSkillIds),
+      );
       if (config.capabilities.length !== before) configDirty = true;
     }
 
@@ -578,7 +685,16 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     const discoveredServers = deduplicateDiscoveredMcpServers([...projectLevelServers, ...userLevelServers]);
     // Skip legacy Cat Cafe names — a stale 'cat-cafe' entry in user config should
     // not be re-added alongside the split 'cat-cafe-*' built-in entries.
-    const CAT_CAFE_BUILTIN_NAMES = new Set(['cat-cafe', 'cat-cafe-collab', 'cat-cafe-memory', 'cat-cafe-signals']);
+    // F193/F207 split-only: include supplemental built-ins so discovery doesn't
+    // re-add stale user-level entries alongside managed split servers.
+    const CAT_CAFE_BUILTIN_NAMES = new Set([
+      'cat-cafe',
+      'cat-cafe-collab',
+      'cat-cafe-memory',
+      'cat-cafe-signals',
+      'cat-cafe-limb',
+      'cat-cafe-finance',
+    ]);
     for (const server of discoveredServers) {
       if (CAT_CAFE_BUILTIN_NAMES.has(server.name)) continue;
       const exists = config.capabilities.some((c) => c.type === 'mcp' && c.id === server.name);
@@ -648,7 +764,9 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
         source: cap.source,
         enabled: cap.enabled,
         cats,
+        mcpServer: buildBoardMcpServer(cap, { includeLaunchFields: includeMcpLaunchFields }),
         layer: 'L1',
+        pluginId: cap.pluginId,
         ...(cap.ecosystem && { ecosystem: cap.ecosystem }),
         ...(cap.lockVersion && { lockVersion: cap.lockVersion }),
       };
@@ -677,6 +795,7 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
         enabled: cap.enabled,
         cats,
         layer: cap.source === 'external' ? 'L3' : 'L2',
+        pluginId: cap.pluginId,
       };
       const meta =
         cap.source === 'cat-cafe'
@@ -734,7 +853,7 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     const mountSourceNames = new Set(
       mountSkillsSrc === catCafeSkillsDir ? (catCafeOwnSkills ?? []) : ((await listSkillSubdirs(mountSkillsSrc)) ?? []),
     );
-    const catCafeSkillItems = items.filter((i) => i.type === 'skill' && i.source === 'cat-cafe');
+    const catCafeSkillItems = items.filter((i) => i.type === 'skill' && i.source === 'cat-cafe' && !i.pluginId);
     const providerDirCandidates = buildProviderSkillDirCandidates(projectRoot, home);
     await Promise.all(
       catCafeSkillItems.map(async (item) => {
@@ -790,10 +909,22 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
 
   // ── PATCH /api/capabilities ──
   app.patch('/api/capabilities', async (request, reply) => {
-    const userId = resolveUserId(request);
+    const userId = resolveCapabilityWriteSessionUserId(request);
     if (!userId) {
       reply.status(401);
-      return { error: 'Identity required (session cookie or X-Cat-Cafe-User header)' };
+      return { error: 'Identity required (session cookie)' };
+    }
+    const localError = requireLocalCapabilityWriteRequest(request);
+    if (localError) {
+      reply.status(localError.status);
+      return { error: localError.error };
+    }
+    const ownerError = requireCapabilityWriteOwner(userId, {
+      allowMissingOwner: true,
+    });
+    if (ownerError) {
+      reply.status(ownerError.status);
+      return { error: ownerError.error };
     }
 
     const body = request.body as CapabilityPatchRequest | undefined;
@@ -819,21 +950,42 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return withCapabilityLock(projectRoot, async () => {
-      const config = await readCapabilitiesConfig(projectRoot);
-      if (!config) {
+      const rawConfig = await readCapabilitiesConfig(projectRoot);
+      if (!rawConfig) {
         reply.status(404);
         return { error: 'capabilities.json not found. Run GET first to bootstrap.' };
       }
+
+      // F193 Phase C (cloud round 8 P2 #4): heal BEFORE locating + mutating
+      // the toggle target. Otherwise toggling legacy `cat-cafe` in a pre-
+      // Phase-C config would mutate an entry that the subsequent heal removes,
+      // and the audit/response would report a capability not present in the
+      // written finalConfig. Healing first ensures the toggle operates on
+      // the canonical post-Phase-C state.
+      const catCafeRepoRoot = await resolveMainRepoPath();
+      const config = healCatCafeMcpTopology(rawConfig, { catCafeRepoRoot }).config;
 
       const capIndex = config.capabilities.findIndex(
         (c) => c.id === body.capabilityId && c.type === body.capabilityType,
       );
       if (capIndex === -1) {
         reply.status(404);
-        return { error: `Capability "${body.capabilityId}" (type=${body.capabilityType}) not found` };
+        return {
+          error: `Capability "${body.capabilityId}" (type=${body.capabilityType}) not found in canonical config (may have been migrated by F193 Phase C — try the corresponding split server id)`,
+        };
       }
 
       const cap = config.capabilities[capIndex]!;
+
+      // Plugin-owned capabilities must be toggled through /api/plugins/:id/enable|disable
+      // to keep lifecycle state (symlinks, limb nodes, CLI configs) consistent.
+      if (cap.pluginId) {
+        reply.status(409);
+        return {
+          error: `Capability "${body.capabilityId}" is managed by plugin "${cap.pluginId}". Use /api/plugins/${cap.pluginId}/enable or /disable instead.`,
+        };
+      }
+
       const beforeSnapshot = structuredClone(cap);
 
       if (body.scope === 'global') {
@@ -852,6 +1004,30 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
+      if (body.scope === 'global' && cap.type === 'skill' && cap.source === 'cat-cafe') {
+        try {
+          const disabledSkillNames = config.capabilities
+            .filter(
+              (entry) => entry.type === 'skill' && entry.source === 'cat-cafe' && !entry.pluginId && !entry.enabled,
+            )
+            .map((entry) => entry.id);
+
+          if (body.enabled) {
+            await mountManagedSkillSymlinks(projectRoot, cap.id, CAT_CAFE_SKILLS_SRC, { disabledSkillNames });
+          } else {
+            await unmountManagedSkillSymlinks(projectRoot, cap.id, CAT_CAFE_SKILLS_SRC, {
+              disabledSkillNames,
+            });
+          }
+        } catch (err) {
+          if (err instanceof ManagedSkillWritebackConflictError) {
+            reply.status(409);
+            return { error: err.message };
+          }
+          throw err;
+        }
+      }
+
       await writeCapabilitiesConfig(projectRoot, config);
       await generateCliConfigs(config, getCliConfigPaths(projectRoot));
 
@@ -864,7 +1040,7 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
         after: cap,
       });
 
-      return { ok: true, capability: cap };
+      return { ok: true, capability: sanitizeCapabilityForResponse(cap) };
     });
   });
 
