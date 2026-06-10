@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -10,8 +10,15 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const runtimeScriptSource = join(__dirname, '..', '..', '..', 'scripts', 'runtime-worktree.sh');
+// runtime-worktree.sh `source`s this lib at startup — sandbox must carry the
+// whole closure or `set -e` dies sourcing a missing file (same root cause as
+// the sync-manifest closure: copying the script means copying its deps too).
+const quickstartLibSource = join(__dirname, '..', '..', '..', 'scripts', 'lib', 'quickstart-freshness.sh');
+const nodeRuntimeGuardSource = join(__dirname, '..', '..', '..', 'scripts', 'lib', 'node-runtime-guard.sh');
 const tempDirs = [];
 const tempProcs = [];
+
+process.env.CAT_CAFE_SKIP_NODE_RUNTIME_GUARD = '1';
 
 function createTempProject(name) {
   const projectDir = mkdtempSync(join(tmpdir(), `${name}-`));
@@ -24,10 +31,49 @@ function createTempProject(name) {
   writeFileSync(join(projectDir, 'scripts', 'runtime-worktree.sh'), readFileSync(runtimeScriptSource, 'utf8'), {
     mode: 0o755,
   });
+  mkdirSync(join(projectDir, 'scripts', 'lib'), { recursive: true });
+  writeFileSync(
+    join(projectDir, 'scripts', 'lib', 'quickstart-freshness.sh'),
+    readFileSync(quickstartLibSource, 'utf8'),
+    { mode: 0o644 },
+  );
+  writeFileSync(
+    join(projectDir, 'scripts', 'lib', 'node-runtime-guard.sh'),
+    readFileSync(nodeRuntimeGuardSource, 'utf8'),
+    {
+      mode: 0o644,
+    },
+  );
   writeFileSync(join(projectDir, 'scripts', 'start-dev.sh'), '#!/bin/sh\nprintf "STARTED:%s\\n" "$PWD"\n', {
     mode: 0o755,
   });
   return projectDir;
+}
+
+function createBashOnlyPath(projectDir) {
+  const binDir = join(projectDir, 'bash-only-bin');
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, 'bash'), '#!/bin/sh\nexec /bin/bash "$@"\n', { mode: 0o755 });
+  return binDir;
+}
+
+function createProbePath(projectDir, tools) {
+  const binDir = createBashOnlyPath(projectDir);
+  for (const [name, body] of Object.entries(tools)) {
+    writeFileSync(join(binDir, name), body, { mode: 0o755 });
+  }
+  return binDir;
+}
+
+function listenOnLoopback() {
+  const server = createServer();
+  return new Promise((resolvePromise, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      tempProcs.push(server);
+      resolvePromise(server);
+    });
+  });
 }
 
 function createPnpmStub(projectDir) {
@@ -121,7 +167,11 @@ async function waitForLocalPort(port, attempts = 20) {
 afterEach(async () => {
   while (tempProcs.length > 0) {
     const proc = tempProcs.pop();
-    proc.kill('SIGKILL');
+    if (typeof proc.kill === 'function') {
+      proc.kill('SIGKILL');
+    } else {
+      await new Promise((resolve) => proc.close(resolve));
+    }
   }
   while (tempDirs.length > 0) {
     await rm(tempDirs.pop(), { recursive: true, force: true });
@@ -132,6 +182,101 @@ describe('runtime-worktree.sh', () => {
   it('keeps the runtime-worktree entrypoint executable in the repository', () => {
     const mode = statSync(runtimeScriptSource).mode & 0o111;
     assert.notEqual(mode, 0, 'runtime-worktree.sh should retain an executable bit');
+  });
+
+  it('dev tcp probe falls back when timeout is unavailable', async () => {
+    const projectDir = createTempProject('runtime-no-timeout');
+    const server = await listenOnLoopback();
+    const binDir = createBashOnlyPath(projectDir);
+    const port = server.address().port;
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e
+source "${join(projectDir, 'scripts', 'runtime-worktree.sh')}" --source-only
+PATH="${binDir}"
+probe_port_with_dev_tcp "${port}"
+printf 'ok'`,
+      ],
+      {
+        cwd: projectDir,
+        encoding: 'utf8',
+      },
+    );
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), 'ok');
+  });
+
+  it('nc probe wraps nc with timeout when timeout is available', () => {
+    const projectDir = createTempProject('runtime-nc-timeout');
+    const timeoutLog = join(projectDir, 'timeout.log');
+    const ncLog = join(projectDir, 'nc.log');
+    const binDir = createProbePath(projectDir, {
+      timeout: `#!/bin/bash
+printf '%s\\n' "$*" >> "${timeoutLog}"
+shift
+exec "$@"
+`,
+      nc: `#!/bin/bash
+printf '%s\\n' "$*" >> "${ncLog}"
+exit 0
+`,
+    });
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e
+source "${join(projectDir, 'scripts', 'runtime-worktree.sh')}" --source-only
+PATH="${binDir}"
+probe_port_with_nc 6547
+printf 'ok'`,
+      ],
+      {
+        cwd: projectDir,
+        encoding: 'utf8',
+      },
+    );
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), 'ok');
+    assert.equal(readFileSync(timeoutLog, 'utf8').trim(), '1 nc -z 127.0.0.1 6547');
+    assert.equal(readFileSync(ncLog, 'utf8').trim(), '-z 127.0.0.1 6547');
+  });
+
+  it('nc probe falls back to bare nc when timeout is unavailable', () => {
+    const projectDir = createTempProject('runtime-nc-no-timeout');
+    const ncLog = join(projectDir, 'nc.log');
+    const binDir = createProbePath(projectDir, {
+      nc: `#!/bin/bash
+printf '%s\\n' "$*" >> "${ncLog}"
+exit 0
+`,
+    });
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e
+source "${join(projectDir, 'scripts', 'runtime-worktree.sh')}" --source-only
+PATH="${binDir}"
+probe_port_with_nc 6548
+printf 'ok'`,
+      ],
+      {
+        cwd: projectDir,
+        encoding: 'utf8',
+      },
+    );
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), 'ok');
+    assert.equal(readFileSync(ncLog, 'utf8').trim(), '-z 127.0.0.1 6548');
   });
 
   it('starts in-place when project is not a git repository', () => {
@@ -297,9 +442,9 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
     );
 
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /quick start missing shared dist/);
-    assert.match(result.stdout, /quick start missing MCP server dist/);
-    assert.match(result.stdout, /quick start missing web production build/);
+    assert.match(result.stdout, /quick start: shared dist stale\/missing/);
+    assert.match(result.stdout, /quick start: MCP server dist stale\/missing/);
+    assert.match(result.stdout, /quick start: web production build stale\/missing/);
     assert.match(result.stdout, /STARTED:/);
 
     const pnpmLog = readFileSync(env.RUNTIME_TEST_PNPM_LOG, 'utf8');

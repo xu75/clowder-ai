@@ -20,12 +20,23 @@ const log = createModuleLogger('acp-mcp-resolver');
 
 const MCP_SERVER_DIST = 'packages/mcp-server/dist';
 
-/** Canonical builtin cat-cafe MCP servers: name → dist filename. */
+/**
+ * Canonical builtin cat-cafe MCP servers: name → dist filename.
+ *
+ * F193 Phase C added `cat-cafe-limb`; F207 Phase B0 added
+ * `cat-cafe-finance`. Legacy `cat-cafe` is preserved here for ACP backward
+ * compatibility — F145 Phase E callers (per-project MCP whitelist) may
+ * still explicitly request it. The orchestrator removes legacy from the
+ * default capabilities.json instead, so Phase C migration runs at the
+ * canonical config layer.
+ */
 const BUILTIN_CAT_CAFE_SERVERS: ReadonlyMap<string, string> = new Map([
   ['cat-cafe', 'index.js'],
   ['cat-cafe-collab', 'collab.js'],
   ['cat-cafe-memory', 'memory.js'],
   ['cat-cafe-signals', 'signals.js'],
+  ['cat-cafe-limb', 'limb.js'],
+  ['cat-cafe-finance', 'finance.js'],
 ]);
 
 /** Returns the dist entrypoint filename for a canonical builtin, or null. */

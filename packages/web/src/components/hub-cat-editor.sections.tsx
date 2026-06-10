@@ -13,7 +13,9 @@ import {
   splitMentionPatterns,
   splitStrengthTags,
 } from './hub-cat-editor.model';
+import { CatColorField } from './hub-cat-editor-color-field';
 import { SectionCard, SelectField, TextField } from './hub-cat-editor-fields';
+import { VoiceConfigSection } from './hub-cat-editor-voice';
 import { TagEditor } from './hub-tag-editor';
 
 type FormPatch = Partial<HubCatEditorFormState>;
@@ -36,6 +38,7 @@ export function IdentitySection({
   avatarUploading,
   onChange,
   onAvatarUpload,
+  onRefAudioUpload,
 }: {
   cat?: CatData | null;
   form: HubCatEditorFormState;
@@ -43,6 +46,7 @@ export function IdentitySection({
   avatarUploading: boolean;
   onChange: (patch: FormPatch) => void;
   onAvatarUpload: (file: File) => Promise<void>;
+  onRefAudioUpload: (file: File) => Promise<void>;
 }) {
   const strengthTags = splitStrengthTags(form.strengths);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -97,13 +101,13 @@ export function IdentitySection({
       />
 
       <div className="flex items-center gap-3">
-        <span className="w-[140px] shrink-0 text-[13px] font-medium text-[#5C4B42]">Avatar</span>
+        <span className="text-xs font-bold text-cafe-secondary sm:w-[150px] sm:shrink-0">Avatar</span>
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          className="flex items-center gap-2 rounded-lg border border-[#E8DCCF] bg-[#F7F3F0] px-3 py-1.5 text-sm text-[#5C4B42] transition hover:border-[#D49266]"
+          className="flex items-center gap-2 rounded-[10px] bg-[var(--console-field-bg,var(--console-card-bg))] px-3 py-1.5 text-compact text-cafe-secondary transition hover:opacity-80"
         >
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full border border-[#E8DCCF] bg-white text-[10px] text-[#8A776B]">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-cafe-surface-canvas text-micro text-cafe-secondary">
             {avatarSrc ? (
               <AvatarImageWithFallback src={avatarSrc} alt="Avatar preview" className="h-full w-full object-cover" />
             ) : (
@@ -135,29 +139,13 @@ export function IdentitySection({
         />
       </div>
 
-      <div className="flex items-center gap-3">
-        <span className="w-[140px] shrink-0 text-[13px] font-medium text-[#5C4B42]">Background Color</span>
-        <div className="flex items-center gap-2">
-          <label title="Primary">
-            <input
-              type="color"
-              aria-label="Background Color Primary"
-              value={form.colorPrimary}
-              onChange={(event) => onChange({ colorPrimary: event.target.value })}
-              className="h-8 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
-            />
-          </label>
-          <label title="Secondary">
-            <input
-              type="color"
-              aria-label="Background Color Secondary"
-              value={form.colorSecondary}
-              onChange={(event) => onChange({ colorSecondary: event.target.value })}
-              className="h-8 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
-            />
-          </label>
-        </div>
-      </div>
+      {/* F056 KD-18 / AC-E4: single-hue input — all derivation from one primary color
+       * (cat-persona-tokens.css OKLCH formulas). Secondary is deprecated; mirror
+       * primary → secondary to keep the API payload backward-compatible. */}
+      <CatColorField
+        value={form.colorPrimary}
+        onChange={(hex) => onChange({ colorPrimary: hex, colorSecondary: hex })}
+      />
 
       <TextField
         label="擅长领域"
@@ -182,7 +170,7 @@ export function IdentitySection({
       />
 
       <div className="flex items-start gap-3">
-        <span className="w-[140px] shrink-0 pt-1 text-[13px] font-medium text-[#5C4B42]">Strengths</span>
+        <span className="w-[140px] shrink-0 pt-1 text-sm font-medium text-cafe-secondary">Strengths</span>
         <div className="min-w-0 flex-1">
           <TagEditor
             tags={strengthTags}
@@ -200,10 +188,7 @@ export function IdentitySection({
         />
       </div>
 
-      <div className="rounded-[10px] border border-dashed border-[#DCC9B8] bg-[#F7F3F0] px-3 py-2">
-        <p className="text-[13px] font-semibold text-[#8A776B]">▸ Voice Config (点击展开)</p>
-        <p className="mt-0.5 text-[11px] leading-4 text-[#B59A88]">需对接和启用语音功能后才支持配置</p>
-      </div>
+      <VoiceConfigSection form={form} onChange={onChange} onRefAudioUpload={onRefAudioUpload} />
     </SectionCard>
   );
 }
@@ -248,10 +233,10 @@ function ComboField({
 }) {
   const listId = `combo-${label.replace(/\s+/g, '-').toLowerCase()}`;
   return (
-    <label className="flex flex-col gap-1.5 text-[#5C4B42] sm:flex-row sm:items-center sm:gap-3">
-      <span className="text-[13px] font-semibold text-[#8A776B] sm:w-[140px] sm:shrink-0">
+    <label className="flex flex-col gap-1.5 text-cafe-secondary sm:flex-row sm:items-center sm:gap-3">
+      <span className="text-xs font-bold text-cafe-secondary sm:w-[150px] sm:shrink-0">
         {label}
-        {required && <span className="ml-0.5 text-[#E29578]">*</span>}
+        {required && <span className="ml-0.5 text-cafe-accent">*</span>}
       </span>
       <div className="min-w-0 flex-1">
         <input
@@ -259,7 +244,7 @@ function ComboField({
           value={value}
           onChange={(event) => onChange(event.target.value)}
           list={listId}
-          className="w-full rounded-[10px] border border-[#E8DCCF] bg-[#F7F3F0] px-3.5 py-2 text-[14px] leading-5 text-[#2D2118] placeholder:text-[#C4B5A8] outline-none transition focus:border-[#D49266] focus:ring-2 focus:ring-[#F5D2B8]"
+          className="w-full rounded-[10px] border border-transparent bg-[var(--console-field-bg,var(--console-card-bg))] px-3.5 py-2 text-compact leading-5 text-cafe placeholder:text-[var(--cafe-text-muted)] outline-none transition focus:border-cafe-accent focus:ring-2 focus:ring-cafe-accent/30"
           placeholder={placeholder}
         />
         <datalist id={listId}>
@@ -342,6 +327,12 @@ export function AccountSection({
   const accountOptions = availableProfiles;
   const selectedProfile = availableProfiles.find((p) => p.id === form.accountRef);
   const callHint = buildCallHint(form.clientId, selectedProfile, form.defaultModel, form.provider);
+  const selectedModel = form.defaultModel.trim();
+  const modelNotListed = selectedModel.length > 0 && modelOptions.length > 0 && !modelOptions.includes(selectedModel);
+  const modelSuggestions = useMemo(
+    () => (modelNotListed ? [selectedModel, ...modelOptions] : modelOptions),
+    [modelNotListed, modelOptions, selectedModel],
+  );
   const providerSuggestions = useMemo(
     () => buildProviderSuggestions(selectedProfile?.models ?? []),
     [selectedProfile?.models],
@@ -408,7 +399,7 @@ export function AccountSection({
               ariaLabel="Model"
               value={form.defaultModel}
               onChange={(value) => onChange({ defaultModel: value })}
-              suggestions={modelOptions}
+              suggestions={modelSuggestions}
               required
               placeholder={
                 form.clientId === 'opencode'
@@ -416,6 +407,13 @@ export function AccountSection({
                   : '模型标识符，如 claude-sonnet-4-5'
               }
             />
+            {modelNotListed ? (
+              <div className="rounded-[10px] bg-[var(--console-field-bg,var(--console-card-bg))] px-3 py-2">
+                <p className="text-xs leading-4 text-conn-amber-text">
+                  当前模型不在此认证信息的模型列表中；未修改 Model 时保存会保留原值，修改后会保存你输入的自定义值。
+                </p>
+              </div>
+            ) : null}
             {form.clientId === 'opencode' && selectedProfile?.authType === 'api_key' ? (
               <>
                 <ComboField
@@ -427,7 +425,7 @@ export function AccountSection({
                   required
                   placeholder="如 anthropic、openai、openai-responses、openrouter、maas"
                 />
-                <p className="text-[11px] leading-4 text-[#8A776B]">
+                <p className="text-xs leading-4 text-cafe-secondary">
                   OpenCode 根据 Provider 名称决定实际的 API 协议类型（如 openai → Chat Completions, anthropic →
                   Messages, openai-responses → Responses）
                 </p>
@@ -437,17 +435,17 @@ export function AccountSection({
             form.defaultModel.trim() &&
             !form.defaultModel.includes('/') &&
             !form.provider.trim() ? (
-              <div className="rounded-[10px] border border-dashed border-[#DCC9B8] bg-[#F7F3F0] px-3 py-2">
-                <p className="text-[11px] leading-4 text-[#8A776B]">
+              <div className="rounded-[10px] bg-[var(--console-field-bg,var(--console-card-bg))] px-3 py-2">
+                <p className="text-xs leading-4 text-cafe-secondary">
                   建议使用 `providerId/modelId` 格式（例如 `openai/gpt-5.4`），部分 provider 需要前缀才能正确路由。
                 </p>
               </div>
             ) : null}
             {callHint ? (
-              <div className="rounded-[10px] border border-dashed border-[#DCC9B8] bg-[#F7F3F0] px-3 py-2">
-                <p className="whitespace-pre-wrap text-[11px] leading-4 text-[#8A776B]">
+              <div className="rounded-[10px] bg-[var(--console-field-bg,var(--console-card-bg))] px-3 py-2">
+                <p className="whitespace-pre-wrap text-xs leading-4 text-cafe-secondary">
                   {callHint.label}
-                  <span className="font-semibold text-[#5C4D43]">{callHint.url}</span>
+                  <span className="font-semibold text-cafe">{callHint.url}</span>
                   {callHint.warning}
                 </p>
               </div>

@@ -23,6 +23,7 @@ export function MarketplaceSearch() {
   const [inputValue, setInputValue] = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const search = useMarketplaceStore((s) => s.search);
+  const browse = useMarketplaceStore((s) => s.browse);
   const ecosystemFilter = useMarketplaceStore((s) => s.ecosystemFilter);
   const setEcosystemFilter = useMarketplaceStore((s) => s.setEcosystemFilter);
   const trustFilter = useMarketplaceStore((s) => s.trustFilter);
@@ -35,9 +36,11 @@ export function MarketplaceSearch() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (v.trim()) {
         debounceRef.current = setTimeout(() => search(v.trim()), 300);
+      } else {
+        browse();
       }
     },
-    [search],
+    [search, browse],
   );
 
   const handleKeyDown = useCallback(
@@ -87,7 +90,7 @@ export function MarketplaceSearch() {
           onChange={handleInput}
           onKeyDown={handleKeyDown}
           placeholder="搜索能力..."
-          className="w-full rounded-lg border border-cafe-border bg-white py-2 pl-9 pr-3 text-sm text-cafe placeholder:text-cafe-muted focus:border-purple-300 focus:outline-none focus:ring-1 focus:ring-purple-200"
+          className="w-full rounded-lg border border-[var(--console-border-soft)] bg-transparent py-2 pl-9 pr-3 text-xs text-cafe-secondary placeholder:text-cafe-muted outline-none transition focus:bg-[var(--console-card-bg)] focus:ring-1 focus:ring-[var(--console-input-stroke)]"
         />
       </div>
 
@@ -96,8 +99,8 @@ export function MarketplaceSearch() {
           onClick={() => setEcosystemFilter([])}
           className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
             isAll
-              ? 'border-transparent bg-cafe-text text-white'
-              : 'border-cafe-border bg-cafe-surface text-cafe-secondary hover:bg-cafe-surface-elevated'
+              ? 'border-transparent bg-cafe-accent text-[var(--cafe-surface)]'
+              : 'border-transparent bg-[var(--console-field-bg)] text-cafe-secondary hover:bg-[var(--console-hover-bg)]'
           }`}
         >
           全部
@@ -110,8 +113,8 @@ export function MarketplaceSearch() {
               onClick={() => toggleEcosystem(eco)}
               className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
                 active
-                  ? 'border-transparent bg-cafe-text text-white'
-                  : 'border-cafe-border bg-cafe-surface text-cafe-secondary hover:bg-cafe-surface-elevated'
+                  ? 'border-transparent bg-cafe-accent text-[var(--cafe-surface)]'
+                  : 'border-transparent bg-[var(--console-field-bg)] text-cafe-secondary hover:bg-[var(--console-hover-bg)]'
               }`}
             >
               {ECOSYSTEM_LABELS[eco]}
@@ -121,13 +124,13 @@ export function MarketplaceSearch() {
       </div>
 
       <div className="flex flex-wrap gap-1.5">
-        <span className="self-center text-[10px] text-cafe-muted">信任:</span>
+        <span className="self-center text-micro text-cafe-muted">信任:</span>
         <button
           onClick={() => setTrustFilter([])}
           className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
             isTrustAll
-              ? 'border-transparent bg-cafe-text text-white'
-              : 'border-cafe-border bg-cafe-surface text-cafe-secondary hover:bg-cafe-surface-elevated'
+              ? 'border-transparent bg-cafe-accent text-[var(--cafe-surface)]'
+              : 'border-transparent bg-[var(--console-field-bg)] text-cafe-secondary hover:bg-[var(--console-hover-bg)]'
           }`}
         >
           全部
@@ -140,8 +143,8 @@ export function MarketplaceSearch() {
               onClick={() => toggleTrust(level)}
               className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
                 active
-                  ? 'border-transparent bg-cafe-text text-white'
-                  : 'border-cafe-border bg-cafe-surface text-cafe-secondary hover:bg-cafe-surface-elevated'
+                  ? 'border-transparent bg-cafe-accent text-[var(--cafe-surface)]'
+                  : 'border-transparent bg-[var(--console-field-bg)] text-cafe-secondary hover:bg-[var(--console-hover-bg)]'
               }`}
             >
               {TRUST_LABELS[level]}

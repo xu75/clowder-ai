@@ -67,7 +67,7 @@ export function HistorySearchModal({ onSelect, onClose }: HistorySearchModalProp
           onCompositionStart={ime.onCompositionStart}
           onCompositionEnd={ime.onCompositionEnd}
           placeholder="Search history..."
-          className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-300"
+          className="flex-1 text-sm outline-none bg-transparent placeholder:text-cafe-muted"
         />
         <button onClick={onClose} className="text-cafe-muted hover:text-cafe-secondary text-xs">
           Esc
@@ -93,7 +93,7 @@ export function HistorySearchModal({ onSelect, onClose }: HistorySearchModalProp
           </button>
         ))}
       </div>
-      <div className="px-3 py-1 text-[10px] text-cafe-muted border-t border-cafe-subtle">
+      <div className="px-3 py-1 text-micro text-cafe-muted border-t border-cafe-subtle">
         {'\u2191\u2193 \u9009\u62E9 \u00B7 Enter \u786E\u8BA4 \u00B7 Esc \u5173\u95ED'}
       </div>
     </div>

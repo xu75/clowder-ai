@@ -33,6 +33,24 @@ function resolveFormAccountRef(form: HubCatEditorFormState): string {
   return trimText(form.accountRef);
 }
 
+function buildVoiceConfig(form: HubCatEditorFormState) {
+  const voice = trimText(form.voiceVoice);
+  const langCode = trimText(form.voiceLangCode);
+  if (!voice) return undefined;
+  if (!langCode) return undefined;
+  const speed = Number.parseFloat(form.voiceSpeed);
+  const temperature = Number.parseFloat(form.voiceTemperature);
+  return {
+    voice,
+    langCode,
+    ...(Number.isFinite(speed) && speed > 0 ? { speed } : {}),
+    ...(trimText(form.voiceRefAudio) ? { refAudio: trimText(form.voiceRefAudio) } : {}),
+    ...(trimText(form.voiceRefText) ? { refText: trimText(form.voiceRefText) } : {}),
+    ...(trimText(form.voiceInstruct) ? { instruct: trimText(form.voiceInstruct) } : {}),
+    ...(Number.isFinite(temperature) && temperature >= 0 ? { temperature } : {}),
+  };
+}
+
 export function buildContextBudget(form: HubCatEditorFormState) {
   const values = [form.maxPromptTokens, form.maxContextTokens, form.maxMessages, form.maxContentLengthPerMsg].map(
     (value) => value.trim(),
@@ -81,6 +99,9 @@ export function buildCatPayload(form: HubCatEditorFormState, cat?: CatData | nul
       : cat?.cli?.effort
         ? { cli: { effort: null as null } }
         : {};
+  const voiceConfig = buildVoiceConfig(form);
+  const voiceConfigPatch: Record<string, unknown> =
+    voiceConfig !== undefined ? { voiceConfig } : cat?.voiceConfig ? { voiceConfig: null } : {};
   const common = {
     displayName,
     variantLabel: trimText(form.variantLabel),
@@ -100,6 +121,7 @@ export function buildCatPayload(form: HubCatEditorFormState, cat?: CatData | nul
     strengths: splitStrengthTags(form.strengths),
     sessionChain: form.sessionChain === 'true',
     ...contextBudgetPatch,
+    ...voiceConfigPatch,
   };
 
   if (form.clientId === 'antigravity') {
@@ -130,4 +152,35 @@ export function buildCatPayload(form: HubCatEditorFormState, cat?: CatData | nul
         ? { provider: null as null }
         : {}),
   };
+}
+
+function normalizeOptionalText(value: unknown): string | null {
+  const trimmed = trimText(value);
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function buildCatPatchPayload(form: HubCatEditorFormState, cat: CatData) {
+  const payload = buildCatPayload(form, cat) as Record<string, unknown>;
+
+  if (form.clientId === cat.clientId) {
+    delete payload.clientId;
+  }
+  if (trimText(form.defaultModel) === trimText(cat.defaultModel)) {
+    delete payload.defaultModel;
+  }
+
+  const nextAccountRef = normalizeOptionalText(form.accountRef);
+  const currentAccountRef = normalizeOptionalText(cat.accountRef);
+  if (nextAccountRef === currentAccountRef) {
+    delete payload.accountRef;
+  }
+
+  const nextProvider =
+    form.clientId === 'opencode' && trimText(form.provider).length > 0 ? trimText(form.provider) : null;
+  const currentProvider = normalizeOptionalText(cat.provider);
+  if (nextProvider === currentProvider) {
+    delete payload.provider;
+  }
+
+  return payload;
 }

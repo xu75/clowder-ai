@@ -8,7 +8,8 @@ created: 2026-03-09
 
 # F088 Multi-Platform Chat Gateway — 聊天平台接入网关
 
-> **Status**: done | **Completed**: 2026-04-10 | **Owner**: Ragdoll
+> **Status**: in-progress | **Core Completed**: 2026-04-10 | **Owner**: Ragdoll
+> Phase K (Telegram reliability hardening) fully merged 2026-05-07 (community clowder-ai#524/#641/#642)
 
 ## Why
 
@@ -44,25 +45,28 @@ MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。�
 
 | Phase | 内容 | 状态 | PR |
 |-------|------|------|-----|
-| **1 (MVP)** | 飞书 + Telegram DM-only 双向对话 | ✅ | [#328](https://github.com/zts212653/cat-cafe/pull/328) |
-| **2** | 多猫身份 + 分角色展示 + 外部 @路由 | ✅ | [#336](https://github.com/zts212653/cat-cafe/pull/336) |
+| **1 (MVP)** | 飞书 + Telegram DM-only 双向对话 | ✅ | [#328](https://github.com/zts212653/clowder-ai/pull/328) |
+| **2** | 多猫身份 + 分角色展示 + 外部 @路由 | ✅ | [#336](https://github.com/zts212653/clowder-ai/pull/336) |
 | **3** | 富文本卡片（rich block → 飞书 card / Telegram formatted） | ✅ | — |
 | **A** | ISSUE-1 修复：格式化 + DEFAULT_OWNER + Redis binding | ✅ | #344 + #346 |
 | **B** | IM 命令集 `/new /threads /use /where` + deep link | ✅ | #349 |
-| **4** | 消息编辑模拟流式（placeholder → edits → final） | ✅ | [#350](https://github.com/zts212653/cat-cafe/pull/350) |
-| **C** | 架构归一：命令管道统一 + 跨平台 thread | ✅ | [#353](https://github.com/zts212653/cat-cafe/pull/353) |
-| **D** | `/use` 模糊匹配：feat号 + title关键词 + 列表序号 | ✅ | [#355](https://github.com/zts212653/cat-cafe/pull/355) |
-| **5** | 图片/文件收发（双向） | ✅ | [#362](https://github.com/zts212653/cat-cafe/pull/362) |
-| **6** | 语音消息（STT/TTS） | ✅ | [#362](https://github.com/zts212653/cat-cafe/pull/362) |
-| **E** | 飞书卡片身份标识：所有回复走 interactive card + 猫名头部，消除多猫气泡合并 | ✅ | [#389](https://github.com/zts212653/cat-cafe/pull/389) |
-| **G (8A)** | IM Hub thread：命令隔离（控制面/对话面分离，双绑定）+ Hub thread 可见入口 | 🚧 in-progress | [#570](https://github.com/zts212653/cat-cafe/pull/570) |
+| **4** | 消息编辑模拟流式（placeholder → edits → final） | ✅ | [#350](https://github.com/zts212653/clowder-ai/pull/350) |
+| **C** | 架构归一：命令管道统一 + 跨平台 thread | ✅ | [#353](https://github.com/zts212653/clowder-ai/pull/353) |
+| **D** | `/use` 模糊匹配：feat号 + title关键词 + 列表序号 | ✅ | [#355](https://github.com/zts212653/clowder-ai/pull/355) |
+| **5** | 图片/文件收发（双向） | ✅ | [#362](https://github.com/zts212653/clowder-ai/pull/362) |
+| **6** | 语音消息（STT/TTS） | ✅ | [#362](https://github.com/zts212653/clowder-ai/pull/362) |
+| **E** | 飞书卡片身份标识：所有回复走 interactive card + 猫名头部，消除多猫气泡合并 | ✅ | [#389](https://github.com/zts212653/clowder-ai/pull/389) |
+| **G (8A)** | IM Hub thread：命令隔离（控制面/对话面分离，双绑定）+ Hub thread 可见入口 | 🚧 in-progress | [#570](https://github.com/zts212653/clowder-ai/pull/570) |
 | **H (8B)** | 模糊意图规则分流：无 binding / 低置信度消息走 Hub，系统卡片选择（无猫） | 📋 planned | — |
 | **I (8C)** | 猫参与 triage：用户点"帮我判断"或连续无法决策时触发 triage 猫（可配置开关） | 📋 planned | — |
 | **F** | iMessage 接入（OpenClaw + BlueBubbles） | 📋 planned | — |
 | **7** | 群聊公共层：ConnectorRouter sender 透传 + ConnectorSource sender 扩展 | 📋 planned | — (联动 [F134](F134-feishu-group-chat.md)) |
-| **8** | IM Hub 配置向导 — 平台接入引导 UI（飞书/Telegram/钉钉） | ✅ | [#680](https://github.com/zts212653/cat-cafe/pull/680) |
-| **J1** | file block 全链路 + outbound 投递 + 安全防护（URL 白名单 + path traversal guard + fileName 透传） | ✅ | [#689](https://github.com/zts212653/cat-cafe/pull/689) |
-| **J2** | Pandoc 文档生成服务 + MCP tool + 自动安装（init-cafe.sh / install.sh） | ✅ | [#693](https://github.com/zts212653/cat-cafe/pull/693) |
+| **8** | IM Hub 配置向导 — 平台接入引导 UI（飞书/Telegram/钉钉） | ✅ | [#680](https://github.com/zts212653/clowder-ai/pull/680) |
+| **J1** | file block 全链路 + outbound 投递 + 安全防护（URL 白名单 + path traversal guard + fileName 透传） | ✅ | [#689](https://github.com/zts212653/clowder-ai/pull/689) |
+| **J2** | Pandoc 文档生成服务 + MCP tool + 自动安装（init-cafe.sh / install.sh） | ✅ | [#693](https://github.com/zts212653/clowder-ai/pull/693) |
+| **K1** | Telegram streaming dedup：placeholder chatId mapping + deleteMessage | ✅ | [#1572](https://github.com/zts212653/clowder-ai/pull/1572) |
+| **K2** | Telegram inline final streaming：registerInlinePlaceholder + sendReply/sendRichMessage edit in-place | ✅ | [#1574](https://github.com/zts212653/clowder-ai/pull/1574) |
+| **K3** | Telegram 健壮性：HTML parse fallback、editMessage failure fallback、长文本分段 | ✅ | [#1575](https://github.com/zts212653/clowder-ai/pull/1575) |
 | **9** | 产品化（多账号/多workspace/运维） | 📋 planned | — |
 
 完整 AC 列表见 [各 Phase 详细 AC](assets/F088/acceptance-criteria.md)
@@ -75,7 +79,7 @@ MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。�
 
 **team lead已确认 Screen C 设计方向（2026-03-23）。**
 
-设计稿: [`designs/f088-im-hub-config-wizard-ux.pen`](../../designs/f088-im-hub-config-wizard-ux.pen)
+设计稿: `designs/f088-im-hub-config-wizard-ux.pen`
 
 **目标**: 在现有 `HubListModal` 中增加 Tab 导航，让team lead可以在 Web UI 中配置平台接入（飞书/Telegram/钉钉），无需手动编辑 `.env` 文件。
 
@@ -154,6 +158,54 @@ MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。�
 - [ ] 大小限制策略（飞书 30MB 上限）— 当前无硬性需求
 - [ ] LaTeX 自动安装（PDF 原生输出，当前降级为 DOCX）
 
+### Phase K: Telegram Reliability Follow-up（K1 ✅ | K2 ✅ | K3 ✅）
+
+**Source**: community issue [clowder-ai#524](https://github.com/zts212653/clowder-ai/issues/524), draft PRs [clowder-ai#641](https://github.com/zts212653/clowder-ai/pull/641) / [clowder-ai#642](https://github.com/zts212653/clowder-ai/pull/642)
+
+**背景**：Telegram 用户在 streaming 回复结束后看到两条相同最终消息：placeholder 被 edit 成最终内容，同时 `OutboundDeliveryHook.deliver()` 又发送一条最终回复。社区 PR #641 抓到了 duplicate 的主因，但分支混入无关 Windows start/status 与跨 adapter signature churn；PR #642 试图一次解决 inline final + rich/media delivery，scope 跨到 Phase 2/3，并引入 mid-loop skip 数据丢失风险。
+
+**三阶段边界**：
+
+| 阶段 | 问题 | 当前处理 |
+|------|------|----------|
+| K1 | Telegram streaming final duplicate：同一回复最终出现两条文本 | **本轮只修这个**。优先只改 Telegram adapter：`sendPlaceholder()` 记录 placeholder messageId → chatId，`deleteMessage(platformMessageId)` 用映射删除 placeholder。保持最终答案仍走现有 outbound delivery，不改 QueueProcessor/messages/其他 adapter |
+| K2 | Telegram inline streaming final：最终态也原地编辑，避免 placeholder 删除再发新消息 | 后续单独做。需要先设计 delivery ownership，不允许用 connectorId 粗粒度 skip 影响多 binding / mid-loop delivery |
+| K3 | Telegram 富文本、媒体文件、长文本、edit 失败 fallback、重试等健壮性 | 后续单独做。必须覆盖 `richBlocks`、`media_gallery/file/audio`、4096 字符限制、HTML parse fallback、retry/backoff，不压进 K1 |
+
+**K1 验收标准**：
+
+- [x] Telegram streaming plain-text 回复最终只保留一条最终答案
+- [x] placeholder 只在 outbound delivery 成功后清理；delivery 失败时 placeholder 保留作 fallback
+- [x] 不修改 `QueueProcessor` / `ConnectorInvokeTrigger` / `messages.ts` 的 delivery 状态机
+- [x] 不修改非 Telegram adapter 的 `deleteMessage` 签名或行为
+- [x] 回归测试覆盖 Telegram placeholder chatId 映射与 deletion
+- [x] 验证命令：`pnpm --dir packages/api run build` + Telegram/streaming/outbound 相关 node tests
+
+**K2 验收标准**：
+
+设计选型：`TelegramAdapter` 内部维护 `pendingInlineFinal: Map<chatId, platformMessageId>`。`StreamingOutboundHook.onStreamEnd()` 调 `adapter.registerInlinePlaceholder()`；`sendReply`/`sendRichMessage` 消费 Map → edit placeholder 而不发新消息。`OutboundDeliveryHook.deliver()` 签名不变，`QueueProcessor` 不变。
+
+- [x] Telegram streaming 结束后，最终纯文本 inline edit 到 placeholder（不删 placeholder，不发新消息）
+- [x] Telegram streaming 结束后，最终 rich message（HTML 格式）inline edit 到 placeholder
+- [x] `OutboundDeliveryHook.deliver()` 签名 / `QueueProcessor` 调用顺序不变
+- [x] 无 streaming session 时（mid-loop delivery、普通 sendReply）`sendReply`/`sendRichMessage` 行为不变
+- [x] 不影响 Feishu / WeCom / 其他 adapter 的 delivery 路径
+- [x] 回归测试覆盖 inline final（纯文本 + rich）、无 pending 时正常 sendReply、不影响其他 adapter
+
+**K3 验收标准**：
+
+- [x] `sendRichMessage` HTML parse 失败（`BUTTON_DATA_INVALID` / parse_mode 400）时 fallback 到纯文本发送
+- [x] `editMessage` 失败（消息被删除 / 权限问题）时 fallback 到 sendReply（不丢消息）
+- [x] `sendReply` / `sendRichMessage` 超长内容（>4096 chars）自动分段发送（而不是静默截断）
+- [x] 回归测试覆盖 HTML fallback、editMessage fallback、长文本分段
+
+**Review Focus（Maine Coon）**：
+
+- 防止把 K2/K3 scope 偷渡进 K1
+- 防止 connector-level skip 导致多 binding 或 mid-loop delivery 丢消息
+- 防止为了消除 duplicate 而丢失 rich/media/file outbound
+- 社区 PR 处理口径：#641/#642 不按现状 merge；家里完成 source-owned fix 后 outbound sync，并在社区侧 acknowledge contributor 的根因定位
+
 ## MVP Scope 硬边界
 
 **包含**：飞书+Telegram DM-only、单 Owner、静态 token、Markdown、入站幂等去重、thread mapping、outbound final-only
@@ -198,6 +250,7 @@ MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。�
 - **ISSUE-13**: 飞书图片+文字消息静默丢弃 — 飞书发送 text+image 混合消息时 `msg_type` 为 `post`（富文本），`FeishuAdapter.parseEvent()` 无 `case 'post':` handler → `default: return null` → 整条消息静默丢弃（HTTP 200，无日志）。**✅ PR #637 修复**：新增 `case 'post':` handler 遍历 `content[paragraph][node]` 结构，提取 `tag:'text'`/`tag:'a'` 文本和 `tag:'img'` 图片附件，支持 zh_cn/en_us/ja_jp locale fallback。同步增加 webhook diagnostic logging 和 callback vs agent 卡片视觉区分（紫色 `📨 传话` 标识）。
 - **ISSUE-14**: 飞书 post 内嵌图片下载 400 — PR #637 的 `case 'post':` handler 正确解析了 `image_key`，但 `feishuDownloadFn` 统一用 `/im/v1/messages/{msgId}/resources/{key}` 端点下载，该端点对 post 内嵌图片返回 400。post 内嵌图片需用 `/im/v1/images/{key}` 端点。**✅ PR #640 修复**：新增 `source: 'post-embedded'` 标记全链路穿透（FeishuAdapter → ConnectorRouter → ConnectorMediaService → feishuDownloadFn），按 source 分流 API 端点。
 - **ISSUE-16**: 外部 IM 创建线程后 spawn 的猫 cwd 错误 — **✅ PR #849 修复**：ConnectorRouter 创建 thread 时传 `findMonorepoRoot()` 作为 `projectPath`（会话 thread + Hub thread），并增加 lazy heal 回填存量 thread。新增 `updateProjectPath()` 到 ThreadStore 接口。3 个回归测试。
+- **ISSUE-17**: Telegram streaming final duplicate + reliability split — **✅ Phase K1/K2/K3 已完成 (PR #1572/#1574/#1575) + race fix (PR #1594)**。社区 issue [clowder-ai#524](https://github.com/zts212653/clowder-ai/issues/524) 与 draft PR [#641](https://github.com/zts212653/clowder-ai/pull/641) / [#642](https://github.com/zts212653/clowder-ai/pull/642) 暴露 Telegram streaming final delivery ownership 不清。K1 修 duplicate；K2 实现 inline final 原地编辑；K3 覆盖 HTML parse fallback、editMessage failure fallback、长文本分段、FIFO 队列健壮性。PR #1594 修 StreamingOutboundHook 竞态：early chunks 缓存至 placeholder 建好后 replay、end-before-start 场景 tombstone 机制防止迟到 placeholder 触发第二条消息。
 - **ISSUE-15**: Cat Café web 发消息 → 猫回复不推送到飞书 — `messages.ts` 的 immediate 路径（`router.routeExecution()`）消费完 agent 事件流后，只做 WebSocket 广播，**没有调用 `OutboundDeliveryHook.deliver()`**。**✅ PR #671 修复**：在 `messages.ts` 注入 `outboundHook` + `streamingHook`，routeExecution 消费循环中收集 turn text + richBlocks，成功时 fire-and-forget 调用 `deliverOutboundFromWeb()`；失败/取消时 `cleanupStreamingOnFailure()` 清理占位卡片。统一 `STREAM_START_TIMEOUT_MS`（5s）常量。18 个回归测试覆盖投递、流式、清理、超时对齐。
 
 ## Phase G+ Follow-up（8A 增量改进）

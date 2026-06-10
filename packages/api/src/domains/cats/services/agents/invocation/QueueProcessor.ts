@@ -8,14 +8,32 @@
  */
 
 import { resolveCliTimeoutMs } from '../../../../../utils/cli-timeout.js';
-import type { IMessageStore } from '../../stores/ports/MessageStore.js';
+import { emitQueueUpdated, enrichQueueEntries } from '../../../../../utils/queue-enrichment.js';
+import { hydrateReplyPreview, type IMessageStore } from '../../stores/ports/MessageStore.js';
+import { mergeTokenUsage, type TokenUsage } from '../../types.js';
 import {
   accumulateTextAggregate,
   accumulateTextParts,
   flattenTextParts,
   flattenTurnTextParts,
 } from '../text-aggregation.js';
+import {
+  type CollaborationContinuityCapsuleV1,
+  extractContinuityCapsuleFromAgentMessage,
+  formatContinuationPrompt,
+  isCollaborationContinuityCapsuleV1,
+} from './CollaborationContinuityCapsule.js';
 import type { InvocationQueue, QueueEntry } from './InvocationQueue.js';
+import {
+  type CommitInvocationInput,
+  type ConsumedContinuationToken,
+  type InvocationFinalStatus,
+  type PrepareInvocationInput,
+  type PrepareInvocationResult,
+  SessionContinuationCoordinator,
+  type SessionStrategy,
+} from './SessionContinuationCoordinator.js';
+import { stampVisibleTurn } from './visible-turn.js';
 
 /** Minimal interfaces for deps — avoid importing full types for testability */
 
@@ -33,6 +51,14 @@ interface TrackerLike {
     catIds?: string[],
   ): boolean;
   has(threadId: string, catId?: string): boolean;
+  /** F-parallel-cancel: expose a slot's own controller for per-cat cancel isolation. */
+  getController?(threadId: string, catId: string): AbortController | undefined;
+  /** F-parallel-cancel: aggregate final status — whole-invocation abort vs per-cat cancel. */
+  resolveFinalStatus?(
+    threadId: string,
+    targetCats: readonly string[],
+    batch: { aborted: boolean; reason?: string },
+  ): 'succeeded' | 'canceled' | 'canceled_by_user';
 }
 
 export interface InvocationRecordStoreLike {
@@ -63,6 +89,38 @@ interface LoggerLike {
   info(obj: unknown, msg?: string): void;
   warn(obj: unknown, msg?: string): void;
   error(obj: unknown, msg?: string): void;
+}
+
+/** #813: Minimal thread store interface for passive continuation. */
+export interface ThreadStoreLike {
+  getMemberSessionStrategy?(
+    threadId: string,
+    catId: string,
+    userId: string,
+  ): 'resume' | 'reborn' | undefined | Promise<'resume' | 'reborn' | undefined>;
+  setPendingContinuation(
+    threadId: string,
+    catId: string,
+    userId: string,
+    entry: { capsule: Record<string, unknown>; createdAt: number },
+  ): void | Promise<void>;
+  consumePendingContinuation(
+    threadId: string,
+    catId: string,
+    userId: string,
+  ):
+    | { capsule: Record<string, unknown>; createdAt: number }
+    | null
+    | Promise<{ capsule: Record<string, unknown>; createdAt: number } | null>;
+  /** #836: Check if a cat uses reborn session strategy in this thread.
+   *  Reborn cats skip continuation consume/enqueue — every invocation starts fresh. */
+  isRebornSession?(threadId: string, catId: string): boolean | Promise<boolean>;
+}
+
+export interface SessionContinuationCoordinatorLike {
+  resolveSessionStrategy?(threadId: string, catId: string, userId: string): Promise<SessionStrategy>;
+  prepareInvocationContext(input: PrepareInvocationInput): Promise<PrepareInvocationResult>;
+  commitInvocationOutcome(input: CommitInvocationInput): Promise<void>;
 }
 
 /** Minimal outbound delivery interface — avoids importing full OutboundDeliveryHook. */
@@ -114,6 +172,10 @@ export interface QueueProcessorDeps {
   streamingHook?: StreamingOutboundHookLike;
   /** F088 fix: optional thread metadata lookup for outbound delivery. */
   threadMetaLookup?: (threadId: string) => ThreadMetaLike | undefined | Promise<ThreadMetaLike | undefined>;
+  /** #813: Thread store for passive continuation (write/consume pending continuation). */
+  threadStore?: ThreadStoreLike;
+  /** F224: continuation lifecycle coordinator boundary. */
+  sessionContinuationCoordinator?: SessionContinuationCoordinatorLike;
 }
 
 /** F122B B6: Completion hook — called when a queue entry finishes execution. */
@@ -123,6 +185,14 @@ export type EntryCompleteHook = (
   responseText: string,
 ) => void;
 
+export type ContinuationEnqueueOutcome =
+  | 'enqueued'
+  | 'skipped_missing_capsule'
+  | 'skipped_invalid_capsule'
+  | 'skipped_existing_entry'
+  | 'skipped_rate_limited'
+  | 'queue_full';
+
 export class QueueProcessor {
   private deps: QueueProcessorDeps;
   /** F108: Per-slot mutex — prevents concurrent double-start per (thread, cat) pair.
@@ -130,14 +200,57 @@ export class QueueProcessor {
   private processingSlots = new Map<string, number>();
   /** F108: Per-slot pause tracking (set on canceled/failed, cleared on next execution) */
   private pausedSlots = new Map<string, 'canceled' | 'failed'>();
+  private pauseEpoch = new Map<string, number>();
+  /** Suppress auto-resume on next canceled_by_user completion (single-shot per slot).
+   *  Set by cancelAll handler so user cancel = "stop everything", not "start next".
+   *  Map value = timestamp — auto-expires after SUPPRESS_TTL_MS to prevent stale
+   *  suppresses from multi-cat cancelAll (secondary cats may never fire onInvocationComplete). */
+  private suppressedAutoResume = new Map<string, number>();
+  private static readonly SUPPRESS_TTL_MS = 60_000;
   /** F122B B6: Per-entry completion hooks (for multi-mention response aggregation). */
   private entryCompleteHooks = new Map<string, EntryCompleteHook>();
   /** F118 D4: max age before a processingSlot is considered zombie (default 2.5× CLI timeout = 75min) */
   private processingSlotTtlMs: number;
+  private readonly sessionContinuationCoordinator?: SessionContinuationCoordinatorLike;
+  /** #502 PR2: bounded auto-continuation guard, in-memory per process. */
+  private continuationWindows = new Map<string, number[]>();
+  private static readonly CONTINUATION_WINDOW_MS = 60 * 60 * 1000;
+  private static readonly MAX_CONTINUATIONS_PER_WINDOW = 5;
 
   constructor(deps: QueueProcessorDeps, opts?: { processingSlotTtlMs?: number }) {
     this.deps = deps;
     this.processingSlotTtlMs = opts?.processingSlotTtlMs ?? 2.5 * resolveCliTimeoutMs(undefined);
+    this.sessionContinuationCoordinator =
+      deps.sessionContinuationCoordinator ?? QueueProcessor.createSessionContinuationCoordinator(deps.threadStore);
+  }
+
+  private static createSessionContinuationCoordinator(
+    threadStore?: ThreadStoreLike,
+  ): SessionContinuationCoordinatorLike | undefined {
+    if (!threadStore) return undefined;
+    return new SessionContinuationCoordinator({
+      threadStore: {
+        getMemberSessionStrategy: async (threadId, catId, userId) => {
+          if (threadStore.getMemberSessionStrategy) {
+            return (await threadStore.getMemberSessionStrategy(threadId, catId, userId)) ?? undefined;
+          }
+          if (threadStore.isRebornSession && (await threadStore.isRebornSession(threadId, catId))) {
+            return 'reborn';
+          }
+          return undefined;
+        },
+        consumePendingContinuation: async (threadId, catId, userId) => {
+          const entry = await threadStore.consumePendingContinuation(threadId, catId, userId);
+          return (entry?.capsule as unknown as CollaborationContinuityCapsuleV1 | undefined) ?? null;
+        },
+        setPendingContinuation: async (threadId, catId, userId, capsule) => {
+          await threadStore.setPendingContinuation(threadId, catId, userId, {
+            capsule: capsule as unknown as Record<string, unknown>,
+            createdAt: Date.now(),
+          });
+        },
+      },
+    });
   }
 
   /** F088 fix: Late-bind outbound hook (set after gateway bootstrap). */
@@ -172,7 +285,32 @@ export class QueueProcessor {
   }
 
   private static slotKey(threadId: string, catId: string): string {
-    return `${threadId}:${catId}`;
+    return JSON.stringify([threadId, catId]);
+  }
+
+  private static slotMatchesThread(key: string, threadId: string): boolean {
+    return QueueProcessor.parseSlotKey(key)?.threadId === threadId;
+  }
+
+  private static parseSlotKey(key: string): { threadId: string; catId: string } | null {
+    try {
+      const parsed = JSON.parse(key);
+      if (
+        Array.isArray(parsed) &&
+        parsed.length === 2 &&
+        typeof parsed[0] === 'string' &&
+        typeof parsed[1] === 'string'
+      ) {
+        return { threadId: parsed[0], catId: parsed[1] };
+      }
+    } catch {
+      // Legacy in-memory keys from older code are not expected after restart.
+    }
+    const legacySep = key.indexOf(':');
+    if (legacySep > 0) {
+      return { threadId: key.slice(0, legacySep), catId: key.slice(legacySep + 1) };
+    }
+    return null;
   }
 
   /**
@@ -181,15 +319,14 @@ export class QueueProcessor {
    * The tracker check prevents false-positive cleanup of genuinely slow invocations.
    */
   private sweepZombieSlots(threadId: string): void {
-    const prefix = `${threadId}:`;
     const now = Date.now();
     const ttl = this.processingSlotTtlMs;
     for (const [key, startedAt] of this.processingSlots) {
-      if (!key.startsWith(prefix)) continue;
+      if (!QueueProcessor.slotMatchesThread(key, threadId)) continue;
       if (now - startedAt <= ttl) continue;
       // Only release if tracker also has no active invocation — double-confirm zombie
-      const parts = key.split(':');
-      const catId = parts.slice(1).join(':');
+      const catId = QueueProcessor.parseSlotKey(key)?.catId;
+      if (!catId) continue;
       if (!this.deps.invocationTracker.has(threadId, catId)) {
         this.processingSlots.delete(key);
         this.deps.log.warn({ threadId, catId, ageMs: now - startedAt }, '[F118 D4] zombie processingSlot released');
@@ -201,13 +338,13 @@ export class QueueProcessor {
   isPaused(threadId: string, catId?: string): boolean {
     if (catId) {
       return (
-        this.pausedSlots.has(QueueProcessor.slotKey(threadId, catId)) && this.deps.queue.hasQueuedForThread(threadId)
+        this.pausedSlots.has(QueueProcessor.slotKey(threadId, catId)) && this.hasDispatchableQueuedForThread(threadId)
       );
     }
     // Backward compat: check if any slot for this thread is paused
     for (const key of this.pausedSlots.keys()) {
-      if (key.startsWith(`${threadId}:`)) {
-        if (this.deps.queue.hasQueuedForThread(threadId)) return true;
+      if (QueueProcessor.slotMatchesThread(key, threadId)) {
+        if (this.hasDispatchableQueuedForThread(threadId)) return true;
       }
     }
     return false;
@@ -221,6 +358,16 @@ export class QueueProcessor {
   /** A2A fairness gate: only user-sourced entries should block text-scan A2A. */
   hasQueuedUserMessagesForThread(threadId: string): boolean {
     return this.deps.queue.hasQueuedUserMessagesForThread(threadId);
+  }
+
+  /** F185 Phase B: non-agent fairness gate for text-scan A2A — user + connector block, agent does not. */
+  hasQueuedNonAgentForThread(threadId: string): boolean {
+    return this.deps.queue.hasQueuedNonAgentForThread(threadId);
+  }
+
+  /** F185 Phase B: thin enqueue wrapper for deferred A2A entries from retry/invocations path. */
+  enqueueRaw(input: any) {
+    return this.deps.queue.enqueue(input);
   }
 
   /** A2A dedup: check if a specific cat already has a queued or processing entry for this thread. */
@@ -239,12 +386,127 @@ export class QueueProcessor {
     return this.deps.queue.hasQueuedOrProcessingForCat(threadId, catId);
   }
 
+  async enqueueContinuation(input: {
+    threadId: string;
+    userId: string;
+    catId: string;
+    capsule?: CollaborationContinuityCapsuleV1 | null;
+    excludeEntryId?: string;
+  }): Promise<{ outcome: ContinuationEnqueueOutcome; entry?: QueueEntry }> {
+    const { threadId, userId, catId, capsule, excludeEntryId } = input;
+    if (!capsule) {
+      this.deps.log.warn({ threadId, catId }, '[QueueProcessor] continuation skipped: missing capsule');
+      return { outcome: 'skipped_missing_capsule' };
+    }
+    if (!isCollaborationContinuityCapsuleV1(capsule)) {
+      this.deps.log.warn({ threadId, catId }, '[QueueProcessor] continuation skipped: invalid capsule');
+      return { outcome: 'skipped_invalid_capsule' };
+    }
+    if (capsule.threadId !== threadId || capsule.catId !== catId) {
+      this.deps.log.warn(
+        {
+          threadId,
+          catId,
+          capsuleThreadId: capsule.threadId,
+          capsuleCatId: capsule.catId,
+        },
+        '[QueueProcessor] continuation skipped: capsule target mismatch',
+      );
+      return { outcome: 'skipped_invalid_capsule' };
+    }
+
+    const now = Date.now();
+    const key = `${threadId}:${catId}`;
+    const recent = (this.continuationWindows.get(key) ?? []).filter(
+      (t) => now - t < QueueProcessor.CONTINUATION_WINDOW_MS,
+    );
+    if (recent.length >= QueueProcessor.MAX_CONTINUATIONS_PER_WINDOW) {
+      this.setContinuationWindow(key, recent);
+      this.deps.log.warn({ threadId, catId }, '[QueueProcessor] continuation skipped: rate limited');
+      return { outcome: 'skipped_rate_limited' };
+    }
+
+    const continuationKey = QueueProcessor.continuationKey(capsule);
+    if (
+      this.deps.queue.hasPendingForCat(threadId, catId, {
+        excludeEntryId,
+        sources: ['agent'],
+        sourceCategories: ['continuation'],
+        continuationKey,
+      })
+    ) {
+      this.setContinuationWindow(key, recent);
+      this.deps.log.info(
+        { threadId, catId, continuationKey },
+        '[QueueProcessor] continuation skipped: pending entry exists',
+      );
+      return { outcome: 'skipped_existing_entry' };
+    }
+
+    const result = this.deps.queue.enqueue({
+      threadId,
+      userId,
+      content: formatContinuationPrompt(capsule),
+      source: 'agent',
+      sourceCategory: 'continuation',
+      continuationKey,
+      targetCats: [catId],
+      intent: 'execute',
+      autoExecute: true,
+      callerCatId: catId,
+      priority: 'urgent',
+    });
+    if (result.outcome === 'full' || !result.entry) {
+      this.setContinuationWindow(key, recent);
+      this.deps.log.warn({ threadId, catId }, '[QueueProcessor] continuation skipped: queue full');
+      return { outcome: 'queue_full' };
+    }
+
+    recent.push(now);
+    this.setContinuationWindow(key, recent);
+    await emitQueueUpdated(
+      this.deps.socketManager,
+      userId,
+      threadId,
+      this.deps.queue.list(threadId, userId),
+      this.deps.messageStore,
+      'continuation_enqueued',
+    );
+    return { outcome: 'enqueued', entry: result.entry };
+  }
+
+  private static continuationKey(capsule: CollaborationContinuityCapsuleV1): string {
+    const seal = capsule.seal;
+    const sealPart = seal ? `${seal.sessionId}:${seal.sessionSeq}` : `created:${capsule.createdAt}`;
+    return `${capsule.threadId}:${capsule.catId}:${capsule.invocationId ?? 'unknown-invocation'}:${sealPart}`;
+  }
+
+  private setContinuationWindow(key: string, recent: number[]): void {
+    if (recent.length === 0) {
+      this.continuationWindows.delete(key);
+      return;
+    }
+    this.continuationWindows.set(key, recent);
+  }
+
   /** F151: Check if thread has any queued or processing entries (used by delivery-batch-done signal). */
   isThreadBusy(threadId: string): boolean {
-    if (this.deps.queue.hasQueuedForThread(threadId)) return true;
-    const prefix = `${threadId}:`;
+    if (this.hasDispatchableQueuedForThread(threadId)) return true;
+    this.sweepZombieSlots(threadId);
     for (const key of this.processingSlots.keys()) {
-      if (key.startsWith(prefix)) return true;
+      if (QueueProcessor.slotMatchesThread(key, threadId)) return true;
+    }
+    return false;
+  }
+
+  /** Active execution only; queued leftovers are not enough to keep new broadcasts in queue mode. */
+  hasActiveExecution(threadId: string): boolean {
+    if (this.deps.invocationTracker.has(threadId)) return true;
+    this.sweepZombieSlots(threadId);
+    const now = Date.now();
+    for (const [key, startedAt] of this.processingSlots) {
+      if (!QueueProcessor.slotMatchesThread(key, threadId)) continue;
+      if (now - startedAt < this.processingSlotTtlMs) return true;
     }
     return false;
   }
@@ -268,16 +530,19 @@ export class QueueProcessor {
     }
     // Backward compat: return first paused slot's reason
     for (const [key, reason] of this.pausedSlots.entries()) {
-      if (key.startsWith(`${threadId}:`)) return reason;
+      if (QueueProcessor.slotMatchesThread(key, threadId)) return reason;
     }
     return undefined;
   }
+
+  /** #595: auto-recovery delay for failed/canceled slots (ms) */
+  private static readonly PAUSE_RECOVERY_DELAY_MS = 10_000;
 
   /**
    * System-level entry: called when an invocation completes.
    * F108: Now slot-aware — catId identifies which slot completed.
    * - succeeded → auto-dequeue oldest across users
-   * - canceled/failed → pause slot, notify relevant users
+   * - canceled/failed → pause slot, notify users, auto-recover after delay
    */
   async onInvocationComplete(
     threadId: string,
@@ -287,7 +552,30 @@ export class QueueProcessor {
     const sk = QueueProcessor.slotKey(threadId, catId);
     if (status === 'succeeded' || status === 'canceled_by_user') {
       this.pausedSlots.delete(sk);
-      if (this.deps.queue.hasQueuedForThread(threadId)) {
+      // Check suppress flag: cancelAll sets this so user cancel = "stop everything".
+      // Status-gated: ONLY consume on 'canceled_by_user', not 'succeeded'.
+      // Reason: if user does cancelAll → steer, the steer's new invocation may
+      // complete with 'succeeded' before the cancelled invocation's 'canceled_by_user'
+      // arrives. Without the status gate, 'succeeded' would consume the flag and
+      // the late 'canceled_by_user' would incorrectly auto-resume the queue.
+      const suppressTs = this.suppressedAutoResume.get(sk);
+      // Clean up stale suppress (multi-cat cancelAll: secondary cats may never complete)
+      if (suppressTs !== undefined && Date.now() - suppressTs >= QueueProcessor.SUPPRESS_TTL_MS) {
+        this.suppressedAutoResume.delete(sk);
+      }
+      if (
+        status === 'canceled_by_user' &&
+        suppressTs !== undefined &&
+        Date.now() - suppressTs < QueueProcessor.SUPPRESS_TTL_MS
+      ) {
+        this.suppressedAutoResume.delete(sk); // single-shot: consume it
+        this.deps.log.info(
+          { threadId, catId },
+          'Auto-resume suppressed (cancelAll) — queued entries preserved but not started',
+        );
+        return;
+      }
+      if (this.hasDispatchableQueuedForThread(threadId)) {
         await this.tryExecuteNextAcrossUsers(threadId, catId);
         await this.tryAutoExecute(threadId);
         if (status === 'canceled_by_user') {
@@ -295,13 +583,35 @@ export class QueueProcessor {
         }
       }
     } else {
+      if (this.hasQueuedAutoContinuationForThreadCat(threadId, catId)) {
+        this.pausedSlots.delete(sk);
+        await this.tryAutoExecute(threadId, { onlyContinuation: true, bypassNonAgentGate: true, onlyTargetCat: catId });
+        return;
+      }
       // canceled or failed → pause ONLY if there are queued entries to manage.
-      if (!this.deps.queue.hasQueuedForThread(threadId)) {
+      if (!this.hasDispatchableQueuedForThread(threadId)) {
         this.pausedSlots.delete(sk);
         return;
       }
+      const epoch = (this.pauseEpoch.get(sk) ?? 0) + 1;
+      this.pauseEpoch.set(sk, epoch);
       this.pausedSlots.set(sk, status);
-      this.emitPausedToQueuedUsers(threadId, status);
+      await this.emitPausedToQueuedUsers(threadId, status);
+
+      // #595: auto-recover paused slot after delay — prevents indefinite stuck state
+      setTimeout(() => {
+        if (this.pauseEpoch.get(sk) !== epoch) return;
+        this.pausedSlots.delete(sk);
+        this.deps.log.info(
+          { threadId, catId, status },
+          '[QueueProcessor] Auto-recovering paused slot after timeout (#595)',
+        );
+        if (this.hasDispatchableQueuedForThread(threadId)) {
+          void this.tryExecuteNextAcrossUsers(threadId, catId).catch((err) => {
+            this.deps.log.error({ err, threadId, catId }, '[QueueProcessor] Auto-recovery dequeue failed');
+          });
+        }
+      }, QueueProcessor.PAUSE_RECOVERY_DELAY_MS);
     }
   }
 
@@ -313,11 +623,13 @@ export class QueueProcessor {
    */
   clearPause(threadId: string, catId?: string): void {
     if (catId) {
-      this.pausedSlots.delete(QueueProcessor.slotKey(threadId, catId));
+      const sk = QueueProcessor.slotKey(threadId, catId);
+      this.pausedSlots.delete(sk);
     } else {
-      // Backward compat: clear all paused slots for this thread
       for (const key of [...this.pausedSlots.keys()]) {
-        if (key.startsWith(`${threadId}:`)) this.pausedSlots.delete(key);
+        if (QueueProcessor.slotMatchesThread(key, threadId)) {
+          this.pausedSlots.delete(key);
+        }
       }
     }
   }
@@ -336,11 +648,22 @@ export class QueueProcessor {
   }
 
   /**
+   * Suppress auto-resume for the next canceled_by_user completion on this slot.
+   * Called from the cancelAll handler: user intent = "stop everything", so
+   * onInvocationComplete should NOT auto-dequeue the next entry.
+   *
+   * Single-shot: consumed (cleared) after one onInvocationComplete call.
+   */
+  suppressAutoResume(threadId: string, catId: string): void {
+    this.suppressedAutoResume.set(QueueProcessor.slotKey(threadId, catId), Date.now());
+  }
+
+  /**
    * @deprecated Use releaseSlot(threadId, catId) instead. Kept for backward compat during migration.
    */
   releaseThread(threadId: string): void {
     for (const key of [...this.processingSlots.keys()]) {
-      if (key.startsWith(`${threadId}:`)) this.processingSlots.delete(key);
+      if (QueueProcessor.slotMatchesThread(key, threadId)) this.processingSlots.delete(key);
     }
   }
 
@@ -359,9 +682,16 @@ export class QueueProcessor {
    * Scans all entries and starts every one whose cat slot is free (parallel multi-cat).
    * Per-cat slot mutex (processingSlots + invocationTracker) prevents conflicts.
    */
-  async tryAutoExecute(threadId: string): Promise<void> {
+  async tryAutoExecute(
+    threadId: string,
+    opts: { onlyContinuation?: boolean; bypassNonAgentGate?: boolean; onlyTargetCat?: string } = {},
+  ): Promise<void> {
     this.sweepZombieSlots(threadId);
-    const entries = (this.deps.queue.listAutoExecute?.(threadId) ?? []).sort((a, b) => a.createdAt - b.createdAt);
+    if (!opts.bypassNonAgentGate && this.hasDispatchableNonAgentQueued(threadId)) return;
+    const entries = (this.deps.queue.listAutoExecute?.(threadId) ?? [])
+      .filter((entry) => !opts.onlyContinuation || entry.sourceCategory === 'continuation')
+      .filter((entry) => !opts.onlyTargetCat || entry.targetCats[0] === opts.onlyTargetCat)
+      .sort((a, b) => a.createdAt - b.createdAt);
     if (entries.length > 0) {
       const now = Date.now();
       this.deps.log.info(
@@ -406,6 +736,28 @@ export class QueueProcessor {
   }
 
   // ── Internal ──
+
+  private hasDispatchableQueuedForThread(threadId: string): boolean {
+    return this.deps.queue.hasDispatchableQueuedForThread(threadId);
+  }
+
+  private hasDispatchableNonAgentQueued(threadId: string): boolean {
+    if (!this.deps.queue.hasQueuedNonAgentForThread?.(threadId)) return false;
+    for (const userId of this.deps.queue.listUsersForThread(threadId)) {
+      for (const entry of this.deps.queue.list(threadId, userId)) {
+        if (entry.source === 'agent' || entry.status !== 'queued') continue;
+        const cat = entry.targetCats[0];
+        if (!cat || !this.pausedSlots.has(QueueProcessor.slotKey(threadId, cat))) return true;
+      }
+    }
+    return false;
+  }
+
+  private hasQueuedAutoContinuationForThreadCat(threadId: string, catId: string): boolean {
+    return (this.deps.queue.listAutoExecute?.(threadId) ?? []).some(
+      (entry) => entry.source === 'agent' && entry.sourceCategory === 'continuation' && entry.targetCats[0] === catId,
+    );
+  }
 
   private async tryExecuteNextAcrossUsers(
     threadId: string,
@@ -461,10 +813,20 @@ export class QueueProcessor {
 
     // Mutex check — per-slot (before mutating queue state)
     if (this.processingSlots.has(sk)) {
+      // 2026-06-02: observability — this silent !started is the source of a QUEUE_BUSY that gives
+      // no clue why. Log the busy source so future "can't steer/dequeue" is diagnosable from logs.
+      this.deps.log.info(
+        { event: 'queue_not_started', threadId, entryCat, reason: 'processing_slot_busy' },
+        '[QueueProcessor] processNext skipped: processingSlot busy',
+      );
       return { started: false };
     }
     // Fix: skip if cat already has an active invocation via CLI/messages.ts (same guard as above)
     if (this.deps.invocationTracker.has(threadId, entryCat)) {
+      this.deps.log.info(
+        { event: 'queue_not_started', threadId, entryCat, reason: 'tracker_active' },
+        '[QueueProcessor] processNext skipped: invocationTracker active',
+      );
       return { started: false };
     }
 
@@ -506,9 +868,15 @@ export class QueueProcessor {
 
     let controller: AbortController | undefined;
     let invocationId: string | undefined;
-    let finalStatus: 'succeeded' | 'failed' | 'canceled' | 'canceled_by_user' = 'failed';
+    let finalStatus: InvocationFinalStatus = 'failed';
     let responseText = '';
     const cursorBoundaries = new Map<string, string>();
+    const continuationCapsules = new Map<string, CollaborationContinuityCapsuleV1>();
+    // Cloud Codex P2: track consumed continuation so we can re-store on failure/cancel.
+    let consumedContinuation: ConsumedContinuationToken | undefined;
+    // Cloud Codex P2: defer A2A consumption to success path — entries stay in queue
+    // until the batch actually succeeds. The invocationTracker prevents double-pickup.
+    let deferredA2AConsume = new Set<string>();
 
     try {
       // 1. Create InvocationRecord (before batching — avoid claiming entries on duplicate)
@@ -553,6 +921,28 @@ export class QueueProcessor {
       // 2. Start tracking ALL target cats (shared controller for F5/reconnect recovery)
       controller = invocationTracker.startAll(threadId, targetCats, userId);
 
+      // F216 c3: supersede tombstone guard. If a same-turn follow-up arrived during the
+      // pre-start window (between markProcessingById and startAll), callback-a2a-trigger
+      // removed this entry as a tombstone signal. Detect it here and self-abort before
+      // routeExecution — the follow-up is already queued and will run after this returns.
+      //
+      // Status: 'canceled_by_user' (not plain 'canceled') so onInvocationComplete takes
+      // the immediate-restart branch (tryAutoExecute) rather than the 10s pause branch.
+      // No suppressedAutoResume flag is set (only cancelAll sets it), so the suppress
+      // check is a no-op. Result: follow-up restarts immediately after slot release.
+      if (!queue.list(threadId, userId).some((e) => e.id === entry.id)) {
+        log.info(
+          { threadId, entryId: entry.id },
+          '[F216-c3] entry superseded during pre-start window — self-abort before routeExecution',
+        );
+        // Close the invocation record (created but never executed).
+        if (invocationId) {
+          await invocationRecordStore.update(invocationId, { status: 'canceled' });
+        }
+        finalStatus = 'canceled_by_user';
+        return 'canceled_by_user';
+      }
+
       // 3. Backfill message ID
       if (messageId) {
         await invocationRecordStore.update(invocationId, {
@@ -565,21 +955,29 @@ export class QueueProcessor {
         status: 'running',
       });
 
+      // F220 Phase 1: queued execution needs the same earliest liveness signal
+      // as direct /api/messages execution. intent_mode stays deferred until the
+      // first CLI event (#768); spawn_started is only "process is being spawned".
+      if (!controller.signal.aborted) {
+        socketManager.broadcastToRoom(`thread:${threadId}`, 'spawn_started', {
+          threadId,
+          targetCats,
+          invocationId,
+        });
+      }
+
       // 5. intent_mode deferred to first CLI event (#768: avoid "replying" when CLI never starts)
       let intentModeBroadcast = false;
 
       // 6. Emit queue_updated (processing)
-      socketManager.emitToUser(userId, 'queue_updated', {
-        threadId,
-        queue: queue.list(threadId, userId),
-        action: 'processing',
-      });
+      await emitQueueUpdated(socketManager, userId, threadId, queue.list(threadId, userId), messageStore, 'processing');
 
       // F098-D: Mark queued messages as delivered (set deliveredAt = now)
       // F117: Collect full message objects for frontend bubble rendering
       const allMessageIds: string[] = [messageId ?? '', ...(entry.mergedMessageIds ?? []), ...batchedMessageIds].filter(
         Boolean,
       );
+      const currentContextMessageIds = new Set(allMessageIds);
       const deliveredNow = Date.now();
       const deliveredIds: string[] = [];
       const deliveredMessages: Array<{
@@ -590,12 +988,25 @@ export class QueueProcessor {
         mentions: readonly string[];
         userId: string;
         contentBlocks?: readonly unknown[];
+        extra?: Record<string, unknown>;
+        origin?: string;
+        replyTo?: string;
+        replyPreview?: { senderCatId: string | null; content: string; deleted?: boolean; kind?: string };
+        mentionsUser?: boolean;
       }> = [];
       for (const mid of allMessageIds) {
         try {
           const result = await messageStore.markDelivered(mid, deliveredNow);
           if (result) {
             deliveredIds.push(mid);
+            let preview: Awaited<ReturnType<typeof hydrateReplyPreview>> | null = null;
+            if (result.replyTo) {
+              try {
+                preview = await hydrateReplyPreview(messageStore, result.replyTo);
+              } catch {
+                /* best-effort: preview failure must not drop the delivered message */
+              }
+            }
             deliveredMessages.push({
               id: result.id,
               content: result.content,
@@ -604,6 +1015,11 @@ export class QueueProcessor {
               mentions: result.mentions,
               userId: result.userId,
               contentBlocks: result.contentBlocks,
+              ...(result.extra ? { extra: result.extra as Record<string, unknown> } : {}),
+              ...(result.origin ? { origin: result.origin } : {}),
+              ...(result.replyTo ? { replyTo: result.replyTo } : {}),
+              ...(preview ? { replyPreview: preview } : {}),
+              ...(result.mentionsUser ? { mentionsUser: true } : {}),
             });
           }
         } catch {
@@ -621,9 +1037,128 @@ export class QueueProcessor {
         });
       }
 
+      // 6b. #815: Consume redundant A2A trigger entries — if target cats are
+      // already being processed in this batch, queued A2A entries for those cats
+      // are pure triggers whose source messages are already visible in context.
+      // Two-step: find candidates, then async-filter by message delivery status.
+      // Text-scan A2A entries reference persisted agent messages (deliveryStatus
+      // undefined/delivered → safe to consume). Callback A2A entries reference
+      // messages with deliveryStatus:'queued' → NOT safe (message not yet delivered).
+      const activeCatSet = new Set(targetCats);
+      const a2aCandidates = queue.findSubsumedA2ACandidates(threadId, userId, activeCatSet);
+      if (a2aCandidates.length > 0) {
+        const safeToConsume = new Set<string>();
+        for (const candidate of a2aCandidates) {
+          if (!candidate.messageId) continue; // no message ref → conservative, skip
+          const candidateMessageIds = [candidate.messageId, ...(candidate.mergedMessageIds ?? [])];
+          if (!candidateMessageIds.every((mid) => currentContextMessageIds.has(mid))) {
+            continue; // delivered historical trigger, but not part of this invocation context
+          }
+          const msg = await messageStore.getById(candidate.messageId);
+          if (!msg) continue; // message not found → skip
+          if (msg.deliveryStatus === 'queued') continue; // not yet delivered → don't consume
+          // Cloud Codex P2: also check mergedMessageIds — coalesced entries can
+          // have additional trigger messages that are still queued (e.g. a callback
+          // post_message coalesced into a text-scan A2A entry). If ANY merged
+          // trigger is still queued, don't consume the entry.
+          let mergedSafe = true;
+          if (candidate.mergedMessageIds?.length) {
+            for (const mid of candidate.mergedMessageIds) {
+              const mergedMsg = await messageStore.getById(mid);
+              if (mergedMsg?.deliveryStatus === 'queued') {
+                mergedSafe = false;
+                break;
+              }
+            }
+          }
+          if (!mergedSafe) continue;
+          safeToConsume.add(candidate.id);
+        }
+        if (safeToConsume.size > 0) {
+          // Cloud Codex P2: defer actual removal to the success path in `finally`.
+          // If the batch fails/cancels, entries stay in queue for retry.
+          // invocationTracker prevents double-pickup during execution.
+          deferredA2AConsume = safeToConsume;
+          log.info(
+            {
+              threadId,
+              deferredCount: safeToConsume.size,
+              deferredIds: [...safeToConsume],
+            },
+            '[QueueProcessor] #815: identified subsumed A2A entries (deferred to success)',
+          );
+        }
+      }
+
+      // 6c. F224: single-cat continuation lifecycle is owned by
+      // SessionContinuationCoordinator. Multi-target still skips prepare because
+      // content is shared across cats; a cat-specific continuation prompt would leak.
+      if (this.sessionContinuationCoordinator && targetCats.length === 1) {
+        const singleCatId = targetCats[0]!;
+        try {
+          const originalContent = content;
+          const prepared = await this.sessionContinuationCoordinator.prepareInvocationContext({
+            threadId,
+            catId: singleCatId,
+            userId,
+            content,
+          });
+          content = prepared.content;
+          consumedContinuation = prepared.consumedContinuation;
+
+          if (prepared.sessionPolicy === 'reborn') {
+            log.info(
+              { threadId, catId: singleCatId },
+              '[QueueProcessor] #836: reborn session — coordinator skipped continuation consume',
+            );
+            // A legacy/fallback continuation entry already contains stale pre-reborn
+            // context. Drop it so reborn starts fresh.
+            if (entry.sourceCategory === 'continuation') {
+              log.info(
+                { threadId, catId: singleCatId, entryId: entry.id },
+                '[QueueProcessor] #836: reborn session — dropping stale continuation queue entry',
+              );
+              if (invocationId) {
+                await invocationRecordStore.update(invocationId, { status: 'succeeded' });
+              }
+              finalStatus = 'succeeded';
+              return 'succeeded';
+            }
+          }
+
+          if (prepared.consumedContinuation) {
+            const capsule = prepared.consumedContinuation.capsule;
+            const sameQueuedContinuation =
+              entry.sourceCategory === 'continuation' &&
+              entry.continuationKey === QueueProcessor.continuationKey(capsule);
+            if (sameQueuedContinuation) {
+              content = originalContent;
+            }
+            log.info(
+              {
+                threadId,
+                catId: singleCatId,
+                capsuleCreatedAt: capsule.createdAt,
+                promptAlreadyQueued: sameQueuedContinuation,
+              },
+              '[QueueProcessor] #813: coordinator prepared pending continuation context for execution',
+            );
+          }
+        } catch (err) {
+          log.warn(
+            { threadId, catId: singleCatId, err },
+            '[QueueProcessor] F224: prepareInvocationContext failed, proceeding without continuation context',
+          );
+        }
+      }
+
       // 7. Route execution
       const persistenceContext: { richBlocks?: Array<{ kind: string; [key: string]: unknown }> } = {};
       const collectedTextParts: string[] = [];
+      // #845 fix: per-cat token usage from done events (same pattern as messages.ts / ConnectorInvokeTrigger).
+      // Without this, queued/connector invocations succeed without writing usageByCat, leaving 159+ orphans
+      // in the daily usage report.
+      const collectedUsage = new Map<string, TokenUsage>();
 
       // F088 fix: Track per-turn content for outbound delivery (same pattern as ConnectorInvokeTrigger)
       const outboundTurns: Array<{
@@ -695,8 +1230,20 @@ export class QueueProcessor {
         {
           ...(contentBlocks.length > 0 ? { contentBlocks } : {}),
           ...(controller.signal ? { signal: controller.signal } : {}),
-          queueHasQueuedMessages: (tid: string) => queue.hasQueuedUserMessagesForThread(tid),
-          hasQueuedOrActiveAgentForCat: (tid: string, catId: string) => queue.hasActiveOrQueuedAgentForCat(tid, catId),
+          // F-parallel-cancel: per-cat signal so canceling one concurrent cat (e.g. @codex)
+          // does not abort its siblings (e.g. @gpt52). startAll gives each cat its own per-cat
+          // controller; route-parallel resolves them through this getter.
+          // NOTE (cloud review clarification): `controller` (line 808) is the INDEPENDENT batch
+          // gate returned by startAll — NOT a primary cat controller. A single-cat cancel aborts
+          // only that cat's per-cat controller, NOT the batch gate, so the consume-loop
+          // `if (controller.signal.aborted) break` (993 / 1090) fires ONLY on whole-invocation
+          // abort (cancelAll / force / thread-delete), never on single-cat cancel — the sibling
+          // keeps streaming. (See InvocationTracker.startAll returning a fresh batchController.)
+          signalForCat: (catId: string) => invocationTracker.getController?.(threadId, catId)?.signal,
+          queueHasQueuedMessages: (tid: string) => queue.hasQueuedNonAgentForThread(tid),
+          deferA2AEnqueue: (e: any) => queue.enqueue(e),
+          hasQueuedOrActiveAgentForCat: (tid: string, catId: string) =>
+            queue.hasActiveOrQueuedAgentForCat(tid, catId, { excludeEntryId: entry.id }),
           invocationController: controller,
           trackA2ASlot: (tid: string, catId: string, uid: string, ctrl: AbortController) => {
             invocationTracker.trackExternalSlot?.(tid, catId, ctrl, uid, [catId]);
@@ -707,6 +1254,11 @@ export class QueueProcessor {
           cursorBoundaries,
           persistenceContext,
           ...(invocationId ? { parentInvocationId: invocationId } : {}),
+          ...(entry.a2aTriggerMessageId ? { a2aTriggerMessageId: entry.a2aTriggerMessageId } : {}),
+          ...(entry.callerTraceContext ? { callerTraceContext: entry.callerTraceContext } : {}),
+          // F222 P1: Only user-originated queue entries trigger frustration detection.
+          // Whitelist (not blacklist) — agent + connector sources both suppressed.
+          frustrationAutoIssueEligible: entry.source === 'user',
         },
       )) {
         if (controller.signal.aborted) {
@@ -729,8 +1281,23 @@ export class QueueProcessor {
             (msg as { textMode?: 'append' | 'replace' }).textMode,
           );
         }
+        const continuationCapsule = extractContinuityCapsuleFromAgentMessage(msg);
+        if (continuationCapsule) {
+          continuationCapsules.set(continuationCapsule.catId, continuationCapsule);
+        }
         if ((msg.type === 'done' || msg.type === 'error') && msg.catId) {
           invocationTracker.completeSlot?.(threadId, msg.catId, controller);
+        }
+
+        // #845 fix: accumulate per-cat token usage on done events. Mirrors messages.ts:992-994
+        // and ConnectorInvokeTrigger.ts:386-387. Without this, queue-* and connector-* invocations
+        // succeed but never write usageByCat, dropping ~159/164 records from the daily report.
+        // RouterLike.routeExecution yields an opaque record type, so narrow metadata via local cast.
+        if (msg.type === 'done' && msg.catId) {
+          const metadata = (msg as { metadata?: { usage?: TokenUsage } }).metadata;
+          if (metadata?.usage) {
+            collectedUsage.set(msg.catId, mergeTokenUsage(collectedUsage.get(msg.catId), metadata.usage));
+          }
         }
 
         // F088 fix: collect per-turn content for outbound delivery
@@ -806,18 +1373,50 @@ export class QueueProcessor {
           break;
         }
 
-        socketManager.broadcastAgentMessage({ ...msg, ...(invocationId ? { invocationId } : {}) }, threadId);
+        // F194 Phase Z9 (砚砚 R1 P1-2): unified visible turn stamp via helper.
+        const msgInvocationId = (msg as { invocationId?: string }).invocationId;
+        socketManager.broadcastAgentMessage(
+          {
+            ...msg,
+            ...(invocationId ? stampVisibleTurn(invocationId, msgInvocationId) : {}),
+          },
+          threadId,
+        );
       }
 
       // 8. Check abort before marking succeeded (F122B B6 P1: abort→succeeded bug fix)
-      if (controller.signal.aborted) {
-        log.info({ threadId, entryId: entry.id }, '[QueueProcessor] Entry aborted during execution');
+      // F-parallel-cancel: AGGREGATE finalStatus — batch gate abort (whole invocation) OR every
+      // target cat singly cancelled → canceled. A single-cat cancel no longer aborts the batch
+      // gate, so raw controller.signal.aborted only covers the whole-invocation case. (completeAll
+      // runs later, so cancel tombstones are still visible to resolveFinalStatus here.)
+      const batchReason = controller.signal.reason;
+      const aggFinalStatus = invocationTracker.resolveFinalStatus
+        ? invocationTracker.resolveFinalStatus(threadId, targetCats, {
+            aborted: controller.signal.aborted,
+            reason: batchReason as string | undefined,
+          })
+        : controller.signal.aborted
+          ? // Fallback (tracker without resolveFinalStatus) must stay equivalent to the old logic:
+            // whole-invocation abort → reason decides canceled_by_user vs canceled.
+            batchReason === 'user_cancel' || batchReason === 'cancel_all'
+            ? 'canceled_by_user'
+            : 'canceled'
+          : 'succeeded';
+      if (aggFinalStatus !== 'succeeded') {
+        log.info({ threadId, entryId: entry.id }, '[QueueProcessor] Entry aborted/cancelled during execution');
         // F148 fix: ack cursors for cats that completed before abort (monotonic CAS, safe to call)
         if (cursorBoundaries.size > 0) {
           await router.ackCollectedCursors(userId, threadId, cursorBoundaries);
         }
         await invocationRecordStore.update(invocationId, { status: 'canceled' });
-        finalStatus = controller.signal.reason === 'user_cancel' ? 'canceled_by_user' : 'canceled';
+        finalStatus = aggFinalStatus;
+        // Suppress auto-resume ONLY for cancelAll (stop everything), NOT single-cat cancel.
+        // Single-cat cancel should still auto-resume the next queued entry (backward compat).
+        // 'cancel_all' = cancelAll button; 'user_cancel' = single-cat — only cancel_all suppresses.
+        if (batchReason === 'cancel_all') {
+          const entryCat = entry.targetCats[0] ?? 'unknown';
+          this.suppressedAutoResume.set(QueueProcessor.slotKey(threadId, entryCat), Date.now());
+        }
         return finalStatus;
       }
 
@@ -825,6 +1424,13 @@ export class QueueProcessor {
       await router.ackCollectedCursors(userId, threadId, cursorBoundaries);
       await invocationRecordStore.update(invocationId, {
         status: 'succeeded',
+        // #845 fix: carry token usage same as messages.ts:1152-1158. Without this, queued/connector
+        // succeeded invocations never recorded usageByCat → daily stats undercount.
+        ...(collectedUsage.size > 0
+          ? {
+              usageByCat: Object.fromEntries(collectedUsage),
+            }
+          : {}),
       });
 
       finalStatus = 'succeeded';
@@ -846,6 +1452,7 @@ export class QueueProcessor {
 
       return 'succeeded';
     } catch (err) {
+      finalStatus = 'failed';
       log.error({ threadId, entryId: entry.id, err }, '[QueueProcessor] executeEntry failed');
       // F148 fix: ack cursors for cats that completed before the exception
       if (cursorBoundaries.size > 0) {
@@ -888,16 +1495,67 @@ export class QueueProcessor {
         for (const bid of batchedEntryIds) {
           queue.removeProcessedAcrossUsers(threadId, bid);
         }
+        // #815 + Cloud Codex P2: now that the batch succeeded, actually consume
+        // the subsumed A2A entries that were deferred earlier.
+        if (deferredA2AConsume.size > 0) {
+          const consumedA2A = queue.consumeEntriesById(deferredA2AConsume);
+          for (const c of consumedA2A) {
+            this.entryCompleteHooks.delete(c.id);
+          }
+          log.info(
+            { threadId, consumedCount: consumedA2A.length },
+            '[QueueProcessor] #815: consumed deferred A2A entries after successful batch',
+          );
+          socketManager.emitToUser(userId, 'queue_updated', {
+            threadId,
+            queue: queue.list(threadId, userId),
+            action: 'a2a_subsumed',
+          });
+        }
       } else {
         for (const bid of batchedEntryIds) {
           queue.rollbackProcessing(threadId, bid);
         }
+        // Cloud Codex P2: deferred A2A entries stay in queue on failure — no rollback needed.
       }
-      socketManager.emitToUser(userId, 'queue_updated', {
-        threadId,
-        queue: queue.list(threadId, userId),
-        action: 'completed',
-      });
+      const producedCapsules = [...continuationCapsules.values()];
+      for (const continuationCapsule of producedCapsules) {
+        if (finalStatus === 'canceled_by_user') {
+          log.info(
+            { threadId, catId: continuationCapsule.catId },
+            '[QueueProcessor] F224: user-canceled invocation — storing continuation without auto-enqueue',
+          );
+          continue;
+        }
+        if (!(await this.shouldEnqueueContinuation(continuationCapsule, userId))) {
+          log.info(
+            { threadId, catId: continuationCapsule.catId },
+            '[QueueProcessor] #836: reborn session — skipping continuation enqueue',
+          );
+          continue;
+        }
+        const result = await this.enqueueContinuation({
+          threadId,
+          userId,
+          catId: continuationCapsule.catId,
+          capsule: continuationCapsule,
+        });
+      }
+      if (this.sessionContinuationCoordinator) {
+        try {
+          await this.sessionContinuationCoordinator.commitInvocationOutcome({
+            finalStatus,
+            threadId,
+            catId: primaryCat,
+            userId,
+            consumedContinuation,
+            producedCapsules,
+          });
+        } catch (err) {
+          log.warn({ threadId, targetCats, err }, '[QueueProcessor] F224: commitInvocationOutcome failed');
+        }
+      }
+      await emitQueueUpdated(socketManager, userId, threadId, queue.list(threadId, userId), messageStore, 'completed');
       // F122B B6: Fire completion hook (one-shot) and clean up
       const completeHook = this.entryCompleteHooks.get(entry.id);
       if (completeHook) {
@@ -910,6 +1568,22 @@ export class QueueProcessor {
       }
       // Chain auto-dequeue is handled by tryExecuteNext* (calls onInvocationComplete
       // AFTER releasing processingThreads mutex to avoid self-blocking).
+    }
+  }
+
+  private async shouldEnqueueContinuation(capsule: CollaborationContinuityCapsuleV1, userId: string): Promise<boolean> {
+    if (!this.sessionContinuationCoordinator?.resolveSessionStrategy) return true;
+    try {
+      return (
+        (await this.sessionContinuationCoordinator.resolveSessionStrategy(capsule.threadId, capsule.catId, userId)) !==
+        'reborn'
+      );
+    } catch (err) {
+      this.deps.log.warn(
+        { threadId: capsule.threadId, catId: capsule.catId, err },
+        '[QueueProcessor] F224: resolveSessionStrategy failed for continuation enqueue, defaulting to enqueue',
+      );
+      return true;
     }
   }
 
@@ -1073,7 +1747,7 @@ export class QueueProcessor {
         Promise.allSettled(inflightDeliverPromises).then((results) => {
           if (results.every((r) => r.status === 'fulfilled')) {
             cleanupFn(threadId, invocationId).catch((err) => {
-              log.warn({ err, threadId }, '[QueueProcessor] Late-success placeholder cleanup failed');
+              log.warn({ err, threadId }, '[QueueProcessor] Placeholder cleanup failed after late-success delivery');
             });
           }
         });
@@ -1086,15 +1760,16 @@ export class QueueProcessor {
   }
 
   /** Emit queue_paused to each user who has queued entries for this thread. */
-  private emitPausedToQueuedUsers(threadId: string, reason: 'canceled' | 'failed'): void {
+  private async emitPausedToQueuedUsers(threadId: string, reason: 'canceled' | 'failed'): Promise<void> {
     const users = this.deps.queue.listUsersForThread(threadId);
     for (const userId of users) {
       const userQueue = this.deps.queue.list(threadId, userId);
       if (!userQueue.some((e) => e.status === 'queued')) continue;
+      const enriched = await enrichQueueEntries(userQueue, this.deps.messageStore);
       this.deps.socketManager.emitToUser(userId, 'queue_paused', {
         threadId,
         reason,
-        queue: userQueue,
+        queue: enriched,
       });
     }
   }

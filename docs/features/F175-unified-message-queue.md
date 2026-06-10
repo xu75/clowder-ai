@@ -4,15 +4,24 @@ related_features: [F039, F047, F117, F122, F133, F167]
 topics: [queue, dispatch, priority, invocation, connector, architecture]
 doc_kind: spec
 created: 2026-04-24
+intake_source: clowder-ai#575
 ---
 
 # F175: 消息队列统一设计 — 优先级排序 + 用户可控编排
 
-> **Status**: spec | **Owner**: Ragdoll | **Priority**: P1
+> **Status**: done | **Owner**: Ragdoll | **Priority**: P1
+>
+> **Close 2026-05-27**：Phase A/B/C 全部在 clowder-ai#575 中完成（gpt52 code review 8 轮全 approved），经 cat-cafe PR #1443 absorbed。team lead 2026-05-27 实测确认拖动排序/独立显示/视觉分组/折叠全部工作。之前审计误判"Phase B/C 未完成"是因为 doc AC 未打勾但代码已在 absorbed PR 中。
+>
+> **Inbound source**: [clowder-ai#575](https://github.com/zts212653/clowder-ai/pull/575)
+> **Original tag**: clowder-ai 仓内编号为 F169（unified-queue-design）
+> **Rename reason**: cat-cafe 本地 F169 已被 `agent-memory-reflex` vision 文档占用，同号不同物会污染 search_evidence（参见 `feedback_fake_feat_anchor_is_poison`）。已要求 mindfn 在 PR #575 源头完成 F169 → F175 rename。
+>
+> **Fixes**: clowder-ai#564 — urgent connector 消息不再通过 bypass 抢占 A2A 链，改走队列内优先级排序。
 
 ## Why
 
-issue #564 现场案例：opus 在 A2A round 2 执行中，CI failure 通知以 `priority: 'urgent'` 到达 → `handleUrgentTrigger()` 直接抢占 → `signal.abort()` → opus 回复中的 `@gpt52` mention 被检测但路由被 `signal.aborted` 门控阻止 → 静默丢弃。用户无任何提示。
+clowder-ai#564 现场案例：opus 在 A2A round 2 执行中，CI failure 通知以 `priority: 'urgent'` 到达 → `handleUrgentTrigger()` 直接抢占 → `signal.abort()` → opus 回复中的 `@gpt52` mention 被检测但路由被 `signal.aborted` 门控阻止 → 静默丢弃。用户无任何提示。
 
 根因不是单个 bug，而是三个设计债务的叠加：
 
@@ -49,11 +58,10 @@ interface QueueEntry {
 peekOldestAcrossUsers(threadId):
   1. 显式 position（用户手动拖动）— 同 userId 内最高优先（跨用户不干扰）
   2. priority（urgent > normal）
-  3. sourceCategory 同优先级内 FIFO
-  4. createdAt 兜底
+  3. createdAt FIFO 兜底
 ```
 
-只有显式手动 position 的 entry 才覆盖 priority（仅同 userId 条目间比较；shared thread 中不同用户的拖动互不干扰）；未手动排序的 entry 仍按 `priority → createdAt` 默认出队。
+只有显式手动 position 的 entry 才覆盖 priority（仅同 userId 条目间比较；shared thread 中不同用户的拖动互不干扰）；未手动排序的 entry 仍按 `priority → createdAt` 默认出队。`sourceCategory` 是分组/diagnostics 字段，不参与排序。
 
 **4. 取消用户消息强制 merge + 出队时 user-message batching**
 
@@ -120,29 +128,29 @@ QueueProcessor 出队时：
 
 ## Acceptance Criteria
 
-### Phase A（后端统一）
-- [ ] AC-A1: `handleUrgentTrigger()` 和 urgent 分支已删除，active-slot 时所有 connector 消息走 `enqueueWhileActive()`（idle slot 保留 fast path）
-- [ ] AC-A2: QueueEntry 有 `priority` 字段，4 个 urgent 调用方正确透传
-- [ ] AC-A3: 出队逻辑 priority-first — urgent 消息在 normal 前面被处理
-- [ ] AC-A4: 用户手动 position 覆盖 priority 排序（仅显式设置时）
-- [ ] AC-A5: 用户消息不再强制 merge — 每条独立 QueueEntry
-- [ ] AC-A6: 出队时 user-message batching — 连续同 userId + 同 intent + 同 targetCats 的 user entries 汇聚为一次 invocation
-- [ ] AC-A7: connector/agent 消息不受 MAX_QUEUE_DEPTH 限制
-- [ ] AC-A8: reorder API 可用（`PATCH /queue/reorder`）
-- [ ] AC-A9: 回归：urgent connector 不打断 A2A 链（#564 原始场景修复）
-- [ ] AC-A10: 回归：跨优先级自动 dequeue — urgent 处理完后自动继续 normal
+### Phase A（后端统一）— ✅ 全部完成
+- [x] AC-A1: `handleUrgentTrigger()` 和 urgent 分支已删除，active-slot 时所有 connector 消息走 `enqueueWhileActive()`（idle slot 保留 fast path）
+- [x] AC-A2: QueueEntry 有 `priority` 字段，4 个 urgent 调用方正确透传
+- [x] AC-A3: 出队逻辑 priority-first — urgent 消息在 normal 前面被处理
+- [x] AC-A4: 用户手动 position 覆盖 priority 排序（仅显式设置时）
+- [x] AC-A5: 用户消息不再强制 merge — 每条独立 QueueEntry
+- [x] AC-A6: 出队时 user-message batching — 连续同 userId + 同 intent + 同 targetCats 的 user entries 汇聚为一次 invocation
+- [x] AC-A7: connector/agent 消息不受 MAX_QUEUE_DEPTH 限制
+- [x] AC-A8: reorder API 可用（`PATCH /queue/reorder`）
+- [x] AC-A9: 回归：urgent connector 不打断 A2A 链（#564 原始场景修复）
+- [x] AC-A10: 回归：跨优先级自动 dequeue — urgent 处理完后自动继续 normal
 
-### Phase B（前端编排）
-- [ ] AC-B1: QueuePanel 支持拖动排序
-- [ ] AC-B2: 每条消息独立显示、独立可删除
-- [ ] AC-B3: 视觉分组（sourceCategory + urgent 标记）
-- [ ] AC-B4: QueuePanel 收起/折叠
+### Phase B（前端编排）— ✅ 全部完成（clowder-ai#575 含 Phase B，cat-cafe#1443 absorbed）
+- [x] AC-B1: QueuePanel 支持拖动排序（@dnd-kit drag-and-drop）
+- [x] AC-B2: 每条消息独立显示、独立可删除
+- [x] AC-B3: 视觉分组（sourceCategory badge + urgent 标记）
+- [x] AC-B4: QueuePanel 收起/折叠（≥4 entries 自动收起）
 
-### Phase C（Spec + ADR）
-- [ ] AC-C1: F133 KD-4 修正完成
-- [ ] AC-C2: F122 spec 标 "executor unification: complete"
-- [ ] AC-C3: F047 spec 加 reorder
-- [ ] AC-C4: 新 ADR 创建，含 guard story
+### Phase C（Spec + ADR）— ✅ 全部完成（clowder-ai#575 含 Phase C，cat-cafe#1443 absorbed）
+- [x] AC-C1: F133 KD-4 修正完成
+- [x] AC-C2: F122 spec 标 "executor unification: complete"
+- [x] AC-C3: F047 spec 加 reorder
+- [x] AC-C4: ADR-023 queue 终态设计已创建
 
 ## Dependencies
 
@@ -174,25 +182,8 @@ QueueProcessor 出队时：
 | KD-6 | 不做通用 targetCat batching | 跨 source 的 batching 是新执行语义，回归面不可控，留作独立 design issue | 2026-04-24 |
 | KD-7 | signal.aborted 安全门控保留 | 正确的并发保护，修复的是 signal 被错误 abort，不是门控本身 | 2026-04-24 |
 
-## Timeline
-
-| 日期 | 事件 |
-|------|------|
-| 2026-04-23 | #564 issue 创建，根因分析 + 设计调查 |
-| 2026-04-24 | Maintainer review 完成，设计共识达成，立项 F175 |
-
 ## Review Gate
 
 - Phase A: maintainer review（zts212653 家的猫）+ 跨家族 review
 - Phase B: 跨家族 review
-- Phase C: 铲屎官确认 spec 变更
-
-## Links
-
-| 类型 | 路径 | 说明 |
-|------|------|------|
-| **Issue** | [#564](https://github.com/zts212653/clowder-ai/issues/564) | 原始 issue + 设计讨论 |
-| **Feature** | `docs/features/F122-unified-dispatch-queue.md` | F122 执行通道统一（本次收尾） |
-| **Feature** | `docs/features/F133-cicd-tracking.md` | F133 CI/CD Tracking（urgent 语义来源） |
-| **Feature** | `docs/features/F039-message-queue-delivery.md` | F039 消息排队投递原始设计 |
-| **Feature** | `docs/features/F047-queue-steer.md` | F047 Queue Steer |
+- Phase C: team lead确认 spec 变更

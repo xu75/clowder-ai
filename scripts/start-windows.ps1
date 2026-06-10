@@ -86,6 +86,20 @@ if (Test-Path $envFile) {
     Write-Warn ".env not found - using defaults"
 }
 
+function Preserve-ServiceFlagForApiLifecycle {
+    param([string]$SourceName, [string]$TargetName)
+    $value = [System.Environment]::GetEnvironmentVariable($SourceName, "Process")
+    if ($null -ne $value -and $value -ne "") {
+        [System.Environment]::SetEnvironmentVariable($TargetName, $value, "Process")
+    }
+}
+
+Preserve-ServiceFlagForApiLifecycle -SourceName "ASR_ENABLED" -TargetName "CAT_CAFE_SERVICE_ASR_ENABLED"
+Preserve-ServiceFlagForApiLifecycle -SourceName "TTS_ENABLED" -TargetName "CAT_CAFE_SERVICE_TTS_ENABLED"
+Preserve-ServiceFlagForApiLifecycle -SourceName "LLM_POSTPROCESS_ENABLED" -TargetName "CAT_CAFE_SERVICE_LLM_POSTPROCESS_ENABLED"
+Preserve-ServiceFlagForApiLifecycle -SourceName "EMBED_ENABLED" -TargetName "CAT_CAFE_SERVICE_EMBED_ENABLED"
+Preserve-ServiceFlagForApiLifecycle -SourceName "AUDIO_SERVICE_ENABLED" -TargetName "CAT_CAFE_SERVICE_AUDIO_ENABLED"
+
 # -- Apply profile defaults (mirrors start-dev.sh apply_profile_defaults) --
 # Profile defaults are fallbacks: .env value wins if set, otherwise profile default applies.
 $profileDefaults = @{}
@@ -271,26 +285,24 @@ $embedEnabled = if ($null -ne $embedEnabledRaw -and $embedEnabledRaw -ne "") {
 }
 $env:EMBED_ENABLED = if ($embedEnabled) { "1" } else { "0" }
 
+# Embedding sidecar lifecycle is owned by the API startup reconciler: it reads
+# .cat-cafe/services.json and starts or cleans Cat Cafe-owned listeners based
+# on Console state. This script only computes EMBED_URL/EMBED_PORT so the API
+# can locate the sidecar.
 $embedPortDefault = if ($env:EMBED_PORT) { [int]$env:EMBED_PORT } else { 9880 }
 $configuredEmbedUrl = if ($env:EMBED_URL) { $env:EMBED_URL.Trim() } else { "" }
 $localEmbedPort = Get-LoopbackHttpPort -Url $configuredEmbedUrl -DefaultPort $embedPortDefault
-$useLocalEmbedSidecar = $embedEnabled -and ((-not $configuredEmbedUrl) -or ($null -ne $localEmbedPort))
-$EmbedPort = if ($useLocalEmbedSidecar) {
-    if ($null -ne $localEmbedPort) { [int]$localEmbedPort } else { $embedPortDefault }
-} else {
-    $embedPortDefault
-}
-$EmbedPidFile = Join-Path $RunDir "embed-$EmbedPort.pid"
-$EmbedLauncher = Join-Path $ProjectRoot "scripts\embed-server.ps1"
-if ($useLocalEmbedSidecar) {
+$EmbedPort = if ($null -ne $localEmbedPort) { [int]$localEmbedPort } else { $embedPortDefault }
+$embedIsLocal = (-not $configuredEmbedUrl) -or ($null -ne $localEmbedPort)
+if (-not $configuredEmbedUrl) {
     $env:EMBED_URL = "http://127.0.0.1:$EmbedPort"
 }
 
 Write-Step "Check ports"
 Stop-PortProcess -Port ([int]$ApiPort) -Name "API" -PidFile $ApiPidFile -ProjectRoot $ProjectRoot
 Stop-PortProcess -Port ([int]$WebPort) -Name "Frontend" -PidFile $WebPidFile -ProjectRoot $ProjectRoot
-if ($useLocalEmbedSidecar) {
-    Stop-PortProcess -Port ([int]$EmbedPort) -Name "Embedding" -PidFile $EmbedPidFile -ProjectRoot $ProjectRoot
+if ($embedEnabled -and $embedIsLocal) {
+    Stop-PortProcess -Port ([int]$EmbedPort) -Name "Embedding" -PidFile (Join-Path $RunDir "embed-$EmbedPort.pid") -ProjectRoot $ProjectRoot
 }
 
 # -- Storage (Redis or Memory) -------------------------------
@@ -299,50 +311,45 @@ Write-Step "Storage"
 $useRedis = -not $Memory
 $startedRedis = $false
 $redisLayout = Resolve-PortableRedisLayout -ProjectRoot $ProjectRoot
-$redisCliPath = $null
 $redisServerPath = $null
 $redisSource = $null
-$redisAuthArgs = @()
 $redisJob = $null
 $redisLogFile = Join-Path $redisLayout.Logs "redis-$RedisPort.log"
 $redisPidFile = Join-Path $redisLayout.Data "redis-$RedisPort.pid"
 $configuredRedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL.Trim() } else { "" }
-$useExternalRedis = $useRedis -and $configuredRedisUrl -and -not (Test-LocalRedisUrl -RedisUrl $configuredRedisUrl -RedisPort $RedisPort)
+$configuredIsManagedRedis = $configuredRedisUrl -and (Test-LocalRedisUrl -RedisUrl $configuredRedisUrl -RedisPort $RedisPort)
+$useExternalRedis = $useRedis -and $configuredRedisUrl -and -not $configuredIsManagedRedis
 $safeConfiguredRedisUrl = Get-RedactedRedisUrl -RedisUrl $configuredRedisUrl
 
-if ($useExternalRedis) {
-    Write-Ok "Using external Redis: $safeConfiguredRedisUrl"
-} elseif ($useRedis) {
-    $redisCommands = Resolve-PortableRedisBinaries -ProjectRoot $ProjectRoot
-    if (-not $redisCommands) {
-        $redisCommands = Resolve-GlobalRedisBinaries
-    }
-    if ($redisCommands) {
-        $redisCliPath = $redisCommands.CliPath
-        $redisServerPath = $redisCommands.ServerPath
-        $redisSource = $redisCommands.Source
-        Write-Ok "Redis binaries resolved ($redisSource): $($redisCommands.BinDir)"
-    }
-    $redisAuthArgs = Get-RedisAuthArgs -RedisUrl $configuredRedisUrl
-    # Check if Redis is already running
-    try {
-        if (-not $redisCliPath) {
-            throw "redis-cli unavailable"
-        }
-        $redisPing = & $redisCliPath -p $RedisPort @redisAuthArgs ping 2>$null
-        if ($redisPing -eq "PONG") {
+if ($useRedis) {
+    if ($configuredRedisUrl -and (Test-RedisReachable -RedisUrl $configuredRedisUrl)) {
+        # A configured reachable Redis endpoint can be used without redis-cli.
+        Write-Ok "Redis reachable at $safeConfiguredRedisUrl"
+        $env:REDIS_URL = $configuredRedisUrl
+    } elseif ($useExternalRedis) {
+        Write-Warn "Redis not reachable at $safeConfiguredRedisUrl - falling back to memory storage"
+        Write-Warn "Check your REDIS_URL or use -Memory to skip Redis."
+        $useRedis = $false
+    } else {
+        # No reachable configured Redis endpoint; manage Redis on $RedisPort.
+        $localUrl = "redis://localhost:$RedisPort"
+        if (Test-RedisReachable -RedisUrl $localUrl) {
+            # Redis already listening on our managed port; verify ownership.
             $redisConnections = Get-NetTCPConnection -LocalPort $RedisPort -State Listen -ErrorAction SilentlyContinue
-            if (-not $redisConnections) {
-                throw "not running"
-            }
-            $managedRedisPid = Get-ManagedProcessId -PidFile $redisPidFile
-            foreach ($conn in $redisConnections) {
-                $isManagedPid = $managedRedisPid -and ($conn.OwningProcess -eq $managedRedisPid)
-                $isClowderOwned = $isManagedPid -or (Test-ClowderOwnedProcess -ProcessId $conn.OwningProcess -ProjectRoot $ProjectRoot)
-                if (-not $isClowderOwned) {
-                    Write-Err "Redis port $RedisPort is in use by non-Clowder PID $($conn.OwningProcess). Stop it manually or change REDIS_PORT."
-                    throw "Redis port $RedisPort is in use by a non-Clowder process"
+            $hasNonClowder = $false
+            if ($redisConnections) {
+                $managedRedisPid = Get-ManagedProcessId -PidFile $redisPidFile
+                foreach ($conn in $redisConnections) {
+                    $isManagedPid = $managedRedisPid -and ($conn.OwningProcess -eq $managedRedisPid)
+                    $isClowderOwned = $isManagedPid -or (Test-ClowderOwnedProcess -ProcessId $conn.OwningProcess -ProjectRoot $ProjectRoot)
+                    if (-not $isClowderOwned) {
+                        Write-Err "Redis port $RedisPort is in use by non-Clowder PID $($conn.OwningProcess). Stop it manually or change REDIS_PORT."
+                        $hasNonClowder = $true
+                    }
                 }
+            }
+            if ($hasNonClowder) {
+                throw "Redis port $RedisPort is in use by a non-Clowder process"
             }
             Write-Ok "Redis already running on port $RedisPort"
             if ($configuredRedisUrl) {
@@ -351,57 +358,64 @@ if ($useExternalRedis) {
                 $env:REDIS_URL = "redis://localhost:$RedisPort"
             }
         } else {
-            throw "not running"
-        }
-    } catch {
-        if ($_.Exception -and $_.Exception.Message -like "Redis port $RedisPort is in use by a non-Clowder process") {
-            throw
-        }
-        Write-Warn "Redis not running on port $RedisPort"
-        # Try to start Redis
-        try {
-            if ($redisServerPath) {
-                New-Item -Path $redisLayout.Data -ItemType Directory -Force | Out-Null
-                New-Item -Path $redisLayout.Logs -ItemType Directory -Force | Out-Null
-                $redisAclFile = Join-Path $redisLayout.Data "redis-$RedisPort.acl"
-                $redisServerAuthArgs = Get-RedisServerAuthArgs -RedisUrl $configuredRedisUrl -AclFilePath $redisAclFile
-                $redisArgs = @(
-                    "--port", $RedisPort,
-                    "--bind", "127.0.0.1",
-                    "--dir", (Quote-WindowsProcessArgument -Value $redisLayout.Data),
-                    "--logfile", (Quote-WindowsProcessArgument -Value $redisLogFile),
-                    "--pidfile", (Quote-WindowsProcessArgument -Value $redisPidFile)
-                ) + $redisServerAuthArgs
-                Write-Host "  Starting Redis on port $RedisPort ($redisSource)..."
-                $redisJob = Start-Job -Name "redis-bootstrap" -ScriptBlock {
-                    param($launcherPath, $launcherArgs)
-                    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-                    $OutputEncoding = [System.Text.Encoding]::UTF8
-                    & $launcherPath @launcherArgs 2>&1
-                } -ArgumentList $redisServerPath, $redisArgs
-                Start-Sleep -Seconds 2
-                $redisPing = & $redisCliPath -p $RedisPort @redisAuthArgs ping 2>$null
-                if ($redisPing -eq "PONG") {
-                    Write-Ok "Redis started on port $RedisPort"
-                    if ($configuredRedisUrl) {
-                        $env:REDIS_URL = $configuredRedisUrl
+            # Not running; try to start our own Redis.
+            Write-Warn "Redis not running on port $RedisPort"
+            $redisCommands = Resolve-PortableRedisBinaries -ProjectRoot $ProjectRoot
+            if (-not $redisCommands) {
+                $redisCommands = Resolve-GlobalRedisBinaries
+            }
+            if ($redisCommands) {
+                $redisServerPath = $redisCommands.ServerPath
+                $redisSource = $redisCommands.Source
+                Write-Ok "Redis binaries resolved ($redisSource): $($redisCommands.BinDir)"
+            }
+            try {
+                if ($redisServerPath) {
+                    New-Item -Path $redisLayout.Data -ItemType Directory -Force | Out-Null
+                    New-Item -Path $redisLayout.Logs -ItemType Directory -Force | Out-Null
+                    $redisAclFile = Join-Path $redisLayout.Data "redis-$RedisPort.acl"
+                    $redisServerAuthArgs = Get-RedisServerAuthArgs -RedisUrl $configuredRedisUrl -AclFilePath $redisAclFile
+                    $redisArgs = @(
+                        "--port", $RedisPort,
+                        "--bind", "127.0.0.1",
+                        "--dir", (Quote-WindowsProcessArgument -Value $redisLayout.Data),
+                        "--logfile", (Quote-WindowsProcessArgument -Value $redisLogFile),
+                        "--pidfile", (Quote-WindowsProcessArgument -Value $redisPidFile)
+                    ) + $redisServerAuthArgs
+                    Write-Host "  Starting Redis on port $RedisPort ($redisSource)..."
+                    $redisJob = Start-Job -Name "redis-bootstrap" -ScriptBlock {
+                        param($launcherPath, $launcherArgs)
+                        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+                        $OutputEncoding = [System.Text.Encoding]::UTF8
+                        & $launcherPath @launcherArgs 2>&1
+                    } -ArgumentList $redisServerPath, $redisArgs
+                    Start-Sleep -Seconds 2
+                    $managedProbeUrl = if ($configuredRedisUrl) { $configuredRedisUrl } else { $localUrl }
+                    if (Test-RedisReachable -RedisUrl $managedProbeUrl) {
+                        Write-Ok "Redis started on port $RedisPort"
+                        if ($configuredRedisUrl) {
+                            $env:REDIS_URL = $configuredRedisUrl
+                        } else {
+                            $env:REDIS_URL = "redis://localhost:$RedisPort"
+                        }
+                        $startedRedis = $true
                     } else {
-                        $env:REDIS_URL = "redis://localhost:$RedisPort"
+                        Write-Warn "Redis start failed - falling back to memory storage"
+                        $useRedis = $false
                     }
-                    $startedRedis = $true
                 } else {
-                    Write-Warn "Redis start failed - falling back to memory storage"
+                    Write-Warn "Redis not installed - using memory storage"
+                    Write-Warn "Run .\\scripts\\install.ps1 again to fetch the project-local Redis bundle into .cat-cafe/redis/windows."
                     $useRedis = $false
                 }
-            } else {
-                Write-Warn "Redis not installed - using memory storage"
-                Write-Warn "Run .\\scripts\\install.ps1 again to fetch the project-local Redis bundle into .cat-cafe/redis/windows."
+            } catch {
+                if ($_.Exception -and $_.Exception.Message -like "Redis port $RedisPort is in use by a non-Clowder process") {
+                    throw
+                }
+                Write-Warn "Redis start failed - using memory storage"
+                Write-InstallerExceptionDetails -Context "Redis start" -ErrorRecord $_
                 $useRedis = $false
             }
-        } catch {
-            Write-Warn "Redis start failed - using memory storage"
-            Write-InstallerExceptionDetails -Context "Redis start" -ErrorRecord $_
-            $useRedis = $false
         }
     }
 }
@@ -494,31 +508,16 @@ try {
         EMBED_PORT = $EmbedPort
         EMBED_ENABLED = $env:EMBED_ENABLED
         EMBED_MODE = $env:EMBED_MODE
+        CAT_CAFE_SERVICE_ASR_ENABLED = $env:CAT_CAFE_SERVICE_ASR_ENABLED
+        CAT_CAFE_SERVICE_TTS_ENABLED = $env:CAT_CAFE_SERVICE_TTS_ENABLED
+        CAT_CAFE_SERVICE_LLM_POSTPROCESS_ENABLED = $env:CAT_CAFE_SERVICE_LLM_POSTPROCESS_ENABLED
+        CAT_CAFE_SERVICE_EMBED_ENABLED = $env:CAT_CAFE_SERVICE_EMBED_ENABLED
+        CAT_CAFE_SERVICE_AUDIO_ENABLED = $env:CAT_CAFE_SERVICE_AUDIO_ENABLED
     }
 
-    $embedJob = $null
-    if ($useLocalEmbedSidecar) {
-        if (Test-Path $EmbedLauncher) {
-            Write-Host "  Starting Embedding sidecar (port $EmbedPort)..."
-            $embedJob = Start-Job -Name "embed" -ScriptBlock {
-                param($launcherPath, $port)
-                [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-                $OutputEncoding = [System.Text.Encoding]::UTF8
-                & powershell -ExecutionPolicy Bypass -File $launcherPath -Port $port 2>&1
-            } -ArgumentList $EmbedLauncher, $EmbedPort
-            $jobs += $embedJob
-
-            $embedTimeout = if ($env:EMBED_TIMEOUT) { [int]$env:EMBED_TIMEOUT } else { 60 }
-            if (Wait-ForListeningPort -Port ([int]$EmbedPort) -TimeoutSec $embedTimeout) {
-                Set-ManagedProcessId -Port ([int]$EmbedPort) -PidFile $EmbedPidFile
-                Write-Ok "Embedding sidecar ready on port $EmbedPort"
-            } else {
-                Write-Warn "Embedding sidecar did not become ready within ${embedTimeout}s - continuing in fail-open mode"
-            }
-        } else {
-            Write-Warn "Embedding launcher not found at $EmbedLauncher - continuing in fail-open mode"
-        }
-    }
+    # Embedding sidecar (and other Cat Cafe ML services) are reconciled by the
+    # API startup lifecycle after it starts, per .cat-cafe/services.json. No
+    # manual Start-Job here.
 
     # API Server
     # Env vars are loaded into this process (line 42-53) and inherited by Start-Job.
@@ -580,9 +579,10 @@ try {
             param($root, $port, $nextCli)
             [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
             $OutputEncoding = [System.Text.Encoding]::UTF8
+            Set-Location (Join-Path $root "packages/web")
             $env:PORT = $port
             $env:NEXT_IGNORE_INCORRECT_LOCKFILE = "1"
-            & node $nextCli dev (Join-Path $root "packages/web") -p $port 2>&1
+            & node $nextCli dev -p $port 2>&1
         } -ArgumentList $ProjectRoot, $WebPort, $nextCli
     } else {
         # Production mode: next start (default - avoids #105 issues)
@@ -591,8 +591,9 @@ try {
             param($root, $port, $nextCli)
             [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
             $OutputEncoding = [System.Text.Encoding]::UTF8
+            Set-Location (Join-Path $root "packages/web")
             $env:PORT = $port
-            & node $nextCli start (Join-Path $root "packages/web") -p $port -H 0.0.0.0 2>&1
+            & node $nextCli start -p $port -H 0.0.0.0 2>&1
         } -ArgumentList $ProjectRoot, $WebPort, $nextCli
     }
     $jobs += $webJob
@@ -607,9 +608,8 @@ try {
     $storageMode = if ($useRedis -and $safeEffectiveRedisUrl) { "Redis ($safeEffectiveRedisUrl)" } elseif ($useRedis) { "Redis (redis://localhost:$RedisPort)" } else { "Memory (restart loses data)" }
     $frontendMode = if ($Dev) { "development (hot reload)" } else { "production (PWA enabled)" }
     $embeddingMode = if ($embedEnabled) {
-        if ($useLocalEmbedSidecar) { "Local (http://127.0.0.1:$EmbedPort)" }
-        elseif ($configuredEmbedUrl) { "Remote ($configuredEmbedUrl)" }
-        else { "Enabled" }
+        if ($configuredEmbedUrl) { "Remote ($configuredEmbedUrl)" }
+        else { "Local sidecar managed by API autostart (port $EmbedPort)" }
     } else {
         "Off"
     }
@@ -665,11 +665,12 @@ try {
     }
     Clear-ManagedProcessId -PidFile $ApiPidFile
     Clear-ManagedProcessId -PidFile $WebPidFile
-    Clear-ManagedProcessId -PidFile $EmbedPidFile
+    Clear-ManagedProcessId -PidFile (Join-Path $RunDir "embed-$EmbedPort.pid")
 
     if ($startedRedis) {
         try {
-            & $redisCliPath -p $RedisPort @redisAuthArgs shutdown save 2>$null
+            $managedShutdownUrl = if ($configuredRedisUrl) { $configuredRedisUrl } else { "redis://localhost:$RedisPort" }
+            Send-RedisShutdown -RedisUrl $managedShutdownUrl
             Write-Ok "Redis stopped"
         } catch {
             Write-Warn "Could not stop Redis gracefully"

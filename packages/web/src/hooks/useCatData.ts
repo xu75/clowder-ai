@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { UNKNOWN_CAT_COLOR } from '@/lib/color-defaults';
 import { refreshMentionData } from '@/lib/mention-highlight';
 import { sortCatsByOrder } from '@/lib/sort-cats-by-order';
 import { apiFetch } from '@/utils/api-client';
@@ -52,6 +53,15 @@ export interface CatData {
   isDefaultVariant?: boolean;
   /** F32-b P4: Breed-level display name (e.g. "布偶猫"), for group headings */
   breedDisplayName?: string;
+  voiceConfig?: {
+    voice: string;
+    langCode: string;
+    speed?: number;
+    refAudio?: string;
+    refText?: string;
+    instruct?: string;
+    temperature?: number;
+  };
   /** F149: Adapter mode for Google provider cats (ACP vs legacy CLI) */
   adapterMode?: 'acp' | 'cli';
   /** F127: Roster metadata used by Hub ownership/lead markers */
@@ -115,7 +125,7 @@ function normalizeCats(rawCats: unknown[]): CatData[] {
       ...cat,
       id: cat.id ?? '',
       displayName: cat.displayName ?? cat.id ?? '',
-      color: cat.color ?? { primary: '#000000', secondary: '#ffffff' },
+      color: cat.color ?? UNKNOWN_CAT_COLOR,
       mentionPatterns: Array.isArray(cat.mentionPatterns) ? cat.mentionPatterns : [],
       accountRef: cat.accountRef,
       clientId: cat.clientId ?? 'openai',

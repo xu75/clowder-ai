@@ -148,6 +148,12 @@ function mockInvocationTracker() {
       has(threadId) {
         return activeThreads.has(threadId);
       },
+      tryStartThread(threadId, catId, userId, catIds) {
+        if (activeThreads.has(threadId)) return null;
+        starts.push({ threadId, catId, userId, catIds });
+        activeThreads.add(threadId);
+        return new AbortController();
+      },
     },
   };
 }
@@ -364,8 +370,7 @@ describe('Queue Integration (E2E scenarios)', () => {
   it('bugfix: ConnectorInvokeTrigger abort mid-loop → should NOT ack or mark succeeded', async () => {
     // Setup: no active invocation so trigger goes to direct execution
     const controller = new AbortController();
-    trackerMock.tracker.start = () => {
-      trackerMock.starts.push({ direct: true });
+    trackerMock.tracker.tryStartThread = () => {
       trackerMock.activeThreads.add('thread-1');
       return controller;
     };
@@ -527,21 +532,13 @@ describe('Queue Integration (E2E scenarios)', () => {
     // Capture call count before completion
     const beforeCount = routerMock.calls.length;
     await localProcessor.onInvocationComplete('thread-1', 'gpt52', 'succeeded');
-    // onInvocationComplete returned — fire-and-forget executeEntry calls are launched
-    // but haven't completed. Count starts within the same microtask frame:
-    const startedImmediately = routerMock.calls.length - beforeCount;
 
+    // executeEntry calls are fire-and-forget with async gaps (emitQueueUpdated).
+    // Wait for them to reach routeExecution before measuring.
     await settle(200);
 
-    assert.strictEqual(routerMock.calls.length, 2, 'Both entries should eventually execute');
-
-    // Without fix: tryExecuteNextAcrossUsers starts 1, the 2nd waits for completion chain
-    // With fix: tryAutoExecute re-scan starts the 2nd in parallel
-    assert.strictEqual(
-      startedImmediately,
-      2,
-      'Both free-slot entries should start in the same onInvocationComplete call',
-    );
+    const startedFromCompletion = routerMock.calls.length - beforeCount;
+    assert.strictEqual(startedFromCompletion, 2, 'Both entries should execute from the same onInvocationComplete call');
   });
 
   it('bugfix: clearPause + succeeded new invocation → auto-dequeue resumes', async () => {

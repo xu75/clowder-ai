@@ -165,11 +165,11 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
       {/* ── Breadcrumb + New Folder ── */}
-      <div className="flex items-center gap-1 px-5 h-10 bg-cafe-white border-b border-[#f0e6de] flex-shrink-0 overflow-x-auto">
+      <div className="flex items-center gap-1 px-5 h-10 bg-cafe-white console-divider-b flex-shrink-0 overflow-x-auto">
         {segments.map((seg, i) => (
           <span key={seg.path || `_${i}`} className="flex items-center gap-1 flex-shrink-0">
             {i > 0 && (
-              <svg aria-hidden="true" className="w-3 h-3 text-[#d4c0b3]" viewBox="0 0 20 20" fill="currentColor">
+              <svg aria-hidden="true" className="w-3 h-3 text-cafe-muted" viewBox="0 0 20 20" fill="currentColor">
                 <path
                   fillRule="evenodd"
                   d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z"
@@ -183,7 +183,7 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
               <button
                 type="button"
                 onClick={() => fetchDirectory(seg.path || undefined)}
-                className="text-xs font-medium text-cocreator-primary hover:underline"
+                className="text-xs font-medium text-cafe-accent hover:underline"
               >
                 {i === 0 && seg.label === 'Home' ? (
                   <span className="flex items-center gap-1">
@@ -201,7 +201,7 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
         <button
           type="button"
           onClick={handleStartCreateDir}
-          className="ml-auto flex-shrink-0 px-2 py-1 flex items-center gap-1 rounded-md border border-cocreator-primary/30 bg-cocreator-bg/50 text-cocreator-primary hover:bg-cocreator-bg hover:border-cocreator-primary/50 transition-colors text-[11px] font-medium"
+          className="ml-auto flex-shrink-0 px-2 py-1 flex items-center gap-1 rounded-md border border-cafe-accent/30 bg-cafe-surface/50 text-cafe-accent hover:bg-cafe-surface hover:border-cafe-accent/50 transition-colors text-xs font-medium"
           title="新建文件夹"
         >
           <svg aria-hidden="true" className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -215,9 +215,9 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-0.5 min-h-0">
         {/* Inline new folder input */}
         {creatingDir && (
-          <div className="px-3 py-2 rounded-lg ring-2 ring-cocreator-primary bg-cocreator-bg/50 mb-1">
+          <div className="px-3 py-2 rounded-lg ring-2 ring-cafe-accent bg-cafe-surface/50 mb-1">
             <div className="flex items-center gap-2">
-              <FolderIcon className="text-cocreator-primary" />
+              <FolderIcon className="text-cafe-accent" />
               <input
                 ref={newDirInputRef}
                 type="text"
@@ -237,13 +237,13 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
                   }
                 }}
                 placeholder="文件夹名称..."
-                className="flex-1 text-sm px-2 py-1 rounded border border-cocreator-primary/30 bg-white focus:outline-none focus:ring-1 focus:ring-cocreator-primary"
+                className="flex-1 text-sm px-2 py-1 rounded border border-cafe-accent/30 bg-cafe-surface-canvas focus:outline-none focus:ring-1 focus:ring-cafe-accent"
               />
               <button
                 type="button"
                 onClick={handleCreateDir}
                 disabled={!newDirName.trim()}
-                className="text-xs px-2.5 py-1 rounded bg-cocreator-primary text-white hover:bg-cocreator-dark disabled:opacity-40 transition-colors"
+                className="text-xs px-2.5 py-1 rounded bg-cafe-accent text-[var(--cafe-surface)] hover:bg-cafe-interactive disabled:opacity-40 transition-colors"
               >
                 创建
               </button>
@@ -253,12 +253,12 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
                   setCreatingDir(false);
                   setMkdirError(null);
                 }}
-                className="text-xs text-gray-400 hover:text-gray-600"
+                className="text-xs text-cafe-muted hover:text-cafe-secondary"
               >
                 取消
               </button>
             </div>
-            {mkdirError && <p className="text-[10px] text-red-500 mt-1 ml-6">{mkdirError}</p>}
+            {mkdirError && <p className="text-micro text-conn-red-text mt-1 ml-6">{mkdirError}</p>}
           </div>
         )}
 
@@ -270,13 +270,13 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
 
         {info && (
           <div className="px-3 py-1.5 mb-1">
-            <p className="text-[10px] text-cocreator-primary">{info}</p>
+            <p className="text-micro text-cafe-accent">{info}</p>
           </div>
         )}
 
         {error && (
           <div className="px-3 py-1.5 mb-1">
-            <p className="text-xs text-red-500">{error}</p>
+            <p className="text-xs text-conn-red-text">{error}</p>
           </div>
         )}
 
@@ -295,16 +295,16 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
                 type="button"
                 onClick={() => fetchDirectory(entry.path)}
                 className={`w-full text-left px-3 py-2.5 text-sm rounded-lg transition-colors flex items-center gap-2.5 ${
-                  isActive ? 'bg-cocreator-bg' : 'hover:bg-cocreator-bg/50'
+                  isActive ? 'bg-cafe-surface' : 'hover:bg-cafe-surface/50'
                 }`}
                 title={entry.path}
               >
-                <FolderIcon className={isActive ? 'text-cocreator-primary' : 'text-[#c4a882]'} />
+                <FolderIcon className={isActive ? 'text-cafe-accent' : 'text-cafe-muted'} />
                 <span className="font-medium text-cafe-black truncate flex-1">{entry.name}</span>
-                {isActive && <span className="text-[10px] text-cocreator-primary flex-shrink-0">当前项目</span>}
+                {isActive && <span className="text-micro text-cafe-accent flex-shrink-0">当前项目</span>}
                 <svg
                   aria-hidden="true"
-                  className="w-3.5 h-3.5 text-[#d4c0b3] flex-shrink-0"
+                  className="w-3.5 h-3.5 text-cafe-muted flex-shrink-0"
                   viewBox="0 0 20 20"
                   fill="currentColor"
                 >
@@ -320,7 +320,7 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
       </div>
 
       {/* ── Path input ── */}
-      <div className="px-5 py-3 border-t border-[#f0e6de] space-y-2 flex-shrink-0">
+      <div className="px-5 py-3 console-divider-t space-y-2 flex-shrink-0">
         <div className="flex gap-2">
           <TerminalIcon />
           <input
@@ -333,13 +333,13 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
               if (e.key === 'Enter' && !ime.isComposing()) handlePathSubmit();
             }}
             placeholder="Enter path..."
-            className="flex-1 text-xs px-3 py-2 rounded-lg border border-[#e8d9cf] bg-cafe-white focus:outline-none focus:ring-1 focus:ring-cocreator-primary"
+            className="flex-1 text-xs px-3 py-2 rounded-lg border border-[var(--console-border-soft)] bg-cafe-white focus:outline-none focus:ring-1 focus:ring-cafe-accent"
           />
           {pathInput.trim() && (
             <button
               type="button"
               onClick={handlePathSubmit}
-              className="px-2.5 py-2 rounded-lg border border-[#e8d9cf] bg-cafe-white text-cafe-secondary hover:bg-cocreator-bg transition-colors"
+              className="px-2.5 py-2 rounded-lg border border-[var(--console-border-soft)] bg-cafe-white text-cafe-secondary hover:bg-cafe-surface transition-colors"
               aria-label="Go to path"
             >
               <svg aria-hidden="true" className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -356,14 +356,14 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
         {/* ── Action bar ── */}
         <div className="flex items-center gap-2 pt-1">
           {browseResult && (
-            <span className="text-[11px] text-cafe-secondary truncate flex-1" title={browseResult.current}>
+            <span className="text-xs text-cafe-secondary truncate flex-1" title={browseResult.current}>
               {browseResult.current}
             </span>
           )}
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg border border-[#e8d9cf] text-cafe-secondary text-xs font-medium transition-colors hover:bg-cafe-surface-elevated"
+            className="px-4 py-2 rounded-lg border border-[var(--console-border-soft)] text-cafe-secondary text-xs font-medium transition-colors hover:bg-cafe-surface-elevated"
           >
             取消
           </button>
@@ -371,7 +371,7 @@ export function DirectoryBrowser({ initialPath, activeProjectPath, onSelect, onC
             type="button"
             onClick={() => browseResult && onSelect(browseResult.current)}
             disabled={!browseResult}
-            className="px-5 py-2 rounded-lg bg-cocreator-primary hover:bg-cocreator-dark text-white text-sm font-medium transition-colors disabled:opacity-40"
+            className="px-5 py-2 rounded-lg bg-cafe-accent hover:bg-cafe-interactive text-[var(--cafe-surface)] text-sm font-medium transition-colors disabled:opacity-40"
           >
             选择此目录
           </button>

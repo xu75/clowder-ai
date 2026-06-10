@@ -79,17 +79,24 @@ test('Windows installer revalidates Node major version after winget install', ()
 
 test('Windows installer retries plain pnpm install when frozen lockfile mode still fails after protected retries', () => {
   const helperIndex = installScript.indexOf('function Invoke-PnpmInstallWithCapturedOutput');
-  const frozenInstallIndex = installScript.indexOf(
-    '$frozenInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs @("install", "--frozen-lockfile")',
+  // Step 5 now also appends a Windows-only --store-dir / --package-import-method
+  // suffix to every Invoke-PnpmInstallWithCapturedOutput call, so the args are
+  // assembled inline as `@(...) + $pnpmInstallExtra`. Use a regex that tolerates
+  // either the bare array form or the concatenation form.
+  const frozenInstallMatch = installScript.match(
+    /\$frozenInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs \(?@\("install", "--frozen-lockfile"\)(?:\s*\+\s*\$pnpmInstallExtra)?\)?/,
   );
+  const frozenInstallIndex = frozenInstallMatch ? frozenInstallMatch.index : -1;
   const cancelExitIndex = installScript.indexOf(
     'Exit-InstallerIfCancelled -ErrorRecord $frozenInstallResult.ErrorRecord -Context "pnpm install"',
   );
   const retryWarnIndex = installScript.indexOf('Write-Warn "Frozen lockfile failed, retrying..."');
-  const retryInstallIndex = installScript.indexOf(
-    '$plainInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs @("install")',
-    retryWarnIndex,
-  );
+  const retryInstallMatch = installScript
+    .slice(retryWarnIndex)
+    .match(
+      /\$plainInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs \(?@\("install"(?:,\s*"--no-frozen-lockfile")?\)(?:\s*\+\s*\$pnpmInstallExtra)?\)?/,
+    );
+  const retryInstallIndex = retryInstallMatch ? retryWarnIndex + retryInstallMatch.index : -1;
 
   assert.notEqual(helperIndex, -1, 'expected captured install helper');
   assert.notEqual(frozenInstallIndex, -1, 'expected frozen lockfile install attempt via helper');
@@ -112,19 +119,23 @@ test('Windows installer retries with PUPPETEER_SKIP_DOWNLOAD only for Puppeteer 
   assert.match(installScript, /Write-Warn "Bundled Chrome download failed - skipped"/);
   assert.match(
     installScript,
-    /Write-Warn "Thread export \/ screenshot may be unavailable\. To install later: npx puppeteer browsers install chrome"/,
+    /Write-Warn "Thread export \/ screenshot may be unavailable\. Install Chrome\/Chromium or set CHROME_EXECUTABLE_PATH in \.env"/,
+  );
+  // Step 5 now appends a Windows-only --store-dir suffix to every
+  // Invoke-PnpmInstallWithCapturedOutput call, so the args either appear as the
+  // bare array form (non-Windows path through the regex) or as
+  // `@(...) + $pnpmInstallExtra` (the Windows-default concatenation form).
+  assert.match(
+    installScript,
+    /\$frozenInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs \(?@\("install", "--frozen-lockfile"\)(?:\s*\+\s*\$pnpmInstallExtra)?\)?/,
   );
   assert.match(
     installScript,
-    /\$frozenInstallResult = Invoke-PnpmInstallWithCapturedOutput -CommandArgs @\("install", "--frozen-lockfile"\)/,
+    /Invoke-PnpmInstallWithCapturedOutput -CommandArgs \(?@\("install", "--frozen-lockfile"\)(?:\s*\+\s*\$pnpmInstallExtra)?\)? -SkipPuppeteerDownload/,
   );
   assert.match(
     installScript,
-    /Invoke-PnpmInstallWithCapturedOutput -CommandArgs @\("install", "--frozen-lockfile"\) -SkipPuppeteerDownload/,
-  );
-  assert.match(
-    installScript,
-    /Invoke-PnpmInstallWithCapturedOutput -CommandArgs @\("install"\) -SkipPuppeteerDownload/,
+    /Invoke-PnpmInstallWithCapturedOutput -CommandArgs \(?@\("install"(?:,\s*"--no-frozen-lockfile")?\)(?:\s*\+\s*\$pnpmInstallExtra)?\)? -SkipPuppeteerDownload/,
   );
 });
 
@@ -192,6 +203,62 @@ test('Windows installer probes the npm shim path when pnpm is installed but not 
   assert.match(installScript, /Resolve-ToolCommand -Name "pnpm"/);
 });
 
+test('Windows pnpm resolver validates npm prefix output with Test-Path', () => {
+  const appDataShimIndex = commandHelpersScript.indexOf('Join-Path $env:APPDATA "npm\\$Name.cmd"');
+  const npmCommandIndex = commandHelpersScript.indexOf('$npmCommand = Get-Command npm -ErrorAction SilentlyContinue');
+  const npmPrefixIndex = commandHelpersScript.indexOf(
+    '$npmPrefix = @(& $npmPath prefix -g 2>$null) | Select-Object -Last 1',
+  );
+  const testPathIndex = commandHelpersScript.indexOf('Test-Path $npmPrefix -ErrorAction SilentlyContinue');
+
+  assert.notEqual(appDataShimIndex, -1, 'expected APPDATA npm shim candidates');
+  assert.notEqual(npmCommandIndex, -1, 'expected npm prefix probe for all tools');
+  assert.notEqual(npmPrefixIndex, -1, 'expected npm prefix probe to remain available');
+  assert.notEqual(testPathIndex, -1, 'expected Test-Path validation on npm prefix output');
+  assert.ok(appDataShimIndex < npmCommandIndex, 'expected direct APPDATA shim candidates before npm probing');
+  assert.ok(npmCommandIndex < npmPrefixIndex, 'expected npm command lookup before prefix probe');
+  assert.ok(npmPrefixIndex < testPathIndex, 'expected Test-Path after npm prefix probe');
+});
+
+test('Windows pnpm resolver keeps npm config prefix candidates with machine-level coverage', () => {
+  const configPrefixHelperIndex = commandHelpersScript.indexOf('function Get-NpmConfigPrefixCandidates');
+  const configPrefixUseIndex = commandHelpersScript.indexOf('foreach ($npmPrefix in (Get-NpmConfigPrefixCandidates))');
+  const npmPrefixProbeIndex = commandHelpersScript.indexOf(
+    '$npmCommand = Get-Command npm -ErrorAction SilentlyContinue',
+  );
+
+  assert.notEqual(configPrefixHelperIndex, -1, 'expected non-executing npm config prefix helper');
+  assert.match(commandHelpersScript, /\$env:NPM_CONFIG_PREFIX/);
+  assert.match(commandHelpersScript, /\$env:npm_config_prefix/);
+  assert.match(commandHelpersScript, /\$env:NPM_CONFIG_GLOBALCONFIG/);
+  assert.match(commandHelpersScript, /\$env:npm_config_globalconfig/);
+  assert.match(commandHelpersScript, /Join-Path \$env:USERPROFILE "\.npmrc"/);
+  assert.match(commandHelpersScript, /Join-Path \$env:APPDATA "npm\\etc\\npmrc"/);
+  assert.match(commandHelpersScript, /Join-Path \$env:ProgramData "npm\\npmrc"/);
+  assert.match(commandHelpersScript, /Join-Path \$env:ProgramFiles "nodejs\\etc\\npmrc"/);
+  assert.match(commandHelpersScript, /GetEnvironmentVariable\("ProgramFiles\(x86\)"\)/);
+  assert.match(commandHelpersScript, /Join-Path \$nodeDir "etc\\npmrc"/);
+  assert.notEqual(configPrefixUseIndex, -1, 'expected npm config prefix candidates in resolver');
+  assert.ok(
+    configPrefixUseIndex < npmPrefixProbeIndex,
+    'expected static npm config prefix candidates before dynamic npm prefix probe',
+  );
+});
+
+test('Windows pnpm resolver expands npmrc ${VAR} prefix syntax before probing shims', () => {
+  const expandHelperIndex = commandHelpersScript.indexOf('function Expand-NpmConfigPrefix');
+  const prefixParseIndex = commandHelpersScript.indexOf('$prefix = $Matches[1].Trim().Trim');
+  const expandUseIndex = commandHelpersScript.indexOf('Expand-NpmConfigPrefix -Prefix $prefix');
+
+  assert.notEqual(expandHelperIndex, -1, 'expected npm config prefix expansion helper');
+  assert.match(commandHelpersScript, /'\\\$\\\{\(\[\^\}\]\+\)\\\}'/, 'helper must match ${VAR} syntax');
+  assert.match(commandHelpersScript, /\[Environment\]::GetEnvironmentVariable\(\$match\.Groups\[1\]\.Value\)/);
+  assert.match(commandHelpersScript, /\[Environment\]::ExpandEnvironmentVariables\(\$Prefix\)/);
+  assert.notEqual(prefixParseIndex, -1, 'expected npmrc prefix parse');
+  assert.notEqual(expandUseIndex, -1, 'expected npmrc prefix parse to use expansion helper');
+  assert.ok(prefixParseIndex < expandUseIndex, 'expected prefix expansion after parsing npmrc prefix value');
+});
+
 test('Windows installer prints pnpm resolver diagnostics before giving up', () => {
   assert.match(commandHelpersScript, /function Get-ToolCommandCandidates/);
   assert.match(commandHelpersScript, /Write-Warn "\$Name resolver candidates:"/);
@@ -243,7 +310,7 @@ test('Windows installer uses interactive selectors instead of typed or letter-ba
   assert.match(uiHelpersScript, /Space to toggle, Enter to confirm/);
   assert.match(installScript, /Name = "Claude"; Label = "Claude"; Cmd = "claude"/);
   assert.match(installScript, /Name = "Codex"; Label = "Codex"; Cmd = "codex"/);
-  assert.match(installScript, /Name = "Gemini"; Label = "Gemini"; Cmd = "gemini"/);
+  assert.match(installScript, /Name = "Antigravity"; Label = "Antigravity CLI"; Cmd = "agy"/);
   assert.match(installScript, /Name = "Kimi"; Label = "Kimi"; Cmd = "kimi"/);
   assert.match(installScript, /Select-InstallerMultiChoice -Title "Missing agent CLIs"/);
   assert.doesNotMatch(uiHelpersScript, /Label = "&All"/);

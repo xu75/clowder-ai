@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatCatName, useCatData } from '@/hooks/useCatData';
+import { catColorVar } from '@/lib/cat-slug';
 import { useChatStore } from '@/stores/chatStore';
 import { apiFetch } from '@/utils/api-client';
 import { CatSelector } from './ThreadSidebar/CatSelector';
@@ -35,6 +36,8 @@ interface ThreadCatPillProps {
   threadId: string;
 }
 
+const NO_PREFERRED_CATS: string[] = [];
+
 /** F154 Phase B — Shows preferred cat in thread header, click to open CatSelector popover. */
 export function ThreadCatPill({ threadId }: ThreadCatPillProps) {
   const threads = useChatStore((s) => s.threads);
@@ -49,7 +52,7 @@ export function ThreadCatPill({ threadId }: ThreadCatPillProps) {
   const popoverRef = useRef<HTMLDivElement>(null);
 
   const thread = threads.find((t) => t.id === threadId);
-  const preferredCats: string[] = thread?.preferredCats ?? [];
+  const preferredCats: string[] = thread?.preferredCats ?? NO_PREFERRED_CATS;
 
   // Sync local selection when prop changes or popover closes; clear stale error on reopen
   useEffect(() => {
@@ -146,8 +149,8 @@ export function ThreadCatPill({ threadId }: ThreadCatPillProps) {
         onClick={() => setIsOpen(!isOpen)}
         className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border transition-colors text-xs ${
           cat
-            ? 'border-cocreator-light hover:bg-cocreator-light'
-            : 'border-dashed border-cafe-muted hover:border-cocreator-light hover:bg-cocreator-light'
+            ? 'border-cafe-subtle hover:bg-cafe-surface-sunken'
+            : 'border-dashed border-cafe-muted hover:border-cafe-subtle hover:bg-cafe-surface-sunken'
         }`}
         data-testid="thread-cat-pill"
       >
@@ -155,7 +158,7 @@ export function ThreadCatPill({ threadId }: ThreadCatPillProps) {
           <>
             <span
               className="w-2 h-2 rounded-full flex-shrink-0"
-              style={{ backgroundColor: cat.color.primary }}
+              style={{ backgroundColor: catColorVar(cat.id, 'primary') }}
               data-testid="pill-dot"
             />
             <span className="text-cafe-secondary font-medium">{formatCatName(cat)}</span>
@@ -176,9 +179,12 @@ export function ThreadCatPill({ threadId }: ThreadCatPillProps) {
             <CatSelector selectedCats={selectedCats} onSelectionChange={handleSelectionChange} />
           </div>
           <div className="flex items-center justify-between px-3 pb-3 pt-2 border-t border-cafe-subtle flex-shrink-0">
-            {saveError && <span className="text-[10px] text-red-400">保存失败</span>}
+            {saveError && <span className="text-micro text-conn-red-text">保存失败</span>}
             {!saveError && selectedCats.length > 0 && (
-              <button onClick={() => setSelectedCats([])} className="text-[10px] text-cafe-muted hover:text-red-400">
+              <button
+                onClick={() => setSelectedCats([])}
+                className="text-micro text-cafe-muted hover:text-conn-red-text"
+              >
                 清除
               </button>
             )}
@@ -195,7 +201,7 @@ export function ThreadCatPill({ threadId }: ThreadCatPillProps) {
               <button
                 onClick={() => void handleSave()}
                 disabled={!hasChanged || isSaving}
-                className="text-xs px-2 py-0.5 rounded bg-cocreator-primary text-white hover:bg-cocreator-dark disabled:opacity-40"
+                className="text-xs px-2 py-0.5 rounded bg-cafe-accent text-[var(--cafe-surface)] hover:bg-cafe-interactive disabled:opacity-40"
               >
                 {isSaving ? '...' : '保存'}
               </button>

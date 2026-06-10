@@ -64,6 +64,12 @@ const storeState: Record<string, unknown> = {
   setMessageUsage: mockSetMessageUsage,
   requestStreamCatchUp: mockRequestStreamCatchUp,
   removeActiveInvocation: mockRemoveActiveInvocation,
+  // F183 Phase B1.5 — active error wire-up routes through reducer's replaceMessages.
+  // mutation impl 让 storeState.messages 始终反映 reducer 写入，便于 end-state 断言。
+  replaceMessages: vi.fn((msgs: unknown[]) => {
+    storeState.messages = msgs as typeof storeState.messages;
+  }),
+  hasMore: true,
 
   addMessageToThread: mockAddMessageToThread,
   clearThreadActiveInvocation: mockClearThreadActiveInvocation,
@@ -236,6 +242,41 @@ describe('F108 P1: concurrent cancel isolation', () => {
     expect(mockSetIntentMode).toHaveBeenCalledWith(null);
     expect(mockClearCatStatuses).toHaveBeenCalled();
     expect(mockSetLoading).toHaveBeenCalledWith(false);
+  });
+
+  it('recoverable non-final error keeps the invocation cancelable while showing the error', () => {
+    storeState.activeInvocations = {
+      'inv-antig': { catId: 'antig-opus', mode: 'execute', startedAt: Date.now() },
+    };
+
+    act(() => root.render(React.createElement(Harness)));
+
+    act(() => {
+      captured?.handleAgentMessage({
+        type: 'error',
+        catId: 'antig-opus',
+        invocationId: 'inv-antig',
+        error: 'The model produced an invalid tool call.',
+        errorCode: 'upstream_error',
+        isFinal: false,
+      });
+    });
+
+    // F183 Phase B1.5: active error 通过 reducer 落到 storeState.messages（不再
+    // 直接调 mockAddMessage）。end-state 等价：error system bubble 必须存在。
+    const msgs = storeState.messages as Array<{ type: string; variant?: string; content: string }>;
+    const errorBubble = msgs.find((m) => m.type === 'system' && m.variant === 'error');
+    expect(errorBubble).toMatchObject({
+      type: 'system',
+      variant: 'error',
+      content: 'Error: The model produced an invalid tool call.',
+    });
+    expect(mockSetCatStatus).not.toHaveBeenCalledWith('antig-opus', 'error');
+    expect(mockSetStreaming).not.toHaveBeenCalledWith(expect.any(String), false);
+    expect(mockRemoveActiveInvocation).not.toHaveBeenCalled();
+    expect(storeState.activeInvocations).toEqual({
+      'inv-antig': { catId: 'antig-opus', mode: 'execute', startedAt: expect.any(Number) },
+    });
   });
 });
 

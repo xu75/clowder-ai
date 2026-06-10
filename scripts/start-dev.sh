@@ -48,6 +48,11 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/lib/node-runtime-guard.sh"
+if [[ "${1:-}" != "--source-only" ]]; then
+    ensure_supported_node_runtime "$SCRIPT_DIR/start-dev.sh" "$@"
+fi
+source "$SCRIPT_DIR/lib/redis-rdb-first.sh"
 source "$SCRIPT_DIR/download-source-overrides.sh"
 cd "$PROJECT_DIR"
 
@@ -108,7 +113,7 @@ clear_inherited_profile_env() {
 
     # Public direct-launch wrappers should honor the requested profile rather
     # than ambient Cat Cafe shell exports leaked from another checkout.
-    unset ANTHROPIC_PROXY_ENABLED ASR_ENABLED TTS_ENABLED LLM_POSTPROCESS_ENABLED EMBED_ENABLED
+    unset ANTHROPIC_PROXY_ENABLED ASR_ENABLED TTS_ENABLED LLM_POSTPROCESS_ENABLED EMBED_ENABLED AUDIO_SERVICE_ENABLED
     unset MESSAGE_TTL_SECONDS THREAD_TTL_SECONDS TASK_TTL_SECONDS SUMMARY_TTL_SECONDS
     unset REDIS_PROFILE
 }
@@ -150,6 +155,76 @@ if [ "$PREFER_DOTENV_PORTS" != "1" ]; then
     restore_cli_override "LLM_POSTPROCESS_PORT" "$CLI_LLM_POSTPROCESS_PORT_OVERRIDE"
 fi
 
+# === F182 大赛 / 多 worktree 并发：WORKTREE_PORT_OFFSET 派生 + 主动覆盖 ===
+# 砚砚 review: cat-cafe/docs/plans/2026-04-30-worktree-port-offset.md
+# OFFSET 非 0 时主动覆盖（不是检查）：
+#   - 端口派生值优先级高于 .env.local + CAT_CAFE_RESPECT_DOTENV_PORTS
+#   - Sidecar **强制 export 0**（不依赖用户配置 — 否则 profile=dev 会重置回 1，砚砚 review P1-1）
+#   - REDIS_DATA_DIR / REDIS_BACKUP_DIR **unset** 让后续 default_redis_*_dir 用新 port 重派生（P1-2）
+apply_worktree_port_offset() {
+    local offset="${WORKTREE_PORT_OFFSET:-0}"
+    [ "$offset" = "0" ] && return 0
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # 云端 Codex P1（双重）：
+    #   1. stderr 不能合并进 eval 输入（Node warning / NODE_OPTIONS 输出会被当 shell 代码）
+    #   2. set -e 下命令替换非零退出会立即 shell exit，不让后续 if 检查到 — 必须用
+    #      `if ! cmd` 包裹（if 内部不触发 set -e exit），不能用 `cmd; status=$?` 两步
+    local derive_stdout derive_stderr_file
+    # 云端 Codex P1：BSD/macOS mktemp 要求 X 必须在末尾，`.XXXXXX.stderr` 会被拒
+    # （too few X's in template）。用完整路径写法两边兼容。
+    derive_stderr_file="$(mktemp "${TMPDIR:-/tmp}/derive-worktree-ports.XXXXXX")"
+    if ! derive_stdout="$(node "$script_dir/derive-worktree-ports.mjs" "$offset" 2>"$derive_stderr_file")"; then
+        local derive_stderr
+        derive_stderr="$(cat "$derive_stderr_file")"
+        rm -f "$derive_stderr_file"
+        echo "[start-dev] WORKTREE_PORT_OFFSET=$offset 派生失败: ${derive_stderr:-<no stderr>}" >&2
+        exit 2
+    fi
+    # 透传 stderr（Node warning 等让用户看见，但不进 eval）
+    if [ -s "$derive_stderr_file" ]; then
+        cat "$derive_stderr_file" >&2
+    fi
+    rm -f "$derive_stderr_file"
+
+    # 派生值压过 .env.local 任何残留（LL-015 防回归）
+    # 只 eval stdout，stderr 已分离（防命令注入）
+    eval "$derive_stdout"
+    export REDIS_URL="redis://localhost:${REDIS_PORT}"
+
+    # 圣域防御（defense-in-depth — derive-worktree-ports.mjs 已挡）
+    if [ "$REDIS_PORT" = "6399" ]; then
+        echo "[start-dev] 拒绝使用 Redis 圣域 6399！" >&2
+        exit 2
+    fi
+
+    # === 主动 export sidecar 禁用（砚砚 review P1-1）===
+    # resolve_config (line 274) 优先级：env_val > _PROF_ > 默认。
+    # 主动 export 0 → resolve_config 看到非空 env_val → 保留 0，不被 profile=dev 重置回 1
+    # EMBED_ENABLED + EMBED_MODE 双保险（derive_embed_enabled line 333 的两条派生路径）
+    export ANTHROPIC_PROXY_ENABLED=0
+    export ASR_ENABLED=0
+    export TTS_ENABLED=0
+    export LLM_POSTPROCESS_ENABLED=0
+    export EMBED_ENABLED=0
+    export EMBED_MODE=off
+    export AUDIO_SERVICE_ENABLED=0
+    # PREVIEW_GATEWAY_PORT=0 让 kill_managed_ports (line 619) 不去碰 4100 端口
+    export PREVIEW_GATEWAY_PORT=0
+
+    # === Redis data/backup dir 重派生（砚砚 review P1-2）===
+    # unset 让 line 380/388 的 default_redis_*_dir(profile, port) 用新派生的 REDIS_PORT 重派生
+    # 同时 unset CLI_*_OVERRIDE 防 line 377/385 复活 .env.local 旧值
+    unset REDIS_DATA_DIR REDIS_BACKUP_DIR
+    unset CLI_REDIS_DATA_DIR_OVERRIDE CLI_REDIS_BACKUP_DIR_OVERRIDE
+
+    echo "[start-dev] WORKTREE_PORT_OFFSET=$offset → REDIS_PORT=$REDIS_PORT REDIS_URL=$REDIS_URL API=$API_SERVER_PORT WEB=$FRONTEND_PORT API_URL=$NEXT_PUBLIC_API_URL"
+    echo "[start-dev] WORKTREE_PORT_OFFSET=$offset → sidecar 全禁用 + Redis dir 待 default_redis_*_dir 重派生"
+}
+
+apply_worktree_port_offset
+
 apply_manual_download_source_overrides
 
 default_redis_port() {
@@ -169,8 +244,8 @@ normalize_raw_dev_redis_defaults() {
 
     REDIS_PORT="6398"
     case "${REDIS_URL:-}" in
-        ""|"redis://localhost:6399"|"redis://127.0.0.1:6399")
-            REDIS_URL="redis://localhost:6398"
+        ""|"redis://127.0.0.1:6399"|"redis://localhost:6399")
+            REDIS_URL="redis://127.0.0.1:6398"
             ;;
     esac
 }
@@ -180,15 +255,19 @@ apply_profile_defaults() {
     local profile="$1"
     # Clear previous profile state
     unset _PROF_ANTHROPIC_PROXY_ENABLED _PROF_ASR_ENABLED _PROF_TTS_ENABLED
-    unset _PROF_LLM_POSTPROCESS_ENABLED _PROF_REDIS_PROFILE
+    unset _PROF_LLM_POSTPROCESS_ENABLED _PROF_AUDIO_SERVICE_ENABLED _PROF_REDIS_PROFILE
     unset _PROF_MESSAGE_TTL_SECONDS _PROF_THREAD_TTL_SECONDS
     unset _PROF_TASK_TTL_SECONDS _PROF_SUMMARY_TTL_SECONDS
     case "$profile" in
         dev)
             _PROF_ANTHROPIC_PROXY_ENABLED=1
-            _PROF_ASR_ENABLED=1
-            _PROF_TTS_ENABLED=1
-            _PROF_LLM_POSTPROCESS_ENABLED=1
+            # Sidecar lifecycle is owned by the API startup reconciler. The dev
+            # profile keeps proxy ON but no longer auto-spawns ML sidecars here.
+            # Enable services in Console; the API starts them via lifecycle routes.
+            _PROF_ASR_ENABLED=0
+            _PROF_TTS_ENABLED=0
+            _PROF_LLM_POSTPROCESS_ENABLED=0
+            _PROF_AUDIO_SERVICE_ENABLED=0
             _PROF_MESSAGE_TTL_SECONDS=0
             _PROF_THREAD_TTL_SECONDS=0
             _PROF_TASK_TTL_SECONDS=0
@@ -200,6 +279,7 @@ apply_profile_defaults() {
             _PROF_ASR_ENABLED=0
             _PROF_TTS_ENABLED=0
             _PROF_LLM_POSTPROCESS_ENABLED=0
+            _PROF_AUDIO_SERVICE_ENABLED=0
             _PROF_MESSAGE_TTL_SECONDS=0
             _PROF_THREAD_TTL_SECONDS=0
             _PROF_TASK_TTL_SECONDS=0
@@ -211,6 +291,7 @@ apply_profile_defaults() {
             _PROF_ASR_ENABLED=0
             _PROF_TTS_ENABLED=0
             _PROF_LLM_POSTPROCESS_ENABLED=0
+            _PROF_AUDIO_SERVICE_ENABLED=0
             _PROF_MESSAGE_TTL_SECONDS=0
             _PROF_THREAD_TTL_SECONDS=0
             _PROF_TASK_TTL_SECONDS=0
@@ -251,7 +332,7 @@ print_config_summary() {
     echo "  配置来源："
     local key src_var val source
     for key in ANTHROPIC_PROXY_ENABLED ASR_ENABLED TTS_ENABLED LLM_POSTPROCESS_ENABLED \
-               EMBED_ENABLED \
+               EMBED_ENABLED AUDIO_SERVICE_ENABLED \
                MESSAGE_TTL_SECONDS THREAD_TTL_SECONDS TASK_TTL_SECONDS SUMMARY_TTL_SECONDS \
                REDIS_PROFILE; do
         val="${!key}"
@@ -272,6 +353,7 @@ resolve_config "ANTHROPIC_PROXY_ENABLED"
 resolve_config "ASR_ENABLED"
 resolve_config "TTS_ENABLED"
 resolve_config "LLM_POSTPROCESS_ENABLED"
+resolve_config "AUDIO_SERVICE_ENABLED"
 resolve_config "MESSAGE_TTL_SECONDS"
 resolve_config "THREAD_TTL_SECONDS"
 resolve_config "TASK_TTL_SECONDS"
@@ -283,6 +365,7 @@ resolve_config "REDIS_PROFILE"
 : "${ASR_ENABLED:=0}"
 : "${TTS_ENABLED:=0}"
 : "${LLM_POSTPROCESS_ENABLED:=0}"
+: "${AUDIO_SERVICE_ENABLED:=0}"
 : "${MESSAGE_TTL_SECONDS:=0}"
 : "${THREAD_TTL_SECONDS:=0}"
 : "${TASK_TTL_SECONDS:=0}"
@@ -290,25 +373,44 @@ resolve_config "REDIS_PROFILE"
 : "${REDIS_PROFILE:=dev}"
 
 derive_embed_enabled() {
+    # EMBED_MODE controls the API in-process embedding mode (off/shadow/on).
+    # The embedding sidecar is now managed by the API service lifecycle, so
+    # start-dev no longer derives EMBED_ENABLED=1 from EMBED_MODE.
     local explicit="${EMBED_ENABLED-}"
-    local mode="${EMBED_MODE:-off}"
     if [ -n "$explicit" ]; then
         _SRC_EMBED_ENABLED="env/.env override"
         return
     fi
-
-    case "$mode" in
-        on|shadow)
-            EMBED_ENABLED=1
-            ;;
-        *)
-            EMBED_ENABLED=0
-            ;;
-    esac
-    _SRC_EMBED_ENABLED="derived from EMBED_MODE=${mode}"
+    EMBED_ENABLED=0
+    _SRC_EMBED_ENABLED="default 0 (sidecar managed by API lifecycle)"
 }
 
 derive_embed_enabled
+
+preserve_explicit_service_flag_for_api() {
+    local source_var="$1"
+    local api_var="$2"
+    local src_meta="_SRC_${source_var}"
+    if [ "${!src_meta:-}" = ".env override" ] && [ -n "${!source_var:-}" ]; then
+        export "${api_var}=${!source_var}"
+    fi
+}
+
+if [ "${ASR_ENABLED:-0}" = "1" ] || [ "${TTS_ENABLED:-0}" = "1" ] \
+   || [ "${LLM_POSTPROCESS_ENABLED:-0}" = "1" ] || [ "${EMBED_ENABLED:-0}" = "1" ] \
+   || [ "${AUDIO_SERVICE_ENABLED:-0}" = "1" ]; then
+    echo "[start-dev] *_ENABLED detected — transferring to API service flags; sidecar lifecycle is owned by the API startup reconciler."
+fi
+preserve_explicit_service_flag_for_api "ASR_ENABLED" "CAT_CAFE_SERVICE_ASR_ENABLED"
+preserve_explicit_service_flag_for_api "TTS_ENABLED" "CAT_CAFE_SERVICE_TTS_ENABLED"
+preserve_explicit_service_flag_for_api "LLM_POSTPROCESS_ENABLED" "CAT_CAFE_SERVICE_LLM_POSTPROCESS_ENABLED"
+preserve_explicit_service_flag_for_api "EMBED_ENABLED" "CAT_CAFE_SERVICE_EMBED_ENABLED"
+preserve_explicit_service_flag_for_api "AUDIO_SERVICE_ENABLED" "CAT_CAFE_SERVICE_AUDIO_ENABLED"
+ASR_ENABLED=0
+TTS_ENABLED=0
+LLM_POSTPROCESS_ENABLED=0
+EMBED_ENABLED=0
+AUDIO_SERVICE_ENABLED=0
 
 default_redis_storage_key() {
     local profile="${1:-$REDIS_PROFILE}"
@@ -384,13 +486,36 @@ probe_port_with_ss() {
 
 probe_port_with_nc() {
     local port=$1
-    nc -z 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z localhost "$port" >/dev/null 2>&1
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 1 nc -z 127.0.0.1 "$port" >/dev/null 2>&1 || timeout 1 nc -z localhost "$port" >/dev/null 2>&1
+    else
+        nc -z 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z localhost "$port" >/dev/null 2>&1
+    fi
+}
+
+# Safe redis-cli ping: use timeout when available, plain redis-cli otherwise.
+# macOS / minimal images may not have `timeout` (coreutils); without the guard,
+# `timeout` returns 127 and healthy Redis is incorrectly seen as down.
+redis_ping() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 redis-cli -p "$REDIS_PORT" ping &> /dev/null
+    else
+        redis-cli -p "$REDIS_PORT" ping &> /dev/null
+    fi
 }
 
 probe_port_with_dev_tcp() {
     local port=$1
     # Bash-only: requires net redirections support (enabled in most mainstream builds).
-    (exec 3<>"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1 || (exec 3<>"/dev/tcp/localhost/$port") >/dev/null 2>&1
+    # timeout prevents WSL hangs on closed ports (no built-in /dev/tcp timeout).
+    # Positional param avoids interpolating $port into bash -c command string.
+    # When timeout is unavailable (stock macOS, minimal images), fall back to bare /dev/tcp.
+    local timeout_cmd=""
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_cmd="timeout 1"
+    fi
+    ${timeout_cmd} bash -c 'exec 3<>/dev/tcp/127.0.0.1/$1' probe "$port" >/dev/null 2>&1 \
+        || ${timeout_cmd} bash -c 'exec 3<>/dev/tcp/localhost/$1' probe "$port" >/dev/null 2>&1
 }
 
 port_listen_pids() {
@@ -586,15 +711,9 @@ kill_managed_ports() {
     if [ "${ANTHROPIC_PROXY_ENABLED:-0}" = "1" ]; then
         [ "${ANTHROPIC_PROXY_ENABLED:-1}" != "0" ] && [ "${ANTHROPIC_PROXY_ENABLED:-1}" != "0" ] && kill_port ${ANTHROPIC_PROXY_PORT:-9877} "Proxy"
     fi
-    if [ "${ASR_ENABLED:-0}" = "1" ]; then
-        kill_port ${WHISPER_PORT:-9876} "ASR"
-    fi
-    if [ "${TTS_ENABLED:-0}" = "1" ]; then
-        kill_port ${TTS_PORT:-9879} "TTS"
-    fi
-    if [ "${LLM_POSTPROCESS_ENABLED:-0}" = "1" ]; then
-        kill_port ${LLM_POSTPROCESS_PORT:-9878} "LLM后修"
-    fi
+    # Sidecar ports are owned by the API startup reconciler now. start-dev no
+    # longer direct-spawns them, so stopping the API process is the lifecycle
+    # boundary this script owns.
 }
 
 # 轮询等待端口监听（ML 模型加载需要时间）
@@ -642,23 +761,6 @@ wait_for_port_or_exit() {
     return 1
 }
 
-# Sidecar 状态机：disabled → launching → ready | failed
-# 用法: start_sidecar <name> <state_var> <port> <timeout> <launch_cmd...>
-start_sidecar() {
-    local name="$1" state_var="$2" port="$3" timeout="$4"
-    shift 4
-    local launch_cmd="$*"
-
-    eval "${state_var}=launching"
-    echo "  启动 ${name} (端口 ${port})..."
-    background_eval_with_null_stdin "$launch_cmd"
-    if wait_for_port "$port" "$name" "$timeout"; then
-        eval "${state_var}=ready"
-    else
-        eval "${state_var}=failed"
-    fi
-}
-
 # 后台 Node dev 进程（tsx watch / next dev）在 macOS + Node 25 下若继承 TTY stdin，
 # 可能在读取 fd0 时抛出 `TTY.onStreamRead` EIO。统一把后台任务 stdin 切到 /dev/null。
 background_eval_with_null_stdin() {
@@ -696,43 +798,14 @@ api_launch_command() {
 
 frontend_launch_command() {
     if [ "$PROD_WEB" = true ]; then
-        printf 'cd packages/web && PORT=%s exec pnpm exec next start -p %s -H 0.0.0.0' "$WEB_PORT" "$WEB_PORT"
+        printf 'cd packages/web && pnpm run sync:vendor-assets && PORT=%s exec pnpm exec next start -p %s -H 0.0.0.0' "$WEB_PORT" "$WEB_PORT"
     else
-        printf 'cd packages/web && NEXT_IGNORE_INCORRECT_LOCKFILE=1 PORT=%s exec pnpm exec next dev -p %s' "$WEB_PORT" "$WEB_PORT"
+        printf 'cd packages/web && NODE_ENV=development NEXT_IGNORE_INCORRECT_LOCKFILE=1 PORT=%s exec pnpm exec node scripts/sync-vendor-assets.mjs --watch -- next dev -p %s' "$WEB_PORT" "$WEB_PORT"
     fi
 }
 
 web_production_build_ready() {
     [ -f "$PROJECT_DIR/packages/web/.next/BUILD_ID" ]
-}
-
-# Sidecar summary: ready → 地址, failed → 报告, disabled → 静默
-print_sidecar_summary_all() {
-    local name state_var port state
-    for entry in "ASR:_STATE_ASR:${ASR_PORT:-9876}" "TTS:_STATE_TTS:${TTS_PORT_VAL:-9879}" "LLM后修:_STATE_LLM_PP:${LLM_PP_PORT:-9878}" "Embedding:_STATE_EMBED:${EMBED_PORT:-9880}"; do
-        name="${entry%%:*}"
-        local rest="${entry#*:}"
-        state_var="${rest%%:*}"
-        port="${rest#*:}"
-        state="${!state_var}"
-        case "$state" in
-            ready)   echo "  - ${name}:      http://localhost:${port}" ;;
-            failed)  echo -e "  - ${name}:      ${RED:-}启动失败${NC:-}" ;;
-        esac
-    done
-}
-
-# 检查 sidecar 依赖是否存在（ENABLED=1 时调用）
-# 用法: check_sidecar_dep <name> <command>
-# 返回 0 = 存在, 1 = 缺失（并打印安装提示）
-check_sidecar_dep() {
-    local name="$1" cmd="$2"
-    if ! command -v "$cmd" &>/dev/null; then
-        echo -e "${RED:-}  ✗ ${name} 需要 ${cmd}，但未安装${NC:-}"
-        echo "    请运行: ./scripts/setup.sh 或手动安装 ${cmd}"
-        return 1
-    fi
-    return 0
 }
 
 # 清理缓存
@@ -911,7 +984,7 @@ archive_redis_snapshot() {
     local dir=""
     local dbfile=""
 
-    if redis-cli -p "$REDIS_PORT" ping &> /dev/null; then
+    if redis_ping; then
         redis-cli -p "$REDIS_PORT" bgsave &> /dev/null || true
         sleep 0.2
         dir=$(redis-cli -p "$REDIS_PORT" config get dir 2>/dev/null | sed -n '2p' || true)
@@ -1037,7 +1110,7 @@ setup_storage() {
     archive_redis_snapshot "pre-start"
 
     # 默认: 尝试 Redis 持久化 (专属端口，避免与系统 Redis 冲突)
-    if redis-cli -p "$REDIS_PORT" ping &> /dev/null; then
+    if redis_ping; then
         echo -e "${GREEN}  ✓ Redis 已运行 (端口 $REDIS_PORT)${NC}"
         export REDIS_URL="redis://localhost:$REDIS_PORT"
         print_redis_runtime_info
@@ -1047,7 +1120,7 @@ setup_storage() {
     echo -e "${YELLOW}  ⚠ Redis 未运行，尝试在端口 $REDIS_PORT 启动...${NC}"
     if command -v redis-server &> /dev/null; then
         maybe_quarantine_stale_aof_dir
-        redis-server \
+        cat_cafe_redis_start_daemon \
             --port "$REDIS_PORT" \
             --bind 127.0.0.1 \
             --dir "$REDIS_DATA_DIR" \
@@ -1059,9 +1132,9 @@ setup_storage() {
             --daemonize yes \
             --pidfile "$REDIS_PIDFILE" \
             --logfile "$REDIS_LOGFILE" \
-            >/dev/null 2>&1 || true
+            || true
         sleep 1
-        if redis-cli -p "$REDIS_PORT" ping &> /dev/null; then
+        if redis_ping; then
             echo -e "${GREEN}  ✓ Redis 已启动 (端口 $REDIS_PORT)${NC}"
             export REDIS_URL="redis://localhost:$REDIS_PORT"
             STARTED_REDIS=true
@@ -1095,7 +1168,7 @@ cleanup() {
     terminate_managed_pids
 
     # 关闭我们启动的专属 Redis (不影响其他 Redis 实例)
-    if [ "$USE_REDIS" = true ] && [ "$STARTED_REDIS" = true ] && redis-cli -p "$REDIS_PORT" ping &> /dev/null 2>&1; then
+    if [ "$USE_REDIS" = true ] && [ "$STARTED_REDIS" = true ] && redis_ping; then
         archive_redis_snapshot "pre-stop"
         redis-cli -p "$REDIS_PORT" shutdown save &> /dev/null || true
         echo "  Redis (端口 $REDIS_PORT) 已关闭"
@@ -1109,7 +1182,9 @@ cleanup() {
     echo "再见！🐾"
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'trap - EXIT; cleanup; exit 130' INT
+trap 'trap - EXIT; cleanup; exit 143' TERM
 
 guard_main_branch_start() {
     if [ "${CAT_CAFE_ALLOW_MAIN_DEV:-0}" = "1" ]; then
@@ -1166,6 +1241,26 @@ guard_runtime_redis_sanctuary() {
     fi
 }
 
+ensure_api_native_addons() {
+    [ "${CAT_CAFE_SKIP_NATIVE_ADDON_GUARD:-0}" = "1" ] && return 0
+    [ -f "$PROJECT_DIR/packages/api/package.json" ] || return 0
+
+    if (cd "$PROJECT_DIR/packages/api" && node -e "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.close();" >/dev/null 2>&1); then
+        return 0
+    fi
+
+    echo ""
+    echo -e "${YELLOW}检测到 API native 依赖与当前 Node 不匹配，重建 better-sqlite3...${NC}"
+    run_logged_step "better-sqlite3 rebuild" 20 pnpm -C "$PROJECT_DIR/packages/api" rebuild better-sqlite3
+
+    if ! (cd "$PROJECT_DIR/packages/api" && node -e "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.close();" >/dev/null 2>&1); then
+        echo -e "${RED}  ✗ better-sqlite3 重建后仍无法加载。请确认当前 Node 在 >=20 <26 范围内。${NC}" >&2
+        return 1
+    fi
+
+    echo -e "${GREEN}  ✓ better-sqlite3 native 依赖已匹配当前 Node${NC}"
+}
+
 # 主函数
 main() {
     guard_main_branch_start
@@ -1187,6 +1282,7 @@ main() {
         run_logged_step "pnpm install" 5 pnpm install --frozen-lockfile
         echo -e "${GREEN}  ✓ 依赖安装完成${NC}"
     fi
+    ensure_api_native_addons
 
     # 3. 构建 shared + API (除非 --quick)
     if [ "$QUICK_MODE" = false ]; then
@@ -1230,73 +1326,11 @@ main() {
         echo -e "${YELLOW}  ⚠ Anthropic Proxy 已禁用 (ANTHROPIC_PROXY_ENABLED=0)${NC}"
     fi
 
-    # Sidecar 状态初始化
-    ASR_PORT=${WHISPER_PORT:-9876}
-    TTS_PORT_VAL=${TTS_PORT:-9879}
-    LLM_PP_PORT=${LLM_POSTPROCESS_PORT:-9878}
-    _STATE_ASR=disabled
-    _STATE_TTS=disabled
-    _STATE_LLM_PP=disabled
-    _STATE_EMBED=disabled
-
-    # Qwen3-ASR Server (语音输入 — 替代 Whisper，同端口 drop-in)
-    if [ "${ASR_ENABLED:-0}" = "1" ]; then
-        if ! check_sidecar_dep "ASR" "python3"; then
-            _STATE_ASR=failed
-        elif [ -f "scripts/qwen3-asr-server.sh" ]; then
-            start_sidecar "Qwen3-ASR" "_STATE_ASR" "$ASR_PORT" "${ASR_TIMEOUT:-30}" \
-                "WHISPER_PORT=$ASR_PORT bash scripts/qwen3-asr-server.sh"
-        elif [ -f "scripts/whisper-server.sh" ]; then
-            start_sidecar "Whisper ASR" "_STATE_ASR" "$ASR_PORT" "${ASR_TIMEOUT:-30}" \
-                "WHISPER_PORT=$ASR_PORT bash scripts/whisper-server.sh"
-        else
-            echo -e "${RED}  ✗ ASR 已启用，但脚本未找到${NC}"
-            echo "    请运行: ./scripts/setup.sh"
-            _STATE_ASR=failed
-        fi
-    fi
-
-    # TTS Server (语音合成 — Qwen3-TTS / Kokoro / edge-tts)
-    if [ "${TTS_ENABLED:-0}" = "1" ]; then
-        if ! check_sidecar_dep "TTS" "python3"; then
-            _STATE_TTS=failed
-        elif [ -f "scripts/tts-server.sh" ]; then
-            start_sidecar "TTS" "_STATE_TTS" "$TTS_PORT_VAL" "${TTS_TIMEOUT:-30}" \
-                "TTS_PORT=$TTS_PORT_VAL bash scripts/tts-server.sh"
-        else
-            echo -e "${RED}  ✗ TTS 已启用，但脚本未找到${NC}"
-            echo "    请运行: ./scripts/setup.sh"
-            _STATE_TTS=failed
-        fi
-    fi
-
-    # LLM 后修 Server (语音转写纠正 — Qwen3-4B)
-    if [ "${LLM_POSTPROCESS_ENABLED:-0}" = "1" ]; then
-        if ! check_sidecar_dep "LLM 后修" "python3"; then
-            _STATE_LLM_PP=failed
-        elif [ -f "scripts/llm-postprocess-server.sh" ]; then
-            start_sidecar "LLM 后修" "_STATE_LLM_PP" "$LLM_PP_PORT" "${LLM_TIMEOUT:-60}" \
-                "LLM_POSTPROCESS_PORT=$LLM_PP_PORT bash scripts/llm-postprocess-server.sh"
-        else
-            echo -e "${RED}  ✗ LLM 后修已启用，但脚本未找到${NC}"
-            echo "    请运行: ./scripts/setup.sh"
-            _STATE_LLM_PP=failed
-        fi
-    fi
-
-    # Embedding Server (F102 记忆系统 — Qwen3-Embedding MLX GPU)
-    if [ "${EMBED_ENABLED:-0}" = "1" ]; then
-        if ! check_sidecar_dep "Embedding" "python3"; then
-            _STATE_EMBED=failed
-        elif [ -f "scripts/embed-server.sh" ]; then
-            start_sidecar "Embedding" "_STATE_EMBED" "${EMBED_PORT:-9880}" "${EMBED_TIMEOUT:-30}" \
-                "EMBED_PORT=${EMBED_PORT:-9880} bash scripts/embed-server.sh"
-        else
-            echo -e "${RED}  ✗ Embedding 已启用，但脚本未找到${NC}"
-            echo "    请运行: ./scripts/setup.sh"
-            _STATE_EMBED=failed
-        fi
-    fi
+    # Sidecar services (ASR / TTS / LLM postprocess / Embedding / Audio
+    # capture) are no longer direct-spawned here. The API startup reconciler
+    # reads .cat-cafe/services.json and brings up the services the user
+    # enabled in Console; legacy *_ENABLED .env flags have already been
+    # transferred to CAT_CAFE_SERVICE_*_ENABLED upstream of this point.
 
     API_LAUNCH_CMD="$(api_launch_command)"
     if [ "${CAT_CAFE_DIRECT_NO_WATCH:-0}" = "1" ]; then
@@ -1307,7 +1341,7 @@ main() {
     echo "  启动 API Server (端口 $API_PORT)..."
     background_eval_with_null_stdin "$API_LAUNCH_CMD"
     API_PID=$!
-    wait_for_port_or_exit "$API_PORT" "API Server" "$API_PID" 20 || exit 1
+    wait_for_port_or_exit "$API_PORT" "API Server" "$API_PID" "${API_WAIT_TIMEOUT:-60}" || exit 1
 
     # Frontend
     if [ "$PROD_WEB" = true ]; then
@@ -1354,7 +1388,6 @@ main() {
     echo "  - Frontend: http://localhost:$WEB_PORT"
     echo "  - API:      http://localhost:$API_PORT"
     [ "${ANTHROPIC_PROXY_ENABLED:-0}" = "1" ] && echo "  - Proxy:    http://localhost:$PROXY_PORT"
-    print_sidecar_summary_all
     echo -e "  - 前端模式: $PWA_INFO"
     echo -e "  - 存储:     $STORAGE_INFO"
     echo ""

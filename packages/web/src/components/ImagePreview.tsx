@@ -38,13 +38,13 @@ export function ImagePreview({ files, onRemove }: ImagePreviewProps) {
             />
             <button
               onClick={() => onRemove(i)}
-              className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+              className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-conn-red-text text-[var(--cafe-surface)] text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
               title={`移除 ${file.name}`}
               aria-label={`Remove ${file.name}`}
             >
               x
             </button>
-            <span className="block text-[9px] text-cafe-muted truncate w-16 mt-0.5 text-center">{file.name}</span>
+            <span className="block text-micro text-cafe-muted truncate w-16 mt-0.5 text-center">{file.name}</span>
           </div>
         ))}
       </div>

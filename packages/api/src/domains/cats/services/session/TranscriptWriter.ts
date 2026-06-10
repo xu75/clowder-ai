@@ -14,6 +14,11 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import {
+  type CollaborationContinuityCapsuleV1,
+  extractContinuityCapsuleFromSystemInfo,
+} from '../agents/invocation/CollaborationContinuityCapsule.js';
+import { stripLeakedToolCallPayload } from '../agents/routing/route-helpers.js';
 
 export interface TranscriptSessionInfo {
   sessionId: string;
@@ -37,6 +42,7 @@ export interface ExtractiveDigestV1 {
   catId: string;
   seq: number;
   time: { createdAt: number; sealedAt: number };
+  sealReason?: string;
   invocations: Array<{
     invocationId?: string;
     toolNames?: string[];
@@ -50,6 +56,47 @@ export interface ExtractiveDigestV1 {
     invocationId?: string;
     message: string;
   }>;
+  diagnostics?: {
+    noise?: DigestNoiseSummary[];
+  };
+  /** Last visible assistant text messages, carried verbatim as reference data for continuity. */
+  recentMessages?: Array<{
+    role: 'assistant';
+    invocationId?: string;
+    content: string;
+  }>;
+  /** Latest structured collaboration control-flow state captured at a seal boundary. */
+  continuityCapsule?: CollaborationContinuityCapsuleV1;
+}
+
+export type DigestNoiseKind = 'context_canceled' | 'mcp_refused' | 'canceled_step';
+
+export interface DigestNoiseSummary {
+  kind: DigestNoiseKind;
+  count: number;
+  sample: string;
+  invocationIds: string[];
+  firstAt: number;
+  lastAt: number;
+  outcome: 'recovered' | 'terminal';
+}
+
+interface DigestErrorRecord {
+  order: number;
+  at: number;
+  invocationId?: string;
+  message: string;
+}
+
+interface DigestNoiseGroup {
+  kind: DigestNoiseKind;
+  count: number;
+  sample: string;
+  invocationIds: Set<string>;
+  firstAt: number;
+  lastAt: number;
+  recovered: boolean;
+  errors: DigestErrorRecord[];
 }
 
 export interface TranscriptWriterOptions {
@@ -104,7 +151,10 @@ export class TranscriptWriter {
    * Flush buffered events to disk + generate index + extractive digest.
    * Clears the buffer after successful write.
    */
-  async flush(session: TranscriptSessionInfo, sealTimestamps?: { createdAt: number; sealedAt: number }): Promise<void> {
+  async flush(
+    session: TranscriptSessionInfo,
+    sealTimestamps?: { createdAt: number; sealedAt: number; sealReason?: string },
+  ): Promise<void> {
     const buf = this.buffers.get(session.sessionId);
     if (!buf || buf.length === 0) {
       return;
@@ -167,14 +217,18 @@ export class TranscriptWriter {
    */
   generateExtractiveDigest(
     session: TranscriptSessionInfo,
-    sealTimestamps: { createdAt: number; sealedAt: number },
+    sealTimestamps: { createdAt: number; sealedAt: number; sealReason?: string },
   ): ExtractiveDigestV1 {
     const buf = this.buffers.get(session.sessionId) ?? [];
 
     // Extract tool names (deduplicated per invocation group)
     const toolNames = new Set<string>();
     const filePaths = new Map<string, Set<string>>(); // path → ops
-    const errors: ExtractiveDigestV1['errors'] = [];
+    const errors: DigestErrorRecord[] = [];
+    const noiseGroups: DigestNoiseGroup[] = [];
+    const recentMessages: NonNullable<ExtractiveDigestV1['recentMessages']> = [];
+    const recentMessageByStream = new Map<string, NonNullable<ExtractiveDigestV1['recentMessages']>[number]>();
+    let continuityCapsule: CollaborationContinuityCapsuleV1 | undefined;
 
     for (const entry of buf) {
       const evt = entry.event;
@@ -206,20 +260,66 @@ export class TranscriptWriter {
       if (evtType === 'tool_result' && evt.is_error) {
         const evtContent = evt.content;
         const message = typeof evtContent === 'string' ? evtContent : JSON.stringify(evtContent);
-        errors.push({
+        recordDigestErrorOrNoise(noiseGroups, errors, {
+          order: entry.eventNo,
           at: entry.timestamp,
           ...(entry.invocationId !== undefined ? { invocationId: entry.invocationId } : {}),
           message: message.slice(0, 500),
         });
       }
       if (evtType === 'error' && typeof evt.error === 'string') {
-        errors.push({
+        recordDigestErrorOrNoise(noiseGroups, errors, {
+          order: entry.eventNo,
           at: entry.timestamp,
           ...(entry.invocationId !== undefined ? { invocationId: entry.invocationId } : {}),
           message: (evt.error as string).slice(0, 500),
         });
       }
+      if (evtType === 'system_info' && typeof evt.content === 'string') {
+        continuityCapsule = extractContinuityCapsuleFromSystemInfo(evt.content) ?? continuityCapsule;
+      }
+
+      const streamKey =
+        evtType === 'text' && entry.invocationId !== undefined
+          ? `${entry.invocationId}:${typeof evt.catId === 'string' ? evt.catId : session.catId}`
+          : null;
+      const visibleText = extractVisibleAssistantText(evt, { trim: streamKey === null });
+      if (visibleText) {
+        markDigestNoiseRecovered(noiseGroups, entry.timestamp, entry.invocationId);
+        if (streamKey) {
+          const existing = recentMessageByStream.get(streamKey);
+          if (existing && recentMessages[recentMessages.length - 1] === existing) {
+            const content = normalizeVisibleText(coalesceVisibleText(existing.content, visibleText, evt.textMode), {
+              trim: false,
+            });
+            if (content) {
+              existing.content = content.slice(0, 1200);
+              moveToEnd(recentMessages, existing);
+            } else {
+              removeItem(recentMessages, existing);
+              recentMessageByStream.delete(streamKey);
+            }
+          } else {
+            const message = {
+              role: 'assistant' as const,
+              ...(entry.invocationId !== undefined ? { invocationId: entry.invocationId } : {}),
+              content: visibleText.slice(0, 1200),
+            };
+            recentMessages.push(message);
+            recentMessageByStream.set(streamKey, message);
+          }
+        } else {
+          recentMessages.push({
+            role: 'assistant',
+            ...(entry.invocationId !== undefined ? { invocationId: entry.invocationId } : {}),
+            content: visibleText.slice(0, 1200),
+          });
+        }
+      }
     }
+
+    const noiseSummaries = finalizeDigestNoise(noiseGroups, errors);
+    const digestErrors: ExtractiveDigestV1['errors'] = errors.map(({ order: _order, ...error }) => error);
 
     return {
       v: 1,
@@ -227,7 +327,8 @@ export class TranscriptWriter {
       threadId: session.threadId,
       catId: session.catId,
       seq: session.seq,
-      time: sealTimestamps,
+      time: { createdAt: sealTimestamps.createdAt, sealedAt: sealTimestamps.sealedAt },
+      ...(sealTimestamps.sealReason ? { sealReason: sealTimestamps.sealReason } : {}),
       invocations: [
         {
           toolNames: [...toolNames],
@@ -237,7 +338,10 @@ export class TranscriptWriter {
         path,
         ops: [...ops],
       })),
-      errors,
+      errors: digestErrors,
+      ...(noiseSummaries.length > 0 ? { diagnostics: { noise: noiseSummaries } } : {}),
+      recentMessages: recentMessages.slice(-5),
+      ...(continuityCapsule ? { continuityCapsule } : {}),
     };
   }
 
@@ -275,4 +379,147 @@ export class TranscriptWriter {
   private sessionDir(session: TranscriptSessionInfo): string {
     return join(this.dataDir, 'threads', session.threadId, session.catId, 'sessions', session.sessionId);
   }
+}
+
+function extractVisibleAssistantText(evt: Record<string, unknown>, opts?: { trim?: boolean }): string | null {
+  if (evt.type === 'text' && typeof evt.content === 'string') {
+    return normalizeVisibleText(evt.content, opts);
+  }
+
+  if (evt.type === 'assistant') {
+    const content = evt.content;
+    if (typeof content === 'string') {
+      return normalizeVisibleText(content, opts);
+    }
+    if (Array.isArray(content)) {
+      const text = content
+        .map((part) => {
+          if (!part || typeof part !== 'object') return '';
+          const maybeText = (part as { text?: unknown }).text;
+          return typeof maybeText === 'string' ? maybeText : '';
+        })
+        .filter(Boolean)
+        .join('\n');
+      return normalizeVisibleText(text, opts);
+    }
+  }
+
+  return null;
+}
+
+function normalizeVisibleText(text: string, opts?: { trim?: boolean }): string | null {
+  const sanitized = stripLeakedToolCallPayload(text.replace(/[\x00-\x08\x0b-\x1f]/g, ''));
+  if (sanitized.trim().length === 0) return null;
+  return opts?.trim === false ? sanitized : sanitized.trim();
+}
+
+function coalesceVisibleText(existing: string, next: string, textMode: unknown): string {
+  if (textMode === 'replace') {
+    return next;
+  }
+  return `${existing}${next}`;
+}
+
+function moveToEnd<T>(items: T[], item: T): void {
+  const index = items.indexOf(item);
+  if (index >= 0 && index !== items.length - 1) {
+    items.splice(index, 1);
+    items.push(item);
+  }
+}
+
+function removeItem<T>(items: T[], item: T): void {
+  const index = items.indexOf(item);
+  if (index >= 0) {
+    items.splice(index, 1);
+  }
+}
+
+function recordDigestErrorOrNoise(
+  noiseGroups: DigestNoiseGroup[],
+  errors: DigestErrorRecord[],
+  error: DigestErrorRecord,
+): void {
+  const kind = classifyDigestNoise(error.message);
+  if (!kind) {
+    errors.push(error);
+    return;
+  }
+
+  const latest = noiseGroups.at(-1);
+  const group =
+    latest && latest.kind === kind && !latest.recovered && noiseGroupMatchesInvocation(latest, error.invocationId)
+      ? latest
+      : {
+          kind,
+          count: 0,
+          sample: error.message,
+          invocationIds: new Set<string>(),
+          firstAt: error.at,
+          lastAt: error.at,
+          recovered: false,
+          errors: [],
+        };
+
+  if (group.count === 0) {
+    noiseGroups.push(group);
+  }
+
+  group.count += 1;
+  group.lastAt = error.at;
+  group.errors.push(error);
+  if (error.invocationId) group.invocationIds.add(error.invocationId);
+}
+
+function classifyDigestNoise(message: string): DigestNoiseKind | null {
+  if (/context cancell?ed/i.test(message)) return 'context_canceled';
+  if (/\bmcp\b/i.test(message) && /refus|status:\s*refused/i.test(message)) return 'mcp_refused';
+  if (/cancell?ed step|step .* cancell?ed|user_cancel/i.test(message)) return 'canceled_step';
+  return null;
+}
+
+function noiseGroupMatchesInvocation(group: DigestNoiseGroup, invocationId?: string): boolean {
+  if (!invocationId) return group.invocationIds.size === 0;
+  return group.invocationIds.size === 1 && group.invocationIds.has(invocationId);
+}
+
+function noiseGroupCanRecoverFromInvocation(group: DigestNoiseGroup, invocationId?: string): boolean {
+  if (group.invocationIds.size === 0) return true;
+  return invocationId !== undefined && group.invocationIds.has(invocationId);
+}
+
+function markDigestNoiseRecovered(noiseGroups: DigestNoiseGroup[], recoveredAt: number, invocationId?: string): void {
+  for (const group of noiseGroups) {
+    if (!group.recovered && group.lastAt <= recoveredAt && noiseGroupCanRecoverFromInvocation(group, invocationId)) {
+      group.recovered = true;
+    }
+  }
+}
+
+function finalizeDigestNoise(noiseGroups: DigestNoiseGroup[], errors: DigestErrorRecord[]): DigestNoiseSummary[] {
+  const summaries: DigestNoiseSummary[] = [];
+  for (const group of noiseGroups) {
+    if (group.count < 2) {
+      errors.push(...group.errors);
+      continue;
+    }
+
+    const outcome = group.recovered ? 'recovered' : 'terminal';
+    summaries.push({
+      kind: group.kind,
+      count: group.count,
+      sample: group.sample,
+      invocationIds: [...group.invocationIds],
+      firstAt: group.firstAt,
+      lastAt: group.lastAt,
+      outcome,
+    });
+
+    if (outcome === 'terminal') {
+      const representative = group.errors[0];
+      if (representative) errors.push(representative);
+    }
+  }
+  errors.sort((left, right) => left.order - right.order);
+  return summaries;
 }

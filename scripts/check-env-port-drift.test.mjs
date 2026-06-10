@@ -13,8 +13,10 @@
  *   (API = Frontend + 1 in both environments)
  */
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 const ROOT = resolve(process.cwd());
@@ -142,6 +144,85 @@ function parseYamlTopLevelList(content, sectionName) {
 
 function readYamlTopLevelList(relPath, sectionName) {
   return parseYamlTopLevelList(readFileSync(resolve(ROOT, relPath), 'utf-8'), sectionName);
+}
+
+function readJsonFile(relPath) {
+  return JSON.parse(readFileSync(resolve(ROOT, relPath), 'utf-8'));
+}
+
+function loadWorkspacePackageRootsByName() {
+  const packagesDir = resolve(ROOT, 'packages');
+  const rootsByName = new Map();
+
+  for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const packageRoot = `packages/${entry.name}`;
+    const packageJsonPath = resolve(ROOT, packageRoot, 'package.json');
+    if (!existsSync(packageJsonPath)) continue;
+
+    const packageJson = readJsonFile(`${packageRoot}/package.json`);
+    if (typeof packageJson.name === 'string') {
+      rootsByName.set(packageJson.name, packageRoot);
+    }
+  }
+
+  return rootsByName;
+}
+
+function parseYamlTransformTargets(content) {
+  const lines = content.split('\n');
+  const targets = [];
+  let inSection = false;
+
+  for (const line of lines) {
+    const topLevelKey = readYamlTopLevelKey(line);
+    if (topLevelKey === 'transforms') {
+      inSection = true;
+      continue;
+    }
+    if (topLevelKey && inSection) {
+      break;
+    }
+
+    if (!inSection) continue;
+
+    const target = line.match(/^ {2}- target:\s*(.+)$/)?.[1];
+    if (target) {
+      targets.push(normalizeYamlListItem(target));
+    }
+  }
+
+  return targets;
+}
+
+function readYamlTransformTargets(relPath) {
+  return parseYamlTransformTargets(readFileSync(resolve(ROOT, relPath), 'utf-8'));
+}
+
+function sanitizeFixture(relPath, content) {
+  const tempRoot = mkdtempSync(resolve(tmpdir(), 'cat-cafe-sanitize-'));
+  const fixturePath = resolve(tempRoot, relPath);
+  mkdirSync(dirname(fixturePath), { recursive: true });
+  writeFileSync(fixturePath, content);
+
+  try {
+    execFileSync('perl', ['-pi', resolve(ROOT, 'scripts/_sanitize-rules.pl'), fixturePath], {
+      cwd: ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return readFileSync(fixturePath, 'utf-8');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+function assertPortableClaudeHookTemplate(template) {
+  assert.doesNotMatch(template, /(?:\/(?:Users|home)\/[^"'\s]+|[A-Za-z]:(?:\/|\\\\+)Users(?:\/|\\\\+)[^"'\s]+)/);
+}
+
+function readClaudeHookTemplateCommands(template) {
+  const parsed = JSON.parse(template);
+  return [parsed.hooks.SessionStart[0].hooks[0].command, parsed.hooks.Stop[0].hooks[0].command];
 }
 
 function readSyncScript() {
@@ -326,6 +407,24 @@ describe(`Code-side port defaults are internally consistent (${repoLabel}: API=$
     );
   });
 
+  it(`platform-status.mjs API status fallback is ${expectedApiPort}`, () => {
+    const fallback = readTsFallback('scripts/lib/platform-status.mjs', /DEFAULT_API_PORT = '(\d+)'/);
+    assert.equal(
+      fallback,
+      expectedApiPort,
+      `platform-status API status fallback should be ${expectedApiPort}, got ${fallback}`,
+    );
+  });
+
+  it(`platform-status.mjs Frontend status fallback is ${expectedFrontendPort}`, () => {
+    const fallback = readTsFallback('scripts/lib/platform-status.mjs', /DEFAULT_WEB_PORT = '(\d+)'/);
+    assert.equal(
+      fallback,
+      expectedFrontendPort,
+      `platform-status Frontend status fallback should be ${expectedFrontendPort}, got ${fallback}`,
+    );
+  });
+
   it(`AgentRouter.ts API port fallback is ${expectedApiPort}`, () => {
     const fallback = readTsFallback(
       'packages/api/src/domains/cats/services/agents/routing/AgentRouter.ts',
@@ -434,35 +533,80 @@ describe(
     it('_sanitize-rules.pl transforms 3002→3004 (API)', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/_sanitize-rules.pl'), 'utf-8');
       assert.ok(
-        content.includes('s#localhost:3002#localhost:3004#g'),
-        'sanitize rules should transform localhost:3002 → localhost:3004',
+        content.includes('s#localhost:3004#localhost:3004#g'),
+        'sanitize rules should transform localhost:3004 → localhost:3004',
+      );
+      assert.ok(
+        content.includes('s#\\[::1\\]:3002#[::1]:3004#g'),
+        'sanitize rules should transform IPv6 loopback [::1]:3004 → [::1]:3004',
       );
     });
 
     it('_sanitize-rules.pl transforms 3001→3003 (Frontend)', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/_sanitize-rules.pl'), 'utf-8');
       assert.ok(
-        content.includes('s#localhost:3001#localhost:3003#g'),
-        'sanitize rules should transform localhost:3001 → localhost:3003',
+        content.includes('s#localhost:3003#localhost:3003#g'),
+        'sanitize rules should transform localhost:3003 → localhost:3003',
+      );
+    });
+
+    it('_sanitize-rules.pl keeps api-client port+1 tests internally consistent', () => {
+      const content = readFileSync(resolve(ROOT, 'scripts/_sanitize-rules.pl'), 'utf-8');
+      assert.ok(
+        content.includes("s#port: '3001'#port: '3003'#g"),
+        'api-client-resolve test input ports should transform alongside expected port+1 assertions',
+      );
+    });
+
+    it('governance tests use sanitized frontend/API fallback ports after sync', () => {
+      const packTest = sanitizeFixture(
+        'packages/api/test/governance/governance-pack.test.js',
+        readFileSync(resolve(ROOT, 'packages/api/test/governance/governance-pack.test.js'), 'utf-8'),
+      );
+      const bootstrapTest = sanitizeFixture(
+        'packages/api/test/governance/governance-bootstrap.test.js',
+        readFileSync(resolve(ROOT, 'packages/api/test/governance/governance-bootstrap.test.js'), 'utf-8'),
+      );
+
+      for (const content of [packTest, bootstrapTest]) {
+        assert.doesNotMatch(content, /frontend 3001 and API 3002/);
+        assert.match(content, /FRONTEND_PORT \?\? '3003'/);
+        assert.match(content, /API_SERVER_PORT \?\? '3004'/);
+      }
+    });
+
+    it('sync-to-opensource.sh runs sanitizer over CommonJS test files', () => {
+      const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
+      assert.ok(
+        content.includes('-name "*.cjs"'),
+        'sync sanitizer should include .cjs files such as packages/web/test/next-config.test.cjs',
+      );
+    });
+
+    it('sync-to-opensource.sh runs sanitizer over ES module utility files', () => {
+      const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
+      assert.ok(
+        content.includes('-name "*.mjs"'),
+        'sync sanitizer should include .mjs files such as scripts/lib/platform-status.mjs',
       );
     });
 
     it('sync-to-opensource.sh transforms start-dev.sh API fallback to 3004', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
-      const expected = "'s/API_PORT=$" + '{API_SERVER_PORT:-3002}/API_PORT=$' + "{API_SERVER_PORT:-3004}/g'";
+      const expected = "'s/API_PORT=$" + '{API_SERVER_PORT:-3004}/API_PORT=$' + "{API_SERVER_PORT:-3004}/g'";
       assert.ok(content.includes(expected), 'sync script should transform start-dev.sh API fallback 3002→3004');
     });
 
     it('sync-to-opensource.sh transforms start-dev.sh Frontend fallback to 3003', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
-      const expected = "'s/WEB_PORT=$" + '{FRONTEND_PORT:-3001}/WEB_PORT=$' + "{FRONTEND_PORT:-3003}/g'";
+      const expected = "'s/WEB_PORT=$" + '{FRONTEND_PORT:-3003}/WEB_PORT=$' + "{FRONTEND_PORT:-3003}/g'";
       assert.ok(content.includes(expected), 'sync script should transform start-dev.sh Frontend fallback 3001→3003');
     });
 
     it('sync-to-opensource.sh transforms setup.sh API port to 3004', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
       assert.ok(
-        content.includes("'s/API_SERVER_PORT=3002/API_SERVER_PORT=3004/g'"),
+        content.includes("'s/API_SERVER_PORT=3004/API_SERVER_PORT=3004/g'"),
         'sync script should transform setup.sh API_SERVER_PORT 3002→3004',
       );
     });
@@ -470,7 +614,7 @@ describe(
     it('sync-to-opensource.sh transforms setup.sh Frontend port to 3003', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
       assert.ok(
-        content.includes("'s/FRONTEND_PORT=3001/FRONTEND_PORT=3003/g'"),
+        content.includes("'s/FRONTEND_PORT=3003/FRONTEND_PORT=3003/g'"),
         'sync script should transform setup.sh FRONTEND_PORT 3001→3003',
       );
     });
@@ -478,15 +622,15 @@ describe(
     it('sync-to-opensource.sh transforms runtime-worktree.sh API port to 3004', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
       assert.ok(
-        content.includes("'s/API_SERVER_PORT:-3002/API_SERVER_PORT:-3004/g'"),
-        'sync script should transform runtime-worktree.sh API port 3002→3004',
+        content.includes("'s/API_SERVER_PORT:-3004/API_SERVER_PORT:-3004/g'"),
+        'sync script should transform runtime-worktree.sh API port 3004→3004',
       );
     });
 
     it('sync-to-opensource.sh transforms install.ps1 to public defaults', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
-      assert.ok(content.includes("'s/FRONTEND_PORT=3001/FRONTEND_PORT=3003/g'"));
-      assert.ok(content.includes("'s/API_SERVER_PORT=3002/API_SERVER_PORT=3004/g'"));
+      assert.ok(content.includes("'s/FRONTEND_PORT=3003/FRONTEND_PORT=3003/g'"));
+      assert.ok(content.includes("'s/API_SERVER_PORT=3004/API_SERVER_PORT=3004/g'"));
       assert.ok(content.includes('$frontendPort = "3003"'));
     });
 
@@ -556,11 +700,434 @@ excluded:
       }
     });
 
+    it('sync-manifest exports root package check script targets', () => {
+      const managedRoots = readYamlTopLevelList('sync-manifest.yaml', 'managed_roots');
+      const managedScripts = readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts');
+      const requiredScripts = [
+        'scripts/check-followup-tails.mjs',
+        'scripts/derive-worktree-ports.mjs',
+        'scripts/derive-worktree-ports.test.mjs',
+        'scripts/check-worktree-port-offset.mjs',
+        'scripts/sop-definitions.mjs',
+        'scripts/sop-definitions.test.mjs',
+        'scripts/lib/sop-definition-codegen.mjs',
+      ];
+
+      assert.ok(
+        managedRoots.includes('sop-definitions'),
+        'sync-manifest should export sop-definitions because root package.json check:sop-definitions reads it',
+      );
+
+      for (const scriptPath of requiredScripts) {
+        assert.ok(
+          managedScripts.includes(scriptPath),
+          `sync-manifest should export ${scriptPath} because root package.json references it`,
+        );
+      }
+    });
+
+    it('sync-manifest exports workspace dependency closure for managed package roots', () => {
+      const managedRoots = new Set(readYamlTopLevelList('sync-manifest.yaml', 'managed_roots'));
+      const workspaceRootsByName = loadWorkspacePackageRootsByName();
+
+      for (const root of managedRoots) {
+        if (!root.startsWith('packages/')) continue;
+
+        const packageJsonPath = `${root}/package.json`;
+        if (!existsSync(resolve(ROOT, packageJsonPath))) continue;
+
+        const packageJson = readJsonFile(packageJsonPath);
+        const dependencyGroups = [
+          packageJson.dependencies ?? {},
+          packageJson.devDependencies ?? {},
+          packageJson.peerDependencies ?? {},
+          packageJson.optionalDependencies ?? {},
+        ];
+
+        for (const dependencies of dependencyGroups) {
+          for (const [dependencyName, dependencySpec] of Object.entries(dependencies)) {
+            if (typeof dependencySpec !== 'string' || !dependencySpec.startsWith('workspace:')) continue;
+
+            const dependencyRoot = workspaceRootsByName.get(dependencyName);
+            assert.ok(
+              dependencyRoot,
+              `${root} depends on workspace package ${dependencyName}, but packages/* does not contain it`,
+            );
+            assert.ok(
+              managedRoots.has(dependencyRoot),
+              `sync-manifest should export ${dependencyRoot} because managed root ${root} depends on ${dependencyName}`,
+            );
+          }
+        }
+      }
+    });
+
+    it('sync-manifest exports public root package helper script targets', () => {
+      const managedScripts = readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts');
+      const requiredScripts = [
+        'scripts/cleanup-stale-dev-processes.mjs',
+        'scripts/video-forge/new-project.mjs',
+        'scripts/check-skill-first-party-surfaces.test.mjs',
+        'scripts/check-skill-first-party-surfaces.mjs',
+        'scripts/check-skill-first-party-surfaces.allowlist.json',
+      ];
+
+      for (const scriptPath of requiredScripts) {
+        assert.ok(
+          managedScripts.includes(scriptPath),
+          `sync-manifest should export ${scriptPath} because public package.json exposes it`,
+        );
+      }
+    });
+
+    it('sync-manifest exports release-desktop reusable workflow closure', () => {
+      const managedFiles = readYamlTopLevelList('sync-manifest.yaml', 'managed_files');
+      const releaseDesktop = readFileSync(resolve(ROOT, '.github/workflows/release-desktop.yml'), 'utf-8');
+      const workflowRefs = Array.from(
+        releaseDesktop.matchAll(/uses:\s+\.\/(\.github\/workflows\/[A-Za-z0-9_.-]+\.yml)/g),
+        (match) => match[1],
+      );
+
+      assert.notEqual(
+        workflowRefs.length,
+        0,
+        'release-desktop.yml should reference reusable workflows so this guard verifies a real closure',
+      );
+
+      for (const workflowPath of workflowRefs) {
+        assert.ok(
+          managedFiles.includes(workflowPath),
+          `sync-manifest should export ${workflowPath} because release-desktop.yml uses it`,
+        );
+      }
+    });
+
+    it('sync-manifest exports start-dev sourced shell closure', () => {
+      const managedScripts = readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts');
+      const requiredScripts = [
+        'scripts/start-dev.sh',
+        'scripts/download-source-overrides.sh',
+        'scripts/lib/node-runtime-guard.sh',
+        'scripts/lib/redis-rdb-first.sh',
+      ];
+
+      for (const scriptPath of requiredScripts) {
+        assert.ok(
+          managedScripts.includes(scriptPath),
+          `sync-manifest should export ${scriptPath} because public start-dev.sh sources it at runtime`,
+        );
+      }
+    });
+
+    it('sync-manifest does not protect managed service wrappers as target-owned', () => {
+      const managedScripts = readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts');
+      const targetOwnedFiles = readYamlTopLevelList('sync-manifest.yaml', 'target_owned_files');
+      const managedServiceWrappers = managedScripts.filter((entry) => entry.startsWith('scripts/services/'));
+
+      for (const entry of targetOwnedFiles) {
+        const overlappingManaged = managedServiceWrappers.find(
+          (managed) => managed === entry || managed.startsWith(entry),
+        );
+        assert.equal(
+          overlappingManaged,
+          undefined,
+          `target_owned_files should not restore over managed public service wrapper ${overlappingManaged ?? entry}`,
+        );
+      }
+    });
+
+    it('sync-to-opensource.sh drops home-only root package scripts whose targets are not exported', () => {
+      const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
+
+      assert.ok(
+        content.includes('pkg.scripts.check === "node scripts/run-checks.mjs"'),
+        'public package.json should rewrite source-only run-checks wrapper into an explicit public check chain',
+      );
+      assert.ok(
+        content.includes('pkg.scripts["check:pre-merge-gate"] ='),
+        'public package.json should strip source-only run-checks.test.mjs from check:pre-merge-gate',
+      );
+      assert.ok(
+        content.includes('"pnpm check:skills:surfaces"'),
+        'public package.json should run the exported skill surface guard in pnpm check',
+      );
+      assert.ok(
+        content.includes('delete pkg.scripts["check:architecture-ownership"]'),
+        'public package.json should not expose check:architecture-ownership without exporting its script target',
+      );
+      assert.ok(
+        content.includes('delete pkg.scripts["test:architecture-ownership"]'),
+        'public package.json should not expose test:architecture-ownership without exporting its script target',
+      );
+      assert.ok(
+        content.includes('"check:f223-action-tracking"'),
+        'public package.json should drop source-only F223 action tracking because its inventory truth source is not exported',
+      );
+    });
+
+    it('sync-manifest exports F180 user-level hook truth source', () => {
+      const managedScripts = readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts');
+      const requiredHookScripts = [
+        '.claude/hooks/user-level/session-start-recall.sh',
+        '.claude/hooks/user-level/session-stop-check.sh',
+      ];
+
+      for (const scriptPath of requiredHookScripts) {
+        assert.ok(
+          managedScripts.includes(scriptPath),
+          `sync-manifest should export ${scriptPath} so open-source users have hook templates`,
+        );
+      }
+    });
+
+    it('sync-manifest exports F203 native L0 runtime closure', () => {
+      const managedFiles = readYamlTopLevelList('sync-manifest.yaml', 'managed_files');
+      const managedScripts = readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts');
+
+      assert.ok(
+        managedFiles.includes('assets/system-prompts/system-prompt-l0.md'),
+        'sync-manifest should export the F203 L0 template required by native prompt compilation',
+      );
+      assert.ok(
+        managedScripts.includes('scripts/compile-system-prompt-l0.mjs'),
+        'sync-manifest should export the F203 L0 compiler required by carrier invocation',
+      );
+    });
+
+    it('sync-manifest exports public harness eval fixtures used by test:public', () => {
+      const managedFiles = readYamlTopLevelList('sync-manifest.yaml', 'managed_files');
+      const managedRoots = readYamlTopLevelList('sync-manifest.yaml', 'managed_roots');
+
+      // eval-domains/ is exported as a managed_root (whole directory), so the individual
+      // domain registries (eval-a2a/eval-memory/eval-sop) + community-fixtures sync
+      // automatically — they need NOT be listed in managed_files. This guard moved from
+      // per-file enumeration to root-coverage after the recurring "F192 added a new domain
+      // but forgot to update managed_files" sync-config debt (PR #1929).
+      assert.ok(
+        managedRoots.includes('docs/harness-feedback/eval-domains'),
+        'eval-domains/ must be a managed_root so all domain registries + community-fixtures sync to the public repo',
+      );
+
+      // verdicts/ + bundles/ + F210 assets stay curated in managed_files (verdicts/bundles
+      // may contain internal-only entries, so they are NOT blanket-exported as a root).
+      const fixturePaths = [
+        'docs/harness-feedback/verdicts/fixtures/2026-05-21-eval-a2a-contract-demo.md',
+        'docs/harness-feedback/verdicts/2026-05-23-eval-a2a-live-verdict.md',
+        'docs/harness-feedback/bundles/2026-05-23-eval-a2a-live-verdict/attribution.json',
+        'docs/harness-feedback/bundles/2026-05-23-eval-a2a-live-verdict/provenance.json',
+        'docs/harness-feedback/bundles/2026-05-23-eval-a2a-live-verdict/snapshot.json',
+        'docs/features/assets/F210/agy-conversation-resume.txt',
+        'docs/features/assets/F210/agy-print-timeout.txt',
+        'docs/features/assets/F210/agy-real-home-no-default-model.txt',
+        'docs/features/assets/F210/agy-real-home-print-success.txt',
+      ];
+
+      for (const fixturePath of fixturePaths) {
+        assert.ok(
+          managedFiles.includes(fixturePath),
+          `sync-manifest should export ${fixturePath} because packages/api test:public loads it`,
+        );
+      }
+    });
+
+    it('sync-manifest marks the F203 native L0 template as a sanitized transform', () => {
+      const transformTargets = readYamlTransformTargets('sync-manifest.yaml');
+
+      assert.ok(
+        transformTargets.includes('assets/system-prompts/system-prompt-l0.md'),
+        'system-prompt-l0.md carries governance rules and must be explicitly tracked as a sanitize transform',
+      );
+    });
+
+    it('public F203 native L0 template sanitization removes home-only runtime rules', () => {
+      const sourceL0 = readFileSync(resolve(ROOT, 'assets/system-prompts/system-prompt-l0.md'), 'utf-8');
+      const sanitized = sanitizeFixture('assets/system-prompts/system-prompt-l0.md', sourceL0);
+
+      assert.doesNotMatch(sanitized, /Redis production Redis \(sacred\)/);
+      assert.doesNotMatch(sanitized, /Redis production Redis (sacred)/);
+      assert.doesNotMatch(sanitized, /\b6398\b|\b6399\b/);
+      assert.match(sanitized, /\*\*Runtime data safety\*\*/);
+      assert.doesNotMatch(sanitized, /Cat Café 的护城河是情感壁垒不是技术壁垒/);
+    });
+
+    it('sync-to-opensource.sh hard-fails if public L0 still contains internal patterns', () => {
+      const content = readSyncScript();
+
+      assert.match(
+        content,
+        /l0_internal_found=\$\(printf '%s\\n' "\$found" \| grep -F 'assets\/system-prompts\/system-prompt-l0\.md'/,
+        'internal-pattern scan should isolate system-prompt-l0.md findings',
+      );
+      assert.match(
+        content,
+        /l0_internal_found[\s\S]*?SCAN_FAILED=true/,
+        'system-prompt-l0.md internal-pattern findings should fail the sync gate, not warn only',
+      );
+    });
+
+    it('sync-manifest exports a portable F180 Claude settings hook template', () => {
+      const managedFiles = readYamlTopLevelList('sync-manifest.yaml', 'managed_files');
+      const templatePath = '.claude/hooks/user-level/claude-settings.template.json';
+
+      assert.ok(
+        managedFiles.includes(templatePath),
+        `sync-manifest should export ${templatePath} as the Claude settings hook template`,
+      );
+
+      const template = readFileSync(resolve(ROOT, templatePath), 'utf-8');
+      assertPortableClaudeHookTemplate(template);
+      assert.doesNotThrow(() => JSON.parse(template));
+
+      const commands = readClaudeHookTemplateCommands(template);
+      assert.deepEqual(commands, [
+        'bash "$HOME/.claude/hooks/session-start-recall.sh"',
+        'bash "$HOME/.claude/hooks/session-stop-check.sh"',
+      ]);
+    });
+
+    it('F180 Claude settings hook template guard rejects maintainer absolute-path variants', () => {
+      const absolutePathTemplates = [
+        '{"hooks":{"SessionStart":[{"hooks":[{"command":"/home/alice/.claude/hooks/session-start-recall.sh"}]}]}}',
+        '{"hooks":{"SessionStart":[{"hooks":[{"command":"C:/home/user/session-start-recall.sh"}]}]}}',
+        '{"hooks":{"SessionStart":[{"hooks":[{"command":"C:\\\\Users\\\\Alice\\\\.claude\\\\hooks\\\\session-start-recall.sh"}]}]}}',
+        '{"hooks":{"SessionStart":[{"hooks":[{"command":"bash \\"/home/alice/.claude/hooks/session-start-recall.sh\\""}]}]}}',
+      ];
+
+      for (const template of absolutePathTemplates) {
+        assert.throws(() => assertPortableClaudeHookTemplate(template));
+      }
+    });
+
+    it('source install/setup attempts F180 agent hook sync as a nonfatal step', () => {
+      const install = readFileSync(resolve(ROOT, 'scripts/install.sh'), 'utf-8');
+      const setup = readFileSync(resolve(ROOT, 'scripts/setup.sh'), 'utf-8');
+
+      for (const [name, content] of [
+        ['install.sh', install],
+        ['setup.sh', setup],
+      ]) {
+        assert.match(content, /sync_agent_hooks_best_effort\(\)/, `${name} should call the shared hook sync step`);
+        assert.match(
+          content,
+          /pnpm exec tsx scripts\/sync-system-prompts\.ts --apply --agent-hooks-only/,
+          `${name} should reuse sync-system-prompts hook targets without syncing non-hook prompts`,
+        );
+        assert.match(
+          content,
+          /Agent CLI hook sync failed[\s\S]*continuing/,
+          `${name} should warn and continue when hook sync fails`,
+        );
+      }
+    });
+
+    it('F210 source installer provisions Antigravity CLI through native bootstrapper', () => {
+      const install = readFileSync(resolve(ROOT, 'scripts/install.sh'), 'utf-8');
+      const installPs = readFileSync(resolve(ROOT, 'scripts/install.ps1'), 'utf-8');
+
+      assert.match(install, /install_antigravity_cli\(\)/);
+      assert.match(install, /https:\/\/antigravity\.google\/cli\/install\.sh/);
+      assert.match(install, /MISSING_AGENTS\+=\("agy"\)/);
+      assert.match(install, /agy\)\s+install_antigravity_cli/s);
+      assert.doesNotMatch(install, /install_npm_cli "Gemini CLI" "gemini" "@google\/gemini-cli"/);
+
+      assert.match(installPs, /Name = "Antigravity"; Label = "Antigravity CLI"; Cmd = "agy"/);
+      assert.match(installPs, /InstallKind = "antigravity-native"/);
+      assert.match(installPs, /https:\/\/antigravity\.google\/cli\/install\.cmd/);
+      assert.match(installPs, /Resolve-ToolCommandWithRetry -Name "agy" -Attempts 6/);
+      assert.doesNotMatch(installPs, /Name = "Gemini"; Label = "Gemini"; Cmd = "gemini"; Pkg = "@google\/gemini-cli"/);
+    });
+
+    it('sync-system-prompts agent hook mode also configures Claude settings', () => {
+      const content = readFileSync(resolve(ROOT, 'scripts/sync-system-prompts.ts'), 'utf-8');
+
+      assert.match(
+        content,
+        /syncClaudeSettings/,
+        'agent hook sync CLI should reuse the same Claude settings merge helper as the Hub sync API',
+      );
+      assert.match(
+        content,
+        /if\s*\(\s*isAgentHooksOnly\s*&&\s*!isDryRun\s*\)[\s\S]*await syncClaudeSettings\(syncTargetRoot\)/,
+        '--agent-hooks-only --apply must configure Claude settings, not only copy hook scripts and Codex hooks',
+      );
+    });
+
+    it('desktop installer bundles F180 hook truth source and offline sync helper', () => {
+      const inno = readFileSync(resolve(ROOT, 'desktop/installer/cat-cafe.iss'), 'utf-8');
+      const desktopPackage = readFileSync(resolve(ROOT, 'desktop/package.json'), 'utf-8');
+
+      assert.match(
+        inno,
+        /Source: "\.\.\\\.\.\\\.claude\\hooks\\user-level\\\*";\s+DestDir: "\{app\}\\\.claude\\hooks\\user-level"/,
+        'Windows installer should ship the user-level hook truth source',
+      );
+      assert.match(
+        inno,
+        /Source: "\.\.\\scripts\\sync-agent-hooks-offline\.mjs";\s+DestDir: "\{app\}\\scripts"/,
+        'Windows installer should ship the offline hook sync helper',
+      );
+      assert.match(
+        desktopPackage,
+        /"from": "\.\.\/\.claude\/hooks\/user-level"[\s\S]*"to": "\.claude\/hooks\/user-level"/,
+        'macOS DMG resources should ship the user-level hook truth source',
+      );
+      assert.match(
+        desktopPackage,
+        /"from": "\.\/scripts\/sync-agent-hooks-offline\.mjs"[\s\S]*"to": "scripts\/sync-agent-hooks-offline\.mjs"/,
+        'macOS DMG resources should ship the offline hook sync helper',
+      );
+    });
+
+    it('desktop installer runs F180 agent hook sync under the invoking user profile', () => {
+      const inno = readFileSync(resolve(ROOT, 'desktop/installer/cat-cafe.iss'), 'utf-8');
+      const postInstall = readFileSync(resolve(ROOT, 'desktop/scripts/post-install-offline.ps1'), 'utf-8');
+      const adminPostInstallEntry = inno.match(
+        /Filename: "powershell\.exe";\s*\\\s*Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""\{app\}\\scripts\\post-install-offline\.ps1"" -AppDir ""\{app\}""";\s*\\\s*StatusMsg: "Configuring Cat Cafe\.\.\.";\s*\\\s*Flags: runhidden waituntilterminated(?:;[^\n]*)?/,
+      )?.[0];
+
+      assert.match(
+        inno,
+        /-AgentHooksOnly[\s\S]*Flags: runhidden waituntilterminated runasoriginaluser/,
+        'Windows installer should run user-level hook sync with original user credentials, not the elevated admin profile',
+      );
+      assert.ok(adminPostInstallEntry, 'Windows installer should keep the elevated post-install entry');
+      assert.doesNotMatch(
+        adminPostInstallEntry,
+        /-AgentHooksOnly/,
+        'admin post-install step should not also run AgentHooksOnly in the elevated profile',
+      );
+      assert.match(
+        postInstall,
+        /sync-agent-hooks-offline\.mjs/,
+        'post-install should invoke the offline hook sync helper',
+      );
+      assert.match(
+        postInstall,
+        /\$targetRoot = Resolve-AgentHookTargetRoot[\s\S]*--target-root[\s\S]*\$targetRoot/,
+        'offline helper should receive the resolved user profile explicitly as --target-root',
+      );
+      assert.match(
+        postInstall,
+        /Agent CLI hook sync failed[\s\S]*Hub health check can repair it later/,
+        'post-install hook sync failure should be a nonfatal warning',
+      );
+    });
+
+    it('desktop first-run mirrors F180 hook truth source into the writable API project', () => {
+      const serviceManager = readFileSync(resolve(ROOT, 'desktop/service-manager.js'), 'utf-8');
+
+      assert.match(
+        serviceManager,
+        /const mirrors = \[[^\]]*'\.claude'[^\]]*\]/,
+        'desktop service manager should mirror .claude into the writable project root for API hook health',
+      );
+    });
+
     it('sync-to-opensource.sh transforms AgentRouter.ts API port to 3004', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
       assert.ok(
         content.includes("process.env.API_SERVER_PORT ?? '3004'"),
-        'sync script should transform AgentRouter.ts API port 3002→3004',
+        'sync script should transform AgentRouter.ts API port 3004→3004',
       );
     });
 
@@ -716,6 +1283,59 @@ excluded:
         'hotfix lane should not rely on tag-name sort alone for latest-sync selection',
       );
     });
+
+    it('sync-to-opensource.sh blocks incomplete absorbed records whose files still differ from source', () => {
+      const content = readSyncScript();
+      const guardStart = content.indexOf('validate_incomplete_absorbed_overlaps() {');
+      const guardEnd = content.indexOf('\nfind_available_port() {', guardStart);
+      assert.notEqual(guardStart, -1, 'expected to find validate_incomplete_absorbed_overlaps');
+      assert.notEqual(guardEnd, -1, 'expected to find the end of validate_incomplete_absorbed_overlaps');
+      const guard = content.slice(guardStart, guardEnd);
+      const ledgerGateIndex = content.indexOf('validate_incomplete_absorbed_overlaps "$INTAKE_LEDGER"');
+      const headMatchedIndex = content.indexOf('Intake ledger up to date (target HEAD = ledger HEAD)');
+
+      assert.notEqual(ledgerGateIndex, -1, 'pre-sync gate should call the incomplete absorbed overlap guard');
+      assert.notEqual(headMatchedIndex, -1, 'expected to find the existing target HEAD ledger fast path');
+      assert.ok(
+        ledgerGateIndex < headMatchedIndex,
+        'incomplete absorbed overlaps must be checked even when the ledger watermark equals target HEAD',
+      );
+      assert.match(
+        guard,
+        /decision === 'absorbed'[\s\S]*!entry\.intake_intent_issue[\s\S]*!entry\.review_proof/,
+        'guard should only scrutinize absorbed entries missing complete intake proof',
+      );
+      assert.match(
+        guard,
+        /lastOutboundSyncIndex/,
+        'guard should scope incomplete absorbed checks to commits after the latest outbound sync',
+      );
+      assert.match(
+        guard,
+        /index <= lastOutboundSyncIndex/,
+        'guard should not rescan pre-sync historical ledger entries on every full sync',
+      );
+      assert.match(
+        guard,
+        /historical backfill|outbound-filed hotfix|skip-absorbed-guard/,
+        'guard should skip controlled ledger exceptions that intentionally omit absorb PR proof',
+      );
+      assert.match(
+        guard,
+        /git -C "\$target_dir" show --name-only --format= "\$commit"/,
+        'guard should inspect the files touched by each incomplete absorbed target commit',
+      );
+      assert.match(
+        guard,
+        /cmp -s "\$source_file" "\$target_file"/,
+        'guard should block only when the current source payload would overwrite a different target file',
+      );
+      assert.match(
+        guard,
+        /recorded != absorbed-complete/,
+        'guard output should explain the recorded vs complete distinction',
+      );
+    });
   },
 );
 
@@ -786,6 +1406,16 @@ describe(
         gate,
         /PROJECT_ALLOWED_ROOTS_APPEND=true[\s\\]+PROJECT_ALLOWED_ROOTS="\$gate_target_real"[\s\\]+API_SERVER_PORT=\$accept_api_port MEMORY_STORE=1 NODE_ENV=test/,
         'API startup acceptance should reuse the same temp-target allow-root so projectPath-based dispatch stays representative',
+      );
+    });
+
+    it('target public gate smokes F203 native L0 compiler closure', () => {
+      const gate = readFunctionBody(readSyncScript(), 'run_target_public_gate');
+
+      assert.match(
+        gate,
+        /node scripts\/compile-system-prompt-l0\.mjs --cat codex >\/dev\/null/,
+        'target public gate should compile codex L0 so missing F203 script/template fails before real sync',
       );
     });
 
@@ -1024,17 +1654,27 @@ describe(
   'Public-facing skill docs avoid home-only API defaults',
   { skip: !isHomeRepo && 'sync infrastructure not present (open-source repo)' },
   () => {
-    it('workspace-navigator uses API_SERVER_PORT env instead of hardcoded 3002 fallbacks', () => {
+    it('workspace-navigator uses typed MCP instead of raw API port guidance', () => {
       const content = readFileSync(resolve(ROOT, 'cat-cafe-skills/workspace-navigator/SKILL.md'), 'utf-8');
       assert.doesNotMatch(
         content,
-        /API_SERVER_PORT=3002|API_SERVER_PORT:-3002/,
+        /API_SERVER_PORT=3004|API_SERVER_PORT:-3004/,
         'workspace-navigator should not hardcode the home-only API default in public-facing usage guidance',
+      );
+      assert.doesNotMatch(
+        content,
+        /API_PORT=/,
+        'workspace-navigator should not require cats to hand-manage first-party API ports',
+      );
+      assert.doesNotMatch(
+        content,
+        /curl\s+-X\s+POST[\s\S]{0,200}\/api\/workspace\/navigate/,
+        'workspace-navigator should not use raw curl as the first-party Hub action main path',
       );
       assert.match(
         content,
-        /API_PORT="\$\{API_SERVER_PORT:\?set API_SERVER_PORT before calling Navigate API\}"/,
-        'workspace-navigator should teach readers to source the API port from the runtime environment',
+        /cat_cafe_workspace_navigate\(\{/,
+        'workspace-navigator should teach the typed MCP main path',
       );
     });
   },

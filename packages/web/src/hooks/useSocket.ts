@@ -19,6 +19,7 @@ import { getUserId } from '@/utils/userId';
 import { reconnectGame } from './useGameReconnect';
 // F173 Phase E (KD-1): bg refs + background message processing moved into
 // useAgentMessages — useSocket no longer dispatches active vs background.
+import { type AgentMessageCoalescer, createAgentMessageCoalescer } from './useSocket-message-coalescer';
 import { loadJoinedRoomsFromSession, saveJoinedRoomsToSession } from './useSocket-persistence';
 import { handleVoiceChunk, handleVoiceStreamEnd, handleVoiceStreamStart } from './useVoiceStream';
 
@@ -41,6 +42,21 @@ interface AgentMessage {
   replyPreview?: { senderCatId: string | null; content: string; deleted?: true };
   /** F108: Invocation ID — distinguishes messages from concurrent invocations */
   invocationId?: string;
+  /**
+   * F183 Phase C — thread-scoped monotonic sequence number (KD-9).
+   * Set by `SocketManager.broadcastAgentMessage` from `ThreadSequencer.next()`
+   * before WebSocket emit. Forwarded to `useAgentMessages.handleAgentMessage`
+   * → `processThreadSeq` for gap detection. Optional for bw-compat with legacy
+   * direct emit paths that bypass SocketManager.
+   */
+  seq?: number;
+  /**
+   * F183 Phase C (砚砚 R1 P1 fix) — server seq epoch (sequencer instance UUID).
+   * Generated at API boot, stable for sequencer lifetime. Client compares to
+   * `lastSeqEpochByThread[threadId]`; mismatch = server restart → reset lastSeq
+   * + trigger catch-up.
+   */
+  seqEpoch?: string;
   timestamp: number;
 }
 
@@ -159,6 +175,25 @@ function hasStaleActiveThreadPresentation(state: ReturnType<typeof useChatStore.
   );
 }
 
+function finalizeStreamingBubblesAbsentFromServerSlots(threadId: string, activeCats: Set<string>): boolean {
+  const store = useChatStore.getState();
+  const isActiveThread = store.currentThreadId === threadId;
+  const messagesToCheck = isActiveThread ? store.messages : store.getThreadState(threadId).messages;
+  let finalizedAny = false;
+
+  for (const msg of messagesToCheck) {
+    if (msg.type !== 'assistant' || msg.isStreaming !== true) continue;
+    if (msg.catId && activeCats.has(msg.catId)) continue;
+    store.setThreadMessageStreaming(threadId, msg.id, false);
+    finalizedAny = true;
+  }
+
+  if (finalizedAny) {
+    store.requestStreamCatchUp(threadId);
+  }
+  return finalizedAny;
+}
+
 /**
  * Query /queue for one thread and reconcile local state against server truth.
  * Shared by reconnect reconciliation and the stale-watchdog probe.
@@ -197,6 +232,7 @@ export async function reconcileThreadWithServer(
         const syntheticId = `hydrated-${threadId}-${slot.catId}`;
         store.addThreadActiveInvocation(threadId, syntheticId, slot.catId, 'execute', slot.startedAt);
       }
+      finalizeStreamingBubblesAbsentFromServerSlots(threadId, new Set(serverActiveCats));
       console.log(`[ws] ${source} reconciliation: re-hydrated active slots from server`, {
         threadId,
         cats: serverActiveCats,
@@ -352,12 +388,33 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
   const threadIdRef = useRef(threadId);
   threadIdRef.current = threadId;
 
+  // F183 follow-up (R2/R4/R5 reconnect-window catch-up): distinguish initial
+  // connect vs reconnect. Phase C gap detection only fires on next live event;
+  // if the cat finished broadcasting during a disconnect window and no further
+  // event arrives, the gap stays undetected → user must F5/switch thread to
+  // see the missing bubble. On every RECONNECT (not initial), proactively
+  // bump per-thread catch-up version so useChatHistory's existing subscription
+  // re-fetches via the Phase C catchup machinery (debounce + retry + ack +
+  // Phase D merge filter). Initial connect skipped because useChatHistory
+  // mount already runs fetchHistory; double-firing would waste a roundtrip.
+  const hasConnectedOnceRef = useRef(false);
+
   // Use ref to avoid socket disconnect/reconnect on every callbacks change.
   // Without this, thread switches cause socketCallbacks to rebuild (useMemo dep on threadId),
   // which triggers useEffect cleanup → socket disconnect → reconnect. During this gap,
   // events from the old thread can leak into the new thread's state.
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+
+  // clowder-ai#789: coalesce synchronous agent_message bursts into one microtask flush.
+  // callbacksRef.current is always live (updated above on every render), so the closure
+  // never goes stale. One coalescer per socket mount — reset only when the component unmounts.
+  const agentMessageCoalescerRef = useRef<AgentMessageCoalescer | null>(null);
+  if (agentMessageCoalescerRef.current === null) {
+    agentMessageCoalescerRef.current = createAgentMessageCoalescer((msg) =>
+      callbacksRef.current.onMessage(msg as AgentMessage),
+    );
+  }
 
   const persistJoinedRooms = useCallback(() => {
     saveJoinedRoomsToSession(userIdRef.current, joinedRoomsRef.current);
@@ -465,6 +522,38 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
       // Socket disconnect can lose done(isFinal) events, leaving stale "replying" UI.
       // Delay slightly so any buffered events arrive first.
       reconcileInvocationStateOnReconnect(tid ?? null);
+
+      // F183 follow-up: catch-up trigger on RECONNECT (not initial connect).
+      // Covers the user-reported "F5 / 切 thread 才出来" symptom when server
+      // broadcast an agent_message during the disconnect window — Phase C gap
+      // detection alone misses it because no subsequent live event arrives to
+      // reveal lastSeq < server seq. Bumping per-thread catch-up version reuses
+      // useChatHistory's Phase C subscription (debounce + retry + ack +
+      // Phase D merge filter); see useChatHistory.ts:872 catchUpVersion.
+      if (hasConnectedOnceRef.current) {
+        const store = useChatStore.getState();
+        const bumped = new Set<string>();
+        // Active thread always covered.
+        if (tid) {
+          store.requestStreamCatchUp(tid);
+          bumped.add(tid);
+        }
+        // Cloud R1 P1: iterate joinedRoomsRef (the actual ground truth of
+        // joined socket.io rooms). `threadStates` was a too-narrow proxy —
+        // a room can be joined and receive broadcasts BEFORE any local
+        // thread state is written (e.g., subscription-only rooms, fresh
+        // bg threads with no messages yet). Strip "thread:" prefix to get
+        // the threadId.
+        for (const room of joinedRoomsRef.current) {
+          if (!room.startsWith('thread:')) continue;
+          const bgThreadId = room.slice('thread:'.length);
+          if (bumped.has(bgThreadId)) continue; // dedup with active thread
+          store.requestStreamCatchUp(bgThreadId);
+          bumped.add(bgThreadId);
+        }
+      } else {
+        hasConnectedOnceRef.current = true;
+      }
     });
 
     socket.on('agent_message', (msg: AgentMessage) => {
@@ -484,7 +573,9 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
       // F173 Phase E (KD-1 handler unification): single dispatch.
       // useAgentMessages.handleAgentMessage 现在自己路由 active vs background，并管 bg refs。
       // useSocket 只做 socket-event-level 概念（recordInvocationEvent + 转发 callback）。
-      callbacksRef.current.onMessage(msg);
+      // clowder-ai#789: buffer into microtask coalescer — prevents React "Maximum update
+      // depth exceeded" when 200+ events arrive synchronously in one macrotask.
+      agentMessageCoalescerRef.current?.push(msg);
     });
 
     socket.on(
@@ -498,6 +589,37 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
         callbacksRef.current.onThreadUpdated?.(data);
       },
     );
+
+    // F128: New thread created via MCP callback — prepend to sidebar thread list
+    socket.on('thread_created', (thread: import('../stores/chat-types').Thread) => {
+      const store = useChatStore.getState();
+      const existing = store.threads;
+      if (!existing.some((t) => t.id === thread.id)) {
+        store.setThreads([thread, ...existing]);
+      }
+    });
+
+    // F128: proposal status changed (approved/rejected/etc) — broadcast to interested cards.
+    // ProposalCard listens via CustomEvent('cat-cafe:proposal-updated'); we don't push into a
+    // global store because proposal state is card-local and only mounted cards need to react.
+    socket.on(
+      'proposal_updated',
+      (proposal: {
+        proposalId: string;
+        status: string;
+        createdThreadId?: string;
+        reportingMode?: 'none' | 'final-only' | 'state-transitions' | 'blocking-ack';
+      }) => {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('cat-cafe:proposal-updated', { detail: proposal }));
+        }
+      },
+    );
+    socket.on('proposal_created', (proposal: { proposalId: string; status: string }) => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('cat-cafe:proposal-created', { detail: proposal }));
+      }
+    });
 
     socket.on(
       'intent_mode',
@@ -708,6 +830,11 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
           mentions: readonly string[];
           userId: string;
           contentBlocks?: readonly unknown[];
+          extra?: Record<string, unknown>;
+          origin?: 'stream' | 'callback' | 'briefing';
+          replyTo?: string;
+          replyPreview?: { senderCatId: string | null; content: string; deleted?: boolean; kind?: string };
+          mentionsUser?: boolean;
         }>;
       }) => {
         useChatStore.getState().markMessagesDelivered(data.threadId, data.messageIds, data.deliveredAt, data.messages);

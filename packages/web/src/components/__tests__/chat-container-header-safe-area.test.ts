@@ -13,11 +13,8 @@ vi.mock('@/components/ThreadCatPill', () => ({
 vi.mock('@/components/ExportButton', () => ({
   ExportButton: () => null,
 }));
-vi.mock('@/components/HubButton', () => ({
-  HubButton: () => null,
-}));
-vi.mock('@/components/ThemeToggle', () => ({
-  ThemeToggle: () => null,
+vi.mock('@/components/ChatVoiceFeatureControls', () => ({
+  ChatVoiceFeatureControls: () => null,
 }));
 vi.mock('@/components/VoiceCompanionButton', () => ({
   VoiceCompanionButton: () => null,

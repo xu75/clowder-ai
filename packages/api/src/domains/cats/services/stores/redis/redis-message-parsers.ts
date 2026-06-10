@@ -38,11 +38,14 @@ export function safeParseContentBlocks(raw: string | undefined): readonly Messag
   }
 }
 
-/** F22+F52: Parse extra field (contains rich blocks, stream metadata, cross-post origin) */
+/** F022+F052: Parse extra field (contains rich blocks, stream metadata, cross-post origin) */
 export function safeParseExtra(raw: string | undefined):
   | {
       rich?: RichMessageExtra;
-      stream?: { invocationId: string };
+      // F194 Phase Z9 hotfix: stream now carries dual id (parent + per-cat-turn).
+      // Frontend `getBubbleInvocationId` uses turnInvocationId for bubble identity
+      // (falls back to invocationId / parent only for legacy records).
+      stream?: { invocationId: string; turnInvocationId?: string };
       crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
       scheduler?: {
         hiddenTrigger?: boolean;
@@ -55,7 +58,9 @@ export function safeParseExtra(raw: string | undefined):
         };
       };
       targetCats?: string[];
+      isExplicitPost?: boolean;
       tracing?: { traceId: string; spanId: string; parentSpanId?: string };
+      systemKind?: 'a2a_routing';
     }
   | undefined {
   if (!raw) return undefined;
@@ -65,7 +70,7 @@ export function safeParseExtra(raw: string | undefined):
 
     const result: {
       rich?: RichMessageExtra;
-      stream?: { invocationId: string };
+      stream?: { invocationId: string; turnInvocationId?: string };
       crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
       scheduler?: {
         hiddenTrigger?: boolean;
@@ -78,7 +83,10 @@ export function safeParseExtra(raw: string | undefined):
         };
       };
       targetCats?: string[];
+      isExplicitPost?: boolean;
       tracing?: { traceId: string; spanId: string; parentSpanId?: string };
+      systemKind?: 'a2a_routing';
+      a2aRouting?: { fromCatId?: string; targetCatId?: string; invocationId?: string };
     } = {};
     let hasField = false;
 
@@ -89,8 +97,17 @@ export function safeParseExtra(raw: string | undefined):
     }
 
     // Validate stream sub-field shape (#80: draft dedup key)
+    // F194 Phase Z9 hotfix: preserve turnInvocationId (per-cat-turn id, written
+    // by Z9 backend stamping). Pre-hotfix parser rebuilt only { invocationId },
+    // silently stripping turnInvocationId → frontend bubble identity fell back
+    // to parent → multi-turn same-cat under shared parent collapsed (R13/R14).
     if (parsed.stream && typeof parsed.stream === 'object' && typeof parsed.stream.invocationId === 'string') {
-      result.stream = { invocationId: parsed.stream.invocationId };
+      result.stream = {
+        invocationId: parsed.stream.invocationId,
+        ...(typeof parsed.stream.turnInvocationId === 'string'
+          ? { turnInvocationId: parsed.stream.turnInvocationId }
+          : {}),
+      };
       hasField = true;
     }
 
@@ -123,6 +140,25 @@ export function safeParseExtra(raw: string | undefined):
     // #481: Preserve targetCats sub-field through Redis round-trip
     if (Array.isArray(parsed.targetCats)) {
       result.targetCats = parsed.targetCats;
+      hasField = true;
+    }
+
+    if (parsed.isExplicitPost === true) {
+      result.isExplicitPost = true;
+      hasField = true;
+    }
+
+    if (parsed.systemKind === 'a2a_routing') {
+      result.systemKind = 'a2a_routing';
+      hasField = true;
+    }
+
+    if (parsed.a2aRouting && typeof parsed.a2aRouting === 'object') {
+      const routing: NonNullable<typeof result.a2aRouting> = {};
+      if (typeof parsed.a2aRouting.fromCatId === 'string') routing.fromCatId = parsed.a2aRouting.fromCatId;
+      if (typeof parsed.a2aRouting.targetCatId === 'string') routing.targetCatId = parsed.a2aRouting.targetCatId;
+      if (typeof parsed.a2aRouting.invocationId === 'string') routing.invocationId = parsed.a2aRouting.invocationId;
+      result.a2aRouting = routing;
       hasField = true;
     }
 
@@ -161,7 +197,7 @@ export function serializeExtra(extra: NonNullable<StoredMessage['extra']>): stri
   return JSON.stringify({ ...rest, tracing: compact });
 }
 
-/** F97: Parse connector source field */
+/** F097: Parse connector source field */
 export function safeParseConnectorSource(raw: string | undefined): ConnectorSource | undefined {
   if (!raw) return undefined;
   try {

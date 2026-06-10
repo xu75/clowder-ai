@@ -1,7 +1,18 @@
 import type { DragEvent as ReactDragEvent } from 'react';
 import type { CatData } from '@/hooks/useCatData';
+import { CO_CREATOR_COLOR } from '@/lib/color-defaults';
 import { AvatarImageWithFallback } from './AvatarImageWithFallback';
 import type { CatConfig, CoCreatorConfig } from './config-viewer-types';
+import { HubIcon } from './hub-icons';
+import { SettingsResourceIconButton, SettingsResourceToggleSwitch } from './SettingsResourceCard';
+import {
+  SettingsBadge,
+  SettingsFilterTabs,
+  SettingsPrimaryButton,
+  SettingsRow,
+  SettingsStatusStrip,
+  SettingsText,
+} from './settings/primitives';
 
 function safeAvatarSrc(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -53,113 +64,166 @@ function getMetaSummary(cat: CatData, configCat?: CatConfig) {
   if (cat.clientId === 'antigravity') {
     return `Antigravity · ${configCat?.model ?? cat.defaultModel} · CLI Bridge`;
   }
-
   return `${clientRuntimeLabel(cat, configCat)} · ${configCat?.model ?? cat.defaultModel} · ${accountSummary(cat)}`;
 }
 
-function getStatusBadge(cat: CatData) {
+function getStatusBadge(cat: CatData): { enabled: boolean; label: string; tone: 'emerald' | 'slate' } {
   if (cat.roster?.available === false) {
-    return {
-      enabled: false,
-      label: '未启用',
-      className: 'bg-slate-100 text-slate-600',
-    };
+    return { enabled: false, label: '已停用', tone: 'slate' };
   }
-  return {
-    enabled: true,
-    label: '已启用',
-    className: 'bg-[#E8F5E9] text-[#4CAF50]',
-  };
-}
-
-function getSessionChainBadge(cat: CatData) {
-  const enabled = cat.sessionChain !== false;
-  return {
-    label: enabled ? 'Session Chain 已开启' : 'Session Chain 未开启',
-    className: enabled ? 'bg-[#E8F5E9] text-[#4CAF50]' : 'bg-slate-100 text-slate-600',
-  };
+  return { enabled: true, label: '已启用', tone: 'emerald' };
 }
 
 function formatMentionPreview(patterns: string[], max = 3) {
   const visible = patterns.slice(0, max);
   const rest = patterns.length - visible.length;
-  return rest > 0 ? `${visible.join('  ')}  +${rest}` : visible.join('  ');
+  return rest > 0 ? `${visible.join('')}  +${rest}` : visible.join('');
 }
 
-export function HubCoCreatorOverviewCard({ coCreator, onEdit }: { coCreator: CoCreatorConfig; onEdit?: () => void }) {
-  const primary = coCreator.color?.primary ?? '#D4A76A';
-  const secondary = coCreator.color?.secondary ?? '#FFF8F0';
-  const avatarSrc = safeAvatarSrc(coCreator.avatar);
-
+function OwnerBadge() {
   return (
-    <section
-      role={onEdit ? 'button' : undefined}
-      tabIndex={onEdit ? 0 : undefined}
-      onClick={() => onEdit?.()}
-      onKeyDown={(event) => {
-        if (!onEdit) return;
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          onEdit();
-        }
-      }}
-      className="rounded-[20px] px-[18px] py-[18px] shadow-sm"
-      style={{ backgroundColor: secondary, border: `2px solid ${primary}` }}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <div
-            className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full text-[11px] font-bold text-white"
-            style={{ backgroundColor: primary }}
-          >
-            {avatarSrc ? (
-              <AvatarImageWithFallback
-                src={avatarSrc}
-                alt={`${coCreator.name} avatar`}
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              'ME'
-            )}
-          </div>
-          <h3 className="text-base font-bold text-[#2D2118]">{coCreator.name}</h3>
-        </div>
-        <span className="rounded-full bg-[#FFF3E0] px-2.5 py-1 text-[11px] font-semibold text-[#E65100] flex items-center gap-1">
-          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"
-            />
-          </svg>
-          Owner
-        </span>
-      </div>
-      <p className="mt-2.5 text-[13px] text-[#8A776B]">
-        别名: {coCreator.aliases.join(' · ') || '无'} · 只能编辑，不能新增或删除
-      </p>
-      <p className="mt-2 text-[13px]" style={{ color: primary }}>
-        {formatMentionPreview(coCreator.mentionPatterns, 2)}
-      </p>
-    </section>
+    <SettingsBadge tone="amber" className="inline-flex items-center gap-1">
+      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"
+        />
+      </svg>
+      Owner
+    </SettingsBadge>
   );
 }
 
-export function HubOverviewToolbar({ onAddMember }: { onAddMember?: () => void }) {
+// F206 exempt: coCreator config default colors — data-driven, not UI theme
+function OwnerAvatar({ coCreator }: { coCreator: CoCreatorConfig }) {
+  const primary = coCreator.color?.primary ?? CO_CREATOR_COLOR.primary;
+  const avatarSrc = safeAvatarSrc(coCreator.avatar);
+  return (
+    <div
+      className="flex h-8 w-8 items-center justify-center overflow-hidden text-xs font-bold"
+      style={{ backgroundColor: primary, color: 'var(--cafe-surface)', borderRadius: '9999px' }}
+    >
+      {avatarSrc ? (
+        <AvatarImageWithFallback
+          src={avatarSrc}
+          alt={`${coCreator.name} avatar`}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        'ME'
+      )}
+    </div>
+  );
+}
+
+export function HubCoCreatorOverviewCard({ coCreator, onEdit }: { coCreator: CoCreatorConfig; onEdit?: () => void }) {
+  const primary = coCreator.color?.primary ?? CO_CREATOR_COLOR.primary;
+  return (
+    <SettingsRow
+      icon={<OwnerAvatar coCreator={coCreator} />}
+      title={coCreator.name}
+      meta={
+        <>
+          <span>别名: {coCreator.aliases.join(' · ') || '无'} · 只能编辑，不能新增或删除</span>
+          <span className="mt-0.5 block" style={{ color: primary }}>
+            {formatMentionPreview(coCreator.mentionPatterns, 2)}
+          </span>
+        </>
+      }
+      badges={<OwnerBadge />}
+      onClick={onEdit}
+    />
+  );
+}
+
+const MEMBER_FILTER_TABS = [
+  { key: '全部', label: '全部' },
+  { key: '已启用', label: '已启用' },
+  { key: '已停用', label: '已停用' },
+  { key: 'oauth', label: 'CLI（OAuth）' },
+  { key: 'api_key', label: 'CLI（配置）' },
+];
+
+export function HubOverviewToolbar({
+  onAddMember,
+  activeFilter,
+  onFilterChange,
+}: {
+  onAddMember?: () => void;
+  activeFilter?: string;
+  onFilterChange?: (key: string) => void;
+}) {
   return (
     <div className="flex items-center justify-between gap-3">
-      <p className="text-[13px] text-[#8F8075]">全部 · CLI（OAuth） · CLI（配置） · 未启用</p>
-      <button
-        type="button"
-        onClick={onAddMember}
-        className="rounded-full px-4 py-2 text-sm font-bold text-white"
-        style={{ backgroundColor: '#D49266' }}
-        data-bootcamp-step="add-member-button"
-        data-guide-id="cats.add-member"
-      >
-        + 添加成员
-      </button>
+      {onFilterChange ? (
+        <SettingsFilterTabs tabs={MEMBER_FILTER_TABS} activeKey={activeFilter ?? '全部'} onTabChange={onFilterChange} />
+      ) : (
+        <SettingsStatusStrip tone="muted">全部 · 已启用 · 已停用 · CLI（OAuth） · CLI（配置）</SettingsStatusStrip>
+      )}
+      {onAddMember && (
+        <SettingsPrimaryButton
+          onClick={onAddMember}
+          data-bootcamp-step="add-member-button"
+          data-guide-id="cats.add-member"
+        >
+          + 添加成员
+        </SettingsPrimaryButton>
+      )}
     </div>
+  );
+}
+
+function AvailabilityToggle({
+  cat,
+  enabled,
+  onToggle,
+  busy,
+}: {
+  cat: CatData;
+  enabled: boolean;
+  onToggle?: (cat: CatData) => void;
+  busy: boolean;
+}) {
+  if (!onToggle) return null;
+  const label = enabled ? '停用成员' : '启用成员';
+  return (
+    <SettingsResourceToggleSwitch
+      enabled={enabled}
+      busy={busy}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle(cat);
+      }}
+      title={`${label}：${cat.displayName}`}
+      ariaLabel={`${label}：${cat.displayName}`}
+    />
+  );
+}
+
+function MemberMeta({ cat, configCat }: { cat: CatData; configCat?: CatConfig }) {
+  const sessionChainEnabled = cat.sessionChain !== false;
+  return (
+    <>
+      <span>
+        {getMetaSummary(cat, configCat)}
+        {cat.adapterMode && (
+          <SettingsBadge
+            tone={cat.adapterMode === 'acp' ? 'emerald' : 'slate'}
+            size="xxs"
+            className="ml-1.5 inline-block"
+          >
+            {cat.adapterMode.toUpperCase()}
+          </SettingsBadge>
+        )}
+      </span>
+      <span className="mt-0.5 flex flex-wrap items-center gap-2">
+        <SettingsText tone="purple">{formatMentionPreview(cat.mentionPatterns)}</SettingsText>
+        <SettingsBadge tone={sessionChainEnabled ? 'emerald' : 'slate'}>
+          {sessionChainEnabled ? 'Session Chain 已开启' : 'Session Chain 未开启'}
+        </SettingsBadge>
+      </span>
+    </>
   );
 }
 
@@ -193,99 +257,53 @@ export function HubMemberOverviewCard({
   guideTargetId?: string;
 }) {
   const status = getStatusBadge(cat);
-  const sessionChain = getSessionChainBadge(cat);
   const title = [cat.breedDisplayName ?? cat.displayName, cat.nickname].filter(Boolean).join(' · ');
-  const editCard = () => onEdit?.(cat);
 
   return (
-    <section
+    <SettingsRow
       data-testid={`cat-card-${cat.id}`}
-      draggable={draggable || undefined}
+      data-guide-id={guideTargetId}
+      draggable={draggable}
       onDragStart={draggable ? (event) => onDragStart?.(cat, event) : undefined}
       onDragOver={draggable ? (event) => onDragOver?.(cat, event) : undefined}
       onDrop={draggable ? (event) => onDrop?.(cat, event) : undefined}
       onDragEnd={draggable ? (event) => onDragEnd?.(cat, event) : undefined}
-      onClick={editCard}
-      className={`rounded-[20px] px-[18px] py-[18px] shadow-sm transition hover:shadow-md ${isDragging ? 'opacity-40' : ''}`}
-      style={{ backgroundColor: '#FFFDFC', border: '1px solid #D9C7EA' }}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-2">
-          {draggable ? (
-            <span
-              aria-hidden="true"
-              title="拖动排序"
-              className="mt-1 cursor-grab select-none text-[18px] leading-none text-[#B59A88]"
-            >
-              ⠿
-            </span>
-          ) : null}
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              editCard();
-            }}
-            data-guide-id={guideTargetId}
-            className="min-w-0 flex-1 cursor-pointer text-left"
-          >
-            <h3 className="text-[17px] font-bold text-[#2D2118]">{title}</h3>
-            <p className="mt-2.5 text-[13px] text-[#8A776B]">
-              {getMetaSummary(cat, configCat)}
-              {cat.adapterMode ? (
-                <span
-                  className={`ml-1.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                    cat.adapterMode === 'acp' ? 'bg-[#E8F5E9] text-[#4CAF50]' : 'bg-slate-100 text-slate-500'
-                  }`}
-                >
-                  {cat.adapterMode.toUpperCase()}
-                </span>
-              ) : null}
-            </p>
-
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <p className="text-[13px] text-[#9D7BC7]">{formatMentionPreview(cat.mentionPatterns)}</p>
-              <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${sessionChain.className}`}>
-                {sessionChain.label}
-              </span>
-            </div>
-          </button>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleAvailability?.(cat);
-            }}
-            disabled={!onToggleAvailability || togglingAvailability}
-            aria-pressed={status.enabled}
-            className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition ${status.className} disabled:cursor-default`}
-          >
-            {togglingAvailability ? '切换中...' : status.label}
-          </button>
-          {onDelete ? (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
+      onClick={() => onEdit?.(cat)}
+      isDragging={isDragging}
+      dragHandle={
+        draggable ? (
+          <span aria-hidden="true" title="拖动排序" className="select-none leading-none text-lg">
+            ⠿
+          </span>
+        ) : undefined
+      }
+      title={title}
+      meta={<MemberMeta cat={cat} configCat={configCat} />}
+      badges={<SettingsBadge tone={status.tone}>{status.label}</SettingsBadge>}
+      actions={
+        <>
+          <AvailabilityToggle
+            cat={cat}
+            enabled={status.enabled}
+            onToggle={onToggleAvailability}
+            busy={togglingAvailability}
+          />
+          {onDelete && (
+            <SettingsResourceIconButton
+              tone="danger"
+              onClick={(e) => {
+                e.stopPropagation();
                 onDelete(cat);
               }}
-              className="rounded-full bg-red-50 p-1.5 text-red-600 transition hover:bg-red-100"
+              title="删除成员"
               aria-label="删除成员"
             >
-              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" aria-hidden="true">
-                <path
-                  d="M3.5 4.5h9m-7.5 0V3.25h5V4.5m-5.5 0 .5 8h5l.5-8m-4 2v4m2-4v4"
-                  strokeWidth="1.25"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-          ) : null}
-        </div>
-      </div>
-    </section>
+              <HubIcon name="trash" className="h-3.5 w-3.5" />
+            </SettingsResourceIconButton>
+          )}
+        </>
+      }
+      tone={status.enabled ? 'active' : 'inactive'}
+    />
   );
 }

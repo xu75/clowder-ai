@@ -7,20 +7,45 @@ import { useChatStore } from '@/stores/chatStore';
 import { apiFetch } from '@/utils/api-client';
 
 const TONE_STYLES: Record<string, string> = {
-  info: 'border-l-blue-400 bg-blue-50 dark:bg-blue-950/30',
-  success: 'border-l-green-400 bg-green-50 dark:bg-green-950/30',
-  warning: 'border-l-yellow-400 bg-yellow-50 dark:bg-yellow-950/30',
-  danger: 'border-l-red-400 bg-red-50 dark:bg-red-950/30',
+  info: 'border-l-conn-blue-ring bg-conn-blue-bg ',
+  success: 'border-l-conn-green-ring bg-conn-green-bg ',
+  warning: 'border-l-yellow-400 bg-[var(--semantic-warning-surface)] ',
+  danger: 'border-l-conn-red-ring bg-conn-red-bg ',
 };
 
 export function CardBlock({ block, messageId }: { block: RichCardBlock; messageId?: string }) {
-  const toneStyle = TONE_STYLES[block.tone ?? 'info'] ?? TONE_STYLES['info'];
+  const toneStyle = TONE_STYLES[block.tone ?? 'info'] ?? TONE_STYLES.info;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copiedAction, setCopiedAction] = useState<string | null>(null);
 
-  const handleAction = useCallback(
-    async (action: string, payload?: Record<string, unknown>) => {
-      if (action !== 'tts-resynthesize' || !messageId || !payload) return;
+  const copyToClipboard = useCallback(async (payload?: Record<string, unknown>) => {
+    const text = typeof payload?.text === 'string' ? payload.text : '';
+    if (!text) {
+      setError('没有可复制的内容');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedAction('copy-to-clipboard');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '复制失败');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const resynthesizeTts = useCallback(
+    async (payload?: Record<string, unknown>) => {
+      if (!messageId) {
+        return;
+      }
+      if (!payload) {
+        return;
+      }
 
       setLoading(true);
       setError(null);
@@ -61,18 +86,38 @@ export function CardBlock({ block, messageId }: { block: RichCardBlock; messageI
     [messageId, block.id],
   );
 
+  const handleAction = useCallback(
+    async (action: string, payload?: Record<string, unknown>) => {
+      if (action === 'copy-to-clipboard') {
+        await copyToClipboard(payload);
+        return;
+      }
+      if (action === 'tts-resynthesize') {
+        await resynthesizeTts(payload);
+        return;
+      }
+      // Defense-in-depth (F225 dogfood): a card whose action this build doesn't handle — e.g. a stale
+      // browser bundle rendering a newer `handoff:approve` card via this generic renderer instead of
+      // the dedicated one — would silently no-op. Warn so the dead button self-diagnoses (→ refresh).
+      console.warn(
+        `[CardBlock] unhandled card action "${action}" — the app bundle may be stale; hard-refresh (Cmd+Shift+R).`,
+      );
+    },
+    [copyToClipboard, resynthesizeTts],
+  );
+
   return (
     <div className={`border-l-4 rounded-r-lg p-3 ${toneStyle}`}>
       <div className="font-medium text-sm">{block.title}</div>
       {block.bodyMarkdown && (
-        <div className="mt-1 text-xs text-cafe-secondary dark:text-gray-300 [&_.markdown-content]:text-xs [&_p]:mb-1 [&_p:last-child]:mb-0">
+        <div className="mt-1 text-xs text-cafe-secondary [&_.markdown-content]:text-xs [&_p]:mb-1 [&_p:last-child]:mb-0">
           <MarkdownContent content={block.bodyMarkdown} className="!text-xs" disableCommandPrefix />
         </div>
       )}
       {block.fields && block.fields.length > 0 && (
         <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-1">
           {block.fields.map((f, i) => (
-            <div key={i} className="text-xs">
+            <div key={`${f.label}:${f.value}:${i}`} className="text-xs">
               <span className="text-cafe-secondary">{f.label}:</span>{' '}
               <span className="font-mono break-all">{f.value}</span>
             </div>
@@ -83,18 +128,24 @@ export function CardBlock({ block, messageId }: { block: RichCardBlock; messageI
         <div className="mt-2 flex gap-2">
           {block.actions.map((a, i) => (
             <button
-              key={i}
+              key={`${a.action}:${a.label}:${i}`}
               type="button"
               disabled={loading}
               onClick={() => handleAction(a.action, a.payload)}
-              className="text-xs px-2 py-1 rounded bg-yellow-100 dark:bg-yellow-900/40 hover:bg-yellow-200 dark:hover:bg-yellow-800/50 text-yellow-800 dark:text-yellow-200 border border-yellow-300 dark:border-yellow-700 disabled:opacity-50 transition-colors"
+              className="text-xs px-2 py-1 rounded bg-[var(--semantic-warning-surface)] hover:bg-[var(--semantic-warning-surface)] text-conn-amber-text border border-conn-amber-ring disabled:opacity-50 transition-colors"
             >
-              {loading ? '合成中...' : a.label}
+              {loading
+                ? a.action === 'tts-resynthesize'
+                  ? '合成中...'
+                  : '处理中...'
+                : copiedAction === a.action
+                  ? '已复制'
+                  : a.label}
             </button>
           ))}
         </div>
       )}
-      {error && <div className="mt-1 text-xs text-red-500">{error}</div>}
+      {error && <div className="mt-1 text-xs text-conn-red-text">{error}</div>}
     </div>
   );
 }

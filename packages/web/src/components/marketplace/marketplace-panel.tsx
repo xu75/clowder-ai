@@ -11,7 +11,10 @@ function LoadingSkeleton() {
   return (
     <div className="space-y-3">
       {[1, 2, 3].map((i) => (
-        <div key={i} className="animate-pulse rounded-xl border border-cafe-border bg-white p-4">
+        <div
+          key={i}
+          className="animate-pulse rounded-xl bg-[var(--console-card-bg)] p-4 shadow-[0_8px_22px_rgba(43,33,26,0.04)]"
+        >
           <div className="h-4 w-1/3 rounded bg-cafe-border" />
           <div className="mt-2 h-3 w-2/3 rounded bg-cafe-border/60" />
           <div className="mt-1.5 h-3 w-1/2 rounded bg-cafe-border/40" />
@@ -32,6 +35,7 @@ export function MarketplacePanel() {
   const getInstallPlan = useMarketplaceStore((s) => s.getInstallPlan);
   const clearSelection = useMarketplaceStore((s) => s.clearSelection);
   const search = useMarketplaceStore((s) => s.search);
+  const browse = useMarketplaceStore((s) => s.browse);
 
   const handleSelect = useCallback(
     (result: (typeof results)[number]) => {
@@ -43,11 +47,13 @@ export function MarketplacePanel() {
 
   const handleRetry = useCallback(() => {
     if (query) search(query);
-  }, [query, search]);
+    else browse();
+  }, [browse, query, search]);
 
   useEffect(() => {
+    browse();
     return () => clearSelection();
-  }, [clearSelection]);
+  }, [browse, clearSelection]);
 
   if (selectedResult && installPlan) {
     return <InstallPlanDetail result={selectedResult} plan={installPlan} onBack={clearSelection} />;
@@ -60,17 +66,19 @@ export function MarketplacePanel() {
       {loading && <LoadingSkeleton />}
 
       {error && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-600">
+        <div className="rounded-lg bg-conn-red-bg p-3 text-sm text-conn-red-text">
           <p>{error}</p>
-          <button onClick={handleRetry} className="mt-1 text-xs font-medium text-red-700 underline">
+          <button onClick={handleRetry} className="mt-1 text-xs font-medium text-conn-red-text underline">
             重试
           </button>
         </div>
       )}
 
-      {!loading && !error && query && results.length > 0 && (
+      {!loading && !error && results.length > 0 && (
         <>
-          <p className="text-xs text-cafe-muted">找到 {results.length} 个结果</p>
+          <p className="text-xs text-cafe-muted">
+            {query ? `找到 ${results.length} 个结果` : `共 ${results.length} 个能力`}
+          </p>
           <div className="space-y-2">
             {results.map((r) => (
               <ArtifactCard key={`${r.ecosystem}:${r.artifactId}`} result={r} onSelect={handleSelect} />
@@ -83,7 +91,7 @@ export function MarketplacePanel() {
         <div className="py-8 text-center text-sm text-cafe-muted">未找到匹配 &ldquo;{query}&rdquo; 的能力</div>
       )}
 
-      {!loading && !error && !query && (
+      {!loading && !error && !query && results.length === 0 && (
         <div className="flex flex-col items-center py-12 text-cafe-muted">
           <HubIcon name="search" className="mb-3 h-8 w-8 opacity-30" />
           <p className="text-sm">搜索关键词，发现能力</p>
