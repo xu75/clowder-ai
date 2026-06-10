@@ -7,8 +7,9 @@
  */
 
 import { lstat, mkdir, readlink, rm, symlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
+import { pathsEqual } from '../../utils/project-path.js';
 import { computeSourceManifestHash, listSourceSkillNames, readSkillsState, writeSkillsState } from './skills-state.js';
 
 const PROVIDER_DIRS = ['.claude/skills', '.codex/skills', '.gemini/skills', '.kimi/skills'];
@@ -28,12 +29,17 @@ export interface SkillsSyncResult {
   newHash: string;
 }
 
+async function symlinkPointsTo(linkPath: string, target: string): Promise<boolean> {
+  const existing = await readlink(linkPath);
+  const resolvedExisting = resolve(dirname(linkPath), existing);
+  return pathsEqual(resolvedExisting, resolve(target));
+}
+
 async function ensureCorrectSymlink(linkPath: string, target: string): Promise<void> {
   try {
     const s = await lstat(linkPath);
     if (s.isSymbolicLink()) {
-      const existing = await readlink(linkPath);
-      if (existing === target) return;
+      if (await symlinkPointsTo(linkPath, target)) return;
       await rm(linkPath);
     } else {
       // Non-symlink (real dir/file) at a managed skill path — replace it (#327).
@@ -43,7 +49,12 @@ async function ensureCorrectSymlink(linkPath: string, target: string): Promise<v
   } catch {
     // Doesn't exist — fine, we'll create it
   }
-  await symlink(target, linkPath);
+  try {
+    await symlink(target, linkPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST' && (await symlinkPointsTo(linkPath, target))) return;
+    throw err;
+  }
 }
 
 async function removeSymlinkIfExists(linkPath: string): Promise<void> {

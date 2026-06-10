@@ -1,0 +1,6 @@
+id: 42da32de-174
+status: rejected
+source: callback:gpt52:0bae3178-24c7-4e14-a8bd-697b64997d76
+created_at: 2026-05-01T03:06:49.284Z
+content: |
+  Vercel gotcha for quant-strategy: project protection is SSO for all_except_custom_domains. Setting an alias for quant-strategy.mesh-hub.xyz was not enough; until the subdomain was added via `vercel domains add quant-strategy.mesh-hub.xyz`, the domain returned Vercel SSO 401. After adding it as a project custom domain, the domain returned 200 and served Quant Strategy / TrendLock 40.

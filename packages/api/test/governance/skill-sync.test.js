@@ -107,6 +107,19 @@ describe('Skill Sync Service (ADR-025 Phase 2)', () => {
     assert.equal(target, join(skillsSource, 'tdd'), 'should fix the wrong symlink');
   });
 
+  test('keeps relative symlinks that resolve to the correct target', async () => {
+    const kimiSkills = join(projectRoot, '.kimi', 'skills');
+    await mkdir(kimiSkills, { recursive: true });
+    const linkPath = join(kimiSkills, 'tdd');
+    const relativeTarget = relative(kimiSkills, join(skillsSource, 'tdd'));
+    await symlink(relativeTarget, linkPath);
+
+    await syncSkills(projectRoot, skillsSource);
+
+    const target = await readlink(linkPath);
+    assert.equal(target, relativeTarget, 'correct relative symlink should not be replaced');
+  });
+
   test('is idempotent — second sync produces same result', async () => {
     const result1 = await syncSkills(projectRoot, skillsSource);
     const result2 = await syncSkills(projectRoot, skillsSource);

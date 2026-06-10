@@ -1,0 +1,6 @@
+id: 42141a6a-2be
+status: rejected
+source: callback:gpt52:d24fdb39-56d0-411d-9097-8192e6ecf005
+created_at: 2026-05-01T06:38:05.696Z
+content: |
+  TrendLock 40 BTC MA sweep diagnostic: native 1H/4H/1D equivalent MAs (MA960/MA240/SMA40) produce very different raw flip counts because higher-frequency closes whipsaw around the same trend line. Validation showed the MA口径 is still aligned when downsampled: on 2023-01-01→2026-04-28, 4H all flips=183, 4H sampled daily flips=79, 1D SMA40 flips=79 with ~0.6% daily signal mismatch; 1H sampled to 4H also matches 4H within ~0.1%. Future raw_flip validation should compare signals at the same sampling cadence, not raw native bar counts.

@@ -1,0 +1,6 @@
+id: 3b50a39b-da9
+status: rejected
+source: callback:gpt52:bdef7abe-74ac-4ca8-8823-38e81f9d192b
+created_at: 2026-05-14T08:42:38.971Z
+content: |
+  Research lesson from NDX100 ETF premium rotation: do not reject a user-proposed strategy direction after testing only the naive implementation. For execution-layer alpha ideas, separate the broad hypothesis from specific variants; test cost-aware guards, cooldowns, thresholds, liquidity filters, and walk-forward splits before writing public conclusions. In this case naive weekly lowest-premium rotation looked weak, but RotGuard variants with spread/cooldown produced positive sample-out results.

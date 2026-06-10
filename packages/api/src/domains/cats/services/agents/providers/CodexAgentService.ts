@@ -15,7 +15,9 @@
  *   turn.started / turn.completed / 其余 item 事件 → 跳过
  */
 
-import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, readlinkSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type CatId, createCatId } from '@cat-cafe/shared';
@@ -27,6 +29,7 @@ import { formatCliExitError } from '../../../../../utils/cli-format.js';
 import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/cli-resolve.js';
 import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
+import { pathsEqual } from '../../../../../utils/project-path.js';
 import { AuditEventTypes, getEventAuditLog } from '../../orchestration/EventAuditLog.js';
 import { CliRawArchive } from '../../session/CliRawArchive.js';
 import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata, TokenUsage } from '../../types.js';
@@ -224,6 +227,56 @@ function buildGitRepoArgs(workingDirectory?: string): string[] {
   return isGitRepositoryPath(repoCheckDir) ? [] : ['--skip-git-repo-check'];
 }
 
+const NON_ASCII_RE = /[^\x00-\x7F]/;
+const CODEX_WORKSPACE_ALIAS_ROOT = join(tmpdir(), 'clowder-codex-workspaces');
+
+function aliasSymlinkMatches(aliasPath: string, target: string): boolean {
+  try {
+    const existing = readlinkSync(aliasPath);
+    return pathsEqual(resolve(dirname(aliasPath), existing), resolve(target));
+  } catch {
+    return false;
+  }
+}
+
+function ensureAsciiCodexWorkingDirectory(workingDirectory?: string): string | undefined {
+  if (!workingDirectory || !NON_ASCII_RE.test(workingDirectory)) return workingDirectory;
+
+  const target = resolve(workingDirectory);
+  const hash = createHash('sha256').update(target).digest('hex').slice(0, 16);
+  mkdirSync(CODEX_WORKSPACE_ALIAS_ROOT, { recursive: true });
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const aliasName = attempt === 0 ? `workspace-${hash}` : `workspace-${hash}-${attempt}`;
+    const aliasPath = join(CODEX_WORKSPACE_ALIAS_ROOT, aliasName);
+
+    try {
+      const stat = lstatSync(aliasPath);
+      if (stat.isSymbolicLink()) {
+        if (aliasSymlinkMatches(aliasPath, target)) return aliasPath;
+        rmSync(aliasPath, { force: true });
+      } else {
+        continue;
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+
+    try {
+      symlinkSync(target, aliasPath, process.platform === 'win32' ? 'junction' : undefined);
+      return aliasPath;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        if (aliasSymlinkMatches(aliasPath, target)) return aliasPath;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error(`Unable to create ASCII Codex workspace alias for ${workingDirectory}`);
+}
+
 /**
  * Service for invoking Codex via CLI subprocess.
  * Uses ChatGPT Plus/Pro subscription instead of API key.
@@ -270,6 +323,7 @@ export class CodexAgentService implements AgentService {
       : [];
     const catCafeMcpArgs = buildCatCafeMcpConfigArgs(options?.workingDirectory, options?.callbackEnv);
     const gitRepoArgs = buildGitRepoArgs(options?.workingDirectory);
+    const codexWorkingDirectory = ensureAsciiCodexWorkingDirectory(options?.workingDirectory);
     // User-defined CLI args from the member editor (#567) — passed as-is, no implicit wrapping.
     // Each entry is split by whitespace (e.g. "--config model_reasoning_effort=\"low\"").
     const userConfigArgs = (options?.cliConfigArgs ?? []).flatMap((arg) => arg.trim().split(/\s+/));
@@ -449,7 +503,8 @@ export class CodexAgentService implements AgentService {
           customBaseUrl: customBaseUrl ?? null,
           sessionId: options?.sessionId ?? null,
           invocationId: options?.invocationId ?? null,
-          cwd: options?.workingDirectory ?? null,
+          cwd: codexWorkingDirectory ?? null,
+          originalCwd: options?.workingDirectory ?? null,
           authMode,
           argCount: args.length,
         },
@@ -459,7 +514,7 @@ export class CodexAgentService implements AgentService {
       const cliOpts = {
         command: codexCommand,
         args,
-        ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
+        ...(codexWorkingDirectory ? { cwd: codexWorkingDirectory } : {}),
         env: codexEnv,
         ...(options?.signal ? { signal: options.signal } : {}),
         ...(options?.invocationId ? { invocationId: options.invocationId } : {}),

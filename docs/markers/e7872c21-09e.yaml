@@ -1,0 +1,6 @@
+id: e7872c21-09e
+status: materialized
+source: callback:gpt52:977d3cf8-066e-499e-b7c0-a400be37d7aa
+created_at: 2026-05-01T08:39:19.563Z
+content: |
+  TrendLock 40优化复盘：不要把研究 sweep 的 pure_trend_gate 结果直接当作线上 production strategy 结果。BTC sweep_btc_signal_exec 验证的是 MSTR 同构假设（长周期信号 + 短周期执行）在纯趋势闸门抽象中方向有效；线上页面使用 strategies/btc_ma_trend/signal.py + pipeline/backtest.py，语义是 crossover entry + min_hold exit，且 fee_rate=0.001 per side。跨策略结论必须先声明 abstraction/pipeline、fee model、window、metric。

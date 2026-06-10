@@ -10,7 +10,7 @@
  */
 import { createHash } from 'node:crypto';
 
-export const GOVERNANCE_PACK_VERSION = '1.3.0';
+export const GOVERNANCE_PACK_VERSION = '1.4.0';
 
 export const MANAGED_BLOCK_START = '<!-- CAT-CAFE-GOVERNANCE-START -->';
 export const MANAGED_BLOCK_END = '<!-- CAT-CAFE-GOVERNANCE-END -->';
@@ -22,6 +22,7 @@ const HARD_CONSTRAINTS = `## Cat Cafe Governance Rules (Auto-managed)
 - **Redis port 6399** is Cat Cafe's production Redis. Never connect to it from external projects. Use 6398 for dev/test.
 - **No self-review**: The same individual cannot review their own code. Cross-family review preferred.
 - **Identity is constant**: Never impersonate another cat. Identity is a hard constraint.
+- **Workspace Boundary**: Only read/write/execute within the current project's git root. Never access, modify, or reference files in other projects, even if you know their paths. If a task seems to require cross-project access, stop and ask the user.
 
 ### Collaboration Standards
 - A2A handoff uses five-tuple: What / Why / Tradeoff / Open Questions / Next Action

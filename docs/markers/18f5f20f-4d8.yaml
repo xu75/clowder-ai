@@ -1,0 +1,6 @@
+id: 18f5f20f-4d8
+status: rejected
+source: callback:gpt52:0917bf9a-c410-4d32-a99b-c098d7d6df99
+created_at: 2026-05-04T17:35:40.606Z
+content: |
+  MSTR RD-12 extended-hours 检视结论：当前 A/B/C sweep 不能支持“扩展时段执行更差”的结论。根因是 `market_hours` 同时控制信号/指标计算和执行 universe；C 组只限制 `_target_exposure_v6` 调用，但 v6 指标（VWAP/RSI/1h/4h return/day_range/threshold）已由扩展时段 bar 参与计算，且盘前盘后仍会主动把仓位拉回 `base_exposure` 产生交易。诊断：1h_2y common regular bars 中 vwap/day_range 100% 不同、rsi 99.8% 不同、4h returns 57% 不同；C 组 183 trades 里 101 笔发生在 extended hours。应退回 RD-12，改成 signal universe 与 execution universe 分离后重跑。

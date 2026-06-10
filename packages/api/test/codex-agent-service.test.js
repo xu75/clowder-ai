@@ -5,8 +5,9 @@
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { mock, test } from 'node:test';
 
@@ -727,6 +728,34 @@ test('passes cwd from workingDirectory option', async () => {
 
   const spawnOpts = spawnFn.mock.calls[0].arguments[2];
   assert.equal(spawnOpts.cwd, '/my/project');
+});
+
+test('aliases non-ASCII workingDirectory before spawning Codex CLI', async () => {
+  const proc = createMockProcess();
+  const spawnFn = createMockSpawnFn(proc);
+  const service = new CodexAgentService({ spawnFn, model: 'gpt-5.3-codex' });
+  const nonAsciiDir = mkdtempSync(join(tmpdir(), 'codex-MSTR策略-'));
+  let aliasCwd;
+
+  try {
+    const promise = collect(service.invoke('hi', { workingDirectory: nonAsciiDir }));
+    emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't1' }]);
+    await promise;
+
+    const spawnOpts = spawnFn.mock.calls[0].arguments[2];
+    aliasCwd = spawnOpts.cwd;
+    assert.notEqual(aliasCwd, nonAsciiDir);
+    assert.ok(!/[^\x00-\x7F]/.test(aliasCwd), `cwd must be ASCII-only, got ${aliasCwd}`);
+    assert.match(aliasCwd, /clowder-codex-workspaces/);
+
+    const target = readlinkSync(aliasCwd);
+    assert.equal(resolve(dirname(aliasCwd), target), resolve(nonAsciiDir));
+  } finally {
+    if (aliasCwd?.includes('clowder-codex-workspaces')) {
+      rmSync(aliasCwd, { force: true });
+    }
+    rmSync(nonAsciiDir, { recursive: true, force: true });
+  }
 });
 
 test('oauth mode (default) does not forward OPENAI_API_KEY to codex child env', async () => {

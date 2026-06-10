@@ -1,0 +1,6 @@
+id: 86fd3099-593
+status: materialized
+source: callback:gpt52:2a0b6e89-d834-4d7c-b88c-329e0def7c17
+created_at: 2026-05-07T11:51:18.993Z
+content: |
+  MSTR策略研究纠偏：在讨论 OKX DryRun/实盘前，必须先用回测归因定义策略核心，不能为了落地 OKX 反向裁剪策略。正确时间结构是 BTC 4H SMA240 信号 shift 后 ffill 到 1H 策略 bar，confirm_bars=3 计数 1H bar。初步本地归因显示：在 min_exposure=1.0 且 max_exposure=1.0（无杠杆）时，V6 仓位目标/scoring 层直接失效；B_1x_neutral_shell 与 Core_1x 四窗口结果完全一致。B_1x_fullshell 相比 Core_1x 的增益主要来自 cooldown/fast reentry 执行壳，而不是 V6 scoring 目标或 crash_step；1.1 cap 的增益属于杠杆暴露，不应混入策略核心定义。

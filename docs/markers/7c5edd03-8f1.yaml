@@ -1,0 +1,6 @@
+id: 7c5edd03-8f1
+status: rejected
+source: callback:gpt52:69bb555a-226c-44c8-93a4-19ce6e7249ec
+created_at: 2026-05-15T06:48:02.746Z
+content: |
+  F167 behavioral evidence: In NDX100 ETF strategy discussion, I framed binary vs three-state as an A-share vs US mapping issue. Xu corrected that binary vs three-state is a short-horizon/current-execution vs long-horizon/state-machine choice, not a market distinction. Root cause: anchoring on implementation mapping (0.5 SPY -> cash for A-share execution) instead of defining the concept at the signal-state level first. Corrective pattern: define strategy state-machine concepts independently of execution venue, then map to market instruments.

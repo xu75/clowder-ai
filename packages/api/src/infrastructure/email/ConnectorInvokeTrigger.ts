@@ -286,6 +286,10 @@ export class ConnectorInvokeTrigger {
           });
       }
 
+      // F070: Track governance gate errors for outbound error delivery
+      let governanceErrorReason: string | undefined;
+      let governanceErrorCatId: string | undefined;
+
       // F151: Deliver per-cat turns inside the loop to preserve ordering when
       // post_message callbacks from later cats interleave with earlier outboundTurns.
       const deliveredTurnIndices = new Set<number>();
@@ -389,6 +393,20 @@ export class ConnectorInvokeTrigger {
               }
             }
           }
+        }
+        // F070: Detect governance gate errors for outbound error delivery
+        if (msg.type === 'system_info' && typeof msg.content === 'string') {
+          try {
+            const parsed = JSON.parse(msg.content);
+            if (parsed.type === 'governance_blocked') {
+              governanceErrorReason = parsed.reason || 'Governance gate blocked this invocation.';
+              governanceErrorCatId = msg.catId;
+            }
+          } catch { /* non-JSON system_info — ignore */ }
+        }
+        if (msg.type === 'done' && msg.errorCode && !governanceErrorReason) {
+          governanceErrorReason = `Invocation failed: ${msg.errorCode}`;
+          governanceErrorCatId = governanceErrorCatId || msg.catId;
         }
         // Collect text content for outbound delivery (final-only)
         if (msg.type === 'text' && typeof msg.content === 'string') {
@@ -586,11 +604,36 @@ export class ConnectorInvokeTrigger {
               }
             });
           }
-        } else if (this.opts.streamingHook?.cleanupPlaceholders) {
-          // Cloud-P1-R3: silent invocation (no content) — still clean up placeholder
-          await this.opts.streamingHook.cleanupPlaceholders(threadId, createResult.invocationId).catch((err) => {
-            log.warn({ err, threadId }, '[ConnectorInvokeTrigger] StreamingHook.cleanupPlaceholders failed (silent)');
-          });
+        } else {
+          // Cloud-P1-R3: silent invocation (no content) — clean up placeholder + notify user
+          if (this.opts.outboundHook) {
+            // F070: Governance-specific error message when gate blocked the invocation
+            const fallbackMessage = governanceErrorReason
+              ? `⚠️ 治理检查未通过，无法派遣猫猫：${governanceErrorReason}`
+              : '⚠️ 未能生成回复，请重新发送消息或稍后再试。';
+            log.warn(
+              { threadId, governanceErrorReason, governanceErrorCatId },
+              '[ConnectorInvokeTrigger] No content produced — delivering fallback to connector',
+            );
+            try {
+              await this.opts.outboundHook.deliver(
+                threadId,
+                fallbackMessage,
+                (governanceErrorCatId as CatId) ?? catId,
+                undefined,
+                undefined,
+                undefined,
+                messageId,
+              );
+            } catch (deliverErr) {
+              log.warn({ err: deliverErr, threadId }, '[ConnectorInvokeTrigger] Silent invocation fallback delivery failed');
+            }
+          }
+          if (this.opts.streamingHook?.cleanupPlaceholders) {
+            await this.opts.streamingHook.cleanupPlaceholders(threadId, createResult.invocationId).catch((err) => {
+              log.warn({ err, threadId }, '[ConnectorInvokeTrigger] StreamingHook.cleanupPlaceholders failed (silent)');
+            });
+          }
         }
       }
 
@@ -621,6 +664,29 @@ export class ConnectorInvokeTrigger {
         },
         threadId,
       );
+
+      // Deliver error message to external platforms (Feishu etc.) so user isn't left waiting
+      if (this.opts.outboundHook) {
+        try {
+          await this.opts.outboundHook.deliver(
+            threadId,
+            '⚠️ 抱歉，处理消息时出了点问题，请稍后再试。',
+            catId,
+            undefined,
+            undefined,
+            undefined,
+            messageId,
+          );
+        } catch (deliverErr) {
+          log.warn({ err: deliverErr, threadId }, '[ConnectorInvokeTrigger] Error delivery to connector failed');
+        }
+      }
+      // Clean up streaming placeholder so it doesn't stay as "收到" forever
+      if (this.opts.streamingHook?.cleanupPlaceholders) {
+        await this.opts.streamingHook.cleanupPlaceholders(threadId, createResult.invocationId).catch((cleanupErr) => {
+          log.warn({ err: cleanupErr, threadId }, '[ConnectorInvokeTrigger] Placeholder cleanup on error failed');
+        });
+      }
     } finally {
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       invocationTracker.complete(threadId, catId, controller);

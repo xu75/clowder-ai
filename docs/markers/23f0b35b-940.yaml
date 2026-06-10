@@ -1,0 +1,6 @@
+id: 23f0b35b-940
+status: rejected
+source: callback:gpt52:64b79b2e-ef58-4504-afa7-73d02e1b3ef5
+created_at: 2026-05-01T03:17:41.656Z
+content: |
+  Correction episode: Quant Strategy Vercel domain cleanup. I initially treated `quant-strategy.mesh-hub.xyz` as the only required public URL but left `mesh-hub.xyz` attached to the project, which violated Xu's instruction to remove the root domain and keep only the subdomain. Root cause: I verified public reachability and code/domain text, but did not inspect Vercel project-domain bindings separately from aliases/team domain ownership. Correct diagnostic pattern: for Vercel domain cleanup, verify all three layers: project domains API (`GET /v9/projects/{projectId}/domains`), deployment aliases (`vercel alias ls`), and HTTP reachability. Use project-domain DELETE for project detachment; avoid `vercel domains rm` unless intentionally removing Team ownership of the apex domain.

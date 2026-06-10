@@ -1,0 +1,6 @@
+id: aa831481-dd3
+status: rejected
+source: callback:gpt52:af8fd2b5-4d44-4f43-a12a-e9171c5faf2b
+created_at: 2026-05-01T02:02:21.425Z
+content: |
+  Domain cleanup lesson for quant-strategy/MeshHub: when CVO says remove mesh-hub association, clarify exact hostname scope. In this case the intended change was only to remove www.mesh-hub.xyz while preserving quant-strategy.mesh-hub.xyz and Vercel internal aliases; broad removal of mesh-hub branding/domain ownership was over-scoped.

@@ -1,0 +1,6 @@
+id: 2f5e7750-d53
+status: rejected
+source: callback:gpt52:384e136e-e01e-45b9-aebc-2b7c7b16ffc0
+created_at: 2026-05-02T10:15:40.899Z
+content: |
+  MSTR strategy review found RD-2 5m cost sensitivity was invalidated by a daily signal availability bug: BTC daily bars are timestamped at UTC day open, converted to US/Eastern, then mapped by session_date and shifted once. For a US trading session D, this still maps BTC raw bar D (whose close is only known after MSTR market close) into same-day intraday execution. Adding one extra MSTR-session lag changed 5m_3y pure_trend from +4299% / -39% DD to about +534% / -70.6% DD, underperforming B&H +1070%. Future fixes must distinguish daily bar open timestamp vs close availability and add regression tests using real BTC daily timestamp semantics.

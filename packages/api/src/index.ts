@@ -11,7 +11,7 @@ import { createRedisClient, SessionStore } from '@cat-cafe/shared/utils';
 import fastifyCookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import fastifyWebsocket from '@fastify/websocket';
-import Fastify from 'fastify';
+import Fastify, { type FastifyReply } from 'fastify';
 import { resolveAnthropicRuntimeProfile, resolveForClient } from './config/account-resolver.js';
 import { generateCliConfigs, readCapabilitiesConfig } from './config/capabilities/capability-orchestrator.js';
 import { resolveBoundAccountRefForCat } from './config/cat-account-binding.js';
@@ -90,6 +90,7 @@ import { startTtsCacheCleaner } from './domains/cats/services/tts/tts-cache-clea
 import { initVoiceBlockSynthesizer } from './domains/cats/services/tts/VoiceBlockSynthesizer.js';
 import type { AgentService } from './domains/cats/services/types.js';
 import { ActivityTracker } from './domains/health/ActivityTracker.js';
+import { shouldTrackApiActivity } from './domains/health/activity-route-filter.js';
 import { PortDiscoveryService } from './domains/preview/port-discovery.js';
 import { collectRuntimePorts } from './domains/preview/port-validator.js';
 import { PreviewGateway } from './domains/preview/preview-gateway.js';
@@ -261,8 +262,11 @@ async function main(): Promise<void> {
     done();
   });
 
-  // Health check
-  app.get('/health', async () => ({ status: 'ok', timestamp: Date.now() }));
+  // Health check. Keep root paths for direct API access and expose /api/*
+  // aliases for same-origin reverse-proxy deployments.
+  const healthHandler = async () => ({ status: 'ok' as const, timestamp: Date.now() });
+  app.get('/health', healthHandler);
+  app.get('/api/health', healthHandler);
 
   // F152: Readiness check — verifies dependencies are reachable.
   // evidenceStoreRef is set after memoryServices init; handler runs at request time.
@@ -295,11 +299,13 @@ async function main(): Promise<void> {
     const allOk = Object.values(checks).every((c) => c.ok);
     return { status: allOk ? 'ready' : 'degraded', checks };
   }
-  app.get('/ready', async (_request, reply) => {
+  const readyHandler = async (_request: unknown, reply: FastifyReply) => {
     const result = await checkReadiness();
     if (result.status !== 'ready') reply.code(503);
     return { ...result, timestamp: Date.now() };
-  });
+  };
+  app.get('/ready', readyHandler);
+  app.get('/api/ready', readyHandler);
 
   // Create invocation tracker for cancellation support
   const invocationTracker = new InvocationTracker();
@@ -341,8 +347,8 @@ async function main(): Promise<void> {
   // F085 Phase 4: Platform-level activity tracker (hyperfocus brake)
   const activityTracker = new ActivityTracker();
   app.addHook('onRequest', (request, _reply, done) => {
-    // Skip non-API paths and brake endpoints (avoid trigger-on-checkin loop)
-    if (!request.url.startsWith('/api/') || request.url.startsWith('/api/brake/')) {
+    // Skip non-user API paths and brake endpoints (avoid trigger-on-checkin loop)
+    if (!shouldTrackApiActivity(request.url)) {
       done();
       return;
     }
@@ -393,14 +399,29 @@ async function main(): Promise<void> {
 
   // Fail-closed: refuse to start without Redis unless explicitly opted into memory mode.
   // Also verify Redis is actually reachable (PING), not just configured.
+  // Retry with backoff: Redis may still be starting after a process-tree restart.
   if (redis) {
-    try {
-      await redis.ping();
-      app.log.info('[api] Redis PING OK');
-    } catch (err) {
+    const REDIS_PING_MAX_RETRIES = 5;
+    const REDIS_PING_BACKOFF_MS = 800;
+    let lastPingErr: unknown;
+    for (let attempt = 1; attempt <= REDIS_PING_MAX_RETRIES; attempt++) {
+      try {
+        await redis.ping();
+        app.log.info(`[api] Redis PING OK (attempt ${attempt})`);
+        lastPingErr = undefined;
+        break;
+      } catch (err) {
+        lastPingErr = err;
+        if (attempt < REDIS_PING_MAX_RETRIES) {
+          app.log.warn(`[api] Redis PING attempt ${attempt}/${REDIS_PING_MAX_RETRIES} failed, retrying in ${REDIS_PING_BACKOFF_MS * attempt}ms...`);
+          await new Promise((r) => setTimeout(r, REDIS_PING_BACKOFF_MS * attempt));
+        }
+      }
+    }
+    if (lastPingErr) {
       await redis.quit().catch(() => {});
       throw new Error(
-        `[api] Redis PING failed: ${err instanceof Error ? err.message : err}. ` +
+        `[api] Redis PING failed after ${REDIS_PING_MAX_RETRIES} attempts: ${lastPingErr instanceof Error ? lastPingErr.message : lastPingErr}. ` +
           'Check REDIS_URL or set MEMORY_STORE=1 for memory mode.',
       );
     }

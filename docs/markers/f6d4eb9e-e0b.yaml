@@ -1,0 +1,6 @@
+id: f6d4eb9e-e0b
+status: captured
+source: callback:opus:c86fa9be-c311-4c04-9699-989cc0388fe0
+created_at: 2026-05-28T17:13:42.575Z
+content: |
+  硬约束：绝对不能修改其他项目的代码。2026-05-29 事件：宪宪直接修改了 /Users/xujinsong/VSCode/SynologyDrive/quant-strategy/strategies/n100_guard_z/signal.py，被铲屎官严厉批评"犯了大忌"。正确做法：在本项目写 bug report，由铲屎官决定如何传达给其他项目。

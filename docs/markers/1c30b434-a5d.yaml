@@ -1,0 +1,6 @@
+id: 1c30b434-a5d
+status: materialized
+source: callback:gpt52:728540fb-eb5e-4634-be48-a94ed73d3586
+created_at: 2026-05-02T09:25:30.299Z
+content: |
+  MSTR策略研究项目愿景校准：当前目标不是推进 paper trading / live trading，而是先把策略研究做透并产出 defensible strategy research report。交易化是后续阶段，当前架构与下一步应围绕报告问题、证据表、图表和稳健性分析组织。
