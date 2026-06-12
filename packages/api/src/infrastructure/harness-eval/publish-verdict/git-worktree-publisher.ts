@@ -44,8 +44,20 @@ export function createGitWorktreePublisher(deps: GitWorktreePublisherDeps): GitP
       let branchExistedBefore = false;
 
       try {
-        // 1. Fetch latest origin/main to ensure isolated worktree is current
-        await exec('git', ['-C', deps.repoRoot, 'fetch', 'origin', 'main'], { timeout: 60_000 });
+        // 1. Fetch latest main to ensure isolated worktree is current.
+        // Fork workflow: if 'upstream' remote exists, fetch from it and use
+        // upstream/main as source base. This prevents fork-main divergence from
+        // polluting the PR with unrelated file diffs (the PR targets upstream).
+        let actualSourceBase = opts.sourceBase;
+        try {
+          await exec('git', ['-C', deps.repoRoot, 'remote', 'get-url', 'upstream'], { timeout: 10_000 });
+          // upstream remote exists — use it for a clean PR base
+          await exec('git', ['-C', deps.repoRoot, 'fetch', 'upstream', 'main'], { timeout: 60_000 });
+          actualSourceBase = 'upstream/main';
+        } catch {
+          // No upstream remote — single-repo workflow, fetch from origin
+          await exec('git', ['-C', deps.repoRoot, 'fetch', 'origin', 'main'], { timeout: 60_000 });
+        }
 
         // Probe upfront so partial-failure cleanup never deletes a pre-existing branch.
         try {
@@ -57,11 +69,11 @@ export function createGitWorktreePublisher(deps: GitWorktreePublisherDeps): GitP
           branchExistedBefore = false;
         }
 
-        // 2. Create isolated worktree on a new branch from origin/main
+        // 2. Create isolated worktree on a new branch from the resolved base
         //    Atomic: fails if branch already exists (race protection)
         await exec(
           'git',
-          ['-C', deps.repoRoot, 'worktree', 'add', '-b', opts.branchName, worktreePath, opts.sourceBase],
+          ['-C', deps.repoRoot, 'worktree', 'add', '-b', opts.branchName, worktreePath, actualSourceBase],
           { timeout: 60_000 },
         );
 
@@ -94,6 +106,33 @@ export function createGitWorktreePublisher(deps: GitWorktreePublisherDeps): GitP
         const shaResult = await exec('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], { timeout: 10_000 });
         const commitSha = shaResult.stdout.trim();
 
+        // 6b. Detect fork workflow: if origin owner differs from the repo gh
+        // resolves to, we need cross-fork PR syntax (--head owner:branch).
+        // Without this, gh pr create fails with "Head sha can't be blank" because
+        // the branch exists on the fork but not on the upstream repo.
+        let headRef = opts.branchName;
+        try {
+          const originUrl = await exec('git', ['-C', worktreePath, 'remote', 'get-url', 'origin'], {
+            timeout: 10_000,
+          });
+          // Extract owner from origin URL (https://github.com/OWNER/REPO or git@github.com:OWNER/REPO)
+          const originMatch = originUrl.stdout.trim().match(/github\.com[/:]([^/]+)\//);
+          if (originMatch) {
+            const ghRepoResult = await exec('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], {
+              cwd: worktreePath,
+              timeout: 15_000,
+            });
+            const upstreamOwner = ghRepoResult.stdout.trim().split('/')[0];
+            const originOwner = originMatch[1];
+            if (originOwner && upstreamOwner && originOwner !== upstreamOwner) {
+              // Fork workflow: prepend fork owner so gh creates cross-fork PR
+              headRef = `${originOwner}:${opts.branchName}`;
+            }
+          }
+        } catch {
+          // Detection failed — fall back to simple branch name (works for non-fork repos)
+        }
+
         // 7. Open auto-PR via gh.
         // 砚砚 R4 P1 cloud: `--repo .` is NOT valid gh syntax (fails with
         // 'expected the "[HOST/]OWNER/REPO" format'). Rely on cwd inside the
@@ -118,6 +157,10 @@ export function createGitWorktreePublisher(deps: GitWorktreePublisherDeps): GitP
             description: 'F192 keep_observe + no actionable findings — interim per-run PR (rollup deferred)',
           },
         };
+        // Track successfully created labels — only pass these to gh pr create.
+        // If label creation fails (permissions/network/fork mismatch), omitting
+        // the --label flag is better than letting gh pr create fail entirely.
+        const successfulLabels: string[] = [];
         for (const label of labels ?? []) {
           const meta = standardLabelMeta[label];
           const args = ['label', 'create', label, '--force'];
@@ -126,13 +169,15 @@ export function createGitWorktreePublisher(deps: GitWorktreePublisherDeps): GitP
           }
           try {
             await exec('gh', args, { cwd: worktreePath, timeout: 15_000 });
+            successfulLabels.push(label);
           } catch (err) {
-            // Best-effort: surface error on gh pr create below if it actually breaks PR.
-            // (Swallowing here = avoid double-fail on label step; PR create will retry.)
+            // Label creation failed (e.g. insufficient permissions on upstream repo).
+            // Skip this label to avoid blocking gh pr create with a non-existent
+            // label reference (gh exits non-zero if --label references missing label).
             void err;
           }
         }
-        const labelFlags = (labels ?? []).flatMap((label) => ['--label', label]);
+        const labelFlags = successfulLabels.flatMap((label) => ['--label', label]);
         const prResult = await exec(
           'gh',
           [
@@ -141,7 +186,7 @@ export function createGitWorktreePublisher(deps: GitWorktreePublisherDeps): GitP
             '--base',
             'main',
             '--head',
-            opts.branchName,
+            headRef,
             '--title',
             prTitle,
             '--body',
