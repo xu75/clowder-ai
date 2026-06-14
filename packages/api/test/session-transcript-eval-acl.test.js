@@ -95,19 +95,21 @@ describe('F192 eval:sop — session transcript eval ACL', () => {
     const evalDomainIds = opts.evalDomainIds ?? ['eval:sop'];
     const redis = opts.redis ?? undefined;
 
-    const callbackRegistry = opts.callbackRegistry ?? mockCallbackRegistry([
-      {
-        invocationId: 'inv-eval-1',
-        callbackToken: 'tok-eval-1',
-        record: {
+    const callbackRegistry =
+      opts.callbackRegistry ??
+      mockCallbackRegistry([
+        {
           invocationId: 'inv-eval-1',
-          threadId: 'thread-1',
-          catId: EVAL_CAT_ID,
-          userId: 'user-1',
-          createdAt: Date.now(),
+          callbackToken: 'tok-eval-1',
+          record: {
+            invocationId: 'inv-eval-1',
+            threadId: 'thread-1',
+            catId: EVAL_CAT_ID,
+            userId: 'user-1',
+            createdAt: Date.now(),
+          },
         },
-      },
-    ]);
+      ]);
 
     const agentKeyRegistry = opts.agentKeyRegistry ?? undefined;
 
@@ -321,6 +323,87 @@ describe('F192 eval:sop — session transcript eval ACL', () => {
       headers: {
         'x-cat-cafe-user': 'user-1',
         'x-agent-key-secret': 'ak-secret-opus',
+      },
+    });
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.ok(Array.isArray(body.events));
+  });
+
+  // --- Agent-key eval cat positive path (isVerifiedEvalCat reads callbackPrincipal) ---
+
+  it('allows agent-key eval cat to cross-cat read (static eval set)', async () => {
+    const agentKeyRegistry = mockAgentKeyRegistry([
+      {
+        secret: 'ak-secret-eval',
+        record: {
+          agentKeyId: 'ak-eval-1',
+          catId: EVAL_CAT_ID, // in static evalCatIds set
+          userId: 'user-1',
+          secretHash: 'irrelevant',
+          salt: 'irrelevant',
+          scope: 'user-bound',
+          issuedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({ agentKeyRegistry });
+    const record = await createSession(sessionChainStore, writer); // owned by 'opus'
+
+    // Agent-key eval cat reads another cat's session → should succeed (not 403)
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-agent-key-secret': 'ak-secret-eval',
+      },
+    });
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.ok(Array.isArray(body.events));
+  });
+
+  it('allows agent-key eval cat to cross-cat read (OQ-20 Redis override)', async () => {
+    const redisData = {
+      'eval-domain:eval:sop:evalCat-override': JSON.stringify({
+        catId: OVERRIDE_CAT_ID,
+        handle: 'override-cat',
+        model: 'test-model',
+        setAt: new Date().toISOString(),
+      }),
+    };
+
+    const agentKeyRegistry = mockAgentKeyRegistry([
+      {
+        secret: 'ak-secret-override-eval',
+        record: {
+          agentKeyId: 'ak-eval-2',
+          catId: OVERRIDE_CAT_ID, // NOT in static set, but in Redis override
+          userId: 'user-1',
+          secretHash: 'irrelevant',
+          salt: 'irrelevant',
+          scope: 'user-bound',
+          issuedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({
+      evalCatIds: new Set([EVAL_CAT_ID]), // override NOT in static set
+      evalDomainIds: ['eval:sop'],
+      redis: mockRedis(redisData),
+      agentKeyRegistry,
+    });
+    const record = await createSession(sessionChainStore, writer); // owned by 'opus'
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-agent-key-secret': 'ak-secret-override-eval',
       },
     });
     assert.equal(res.statusCode, 200);
