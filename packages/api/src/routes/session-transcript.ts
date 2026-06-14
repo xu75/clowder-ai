@@ -100,6 +100,22 @@ function resolveCallerCatId(request: FastifyRequest): string | undefined {
   return request.headers['x-cat-id'] as string | undefined;
 }
 
+/**
+ * Resolve user identity preferring verified sources (callback/agent-key principal)
+ * over the spoofable x-cat-cafe-user header. Prevents cross-user read attacks
+ * where an attacker forges the user header while authenticated via agent-key.
+ */
+function resolveVerifiedUserId(request: FastifyRequest): string | null {
+  // Callback auth carries verified userId from InvocationRecord
+  const cbUserId = request.callbackAuth?.userId as string | undefined;
+  if (cbUserId) return cbUserId;
+  // Agent-key principal carries verified userId from AgentKeyRecord
+  const principalUserId = request.callbackPrincipal?.userId as string | undefined;
+  if (principalUserId) return principalUserId;
+  // Fallback to standard resolution (session cookie / header / origin)
+  return resolveUserId(request);
+}
+
 function checkCatIdAccess(
   request: FastifyRequest,
   sessionCatId: string,
@@ -142,7 +158,7 @@ export async function sessionTranscriptRoutes(
     Params: { sessionId: string };
     Querystring: { cursor?: string; limit?: string; view?: string };
   }>('/api/sessions/:sessionId/events', async (request, reply) => {
-    const userId = resolveUserId(request);
+    const userId = resolveVerifiedUserId(request);
     if (!userId) {
       reply.status(401);
       return { error: 'Identity required' };
@@ -213,7 +229,7 @@ export async function sessionTranscriptRoutes(
   app.get<{
     Params: { sessionId: string };
   }>('/api/sessions/:sessionId/digest', async (request, reply) => {
-    const userId = resolveUserId(request);
+    const userId = resolveVerifiedUserId(request);
     if (!userId) {
       reply.status(401);
       return { error: 'Identity required' };
@@ -250,7 +266,7 @@ export async function sessionTranscriptRoutes(
   app.get<{
     Params: { sessionId: string; invocationId: string };
   }>('/api/sessions/:sessionId/invocations/:invocationId', async (request, reply) => {
-    const userId = resolveUserId(request);
+    const userId = resolveVerifiedUserId(request);
     if (!userId) {
       reply.status(401);
       return { error: 'Identity required' };
@@ -293,7 +309,7 @@ export async function sessionTranscriptRoutes(
     Params: { threadId: string };
     Querystring: Record<string, string>;
   }>('/api/threads/:threadId/sessions/search', async (request, reply) => {
-    const userId = resolveUserId(request);
+    const userId = resolveVerifiedUserId(request);
     if (!userId) {
       reply.status(401);
       return { error: 'Identity required' };
@@ -314,10 +330,10 @@ export async function sessionTranscriptRoutes(
 
     const { q, cats, sessionIds, limit, scope } = parseResult.data;
 
-    // P0a enforcement: when x-cat-id header is present, force-filter to caller's own sessions only
+    // P0a enforcement: when caller has cat identity, force-filter to caller's own sessions only
     // Prevents game-playing cats from searching other cats' session content (KD-39)
-    // F192 eval:sop — eval cats are exempt (need cross-cat search for SOP predicate evaluation)
-    const callerCatId = request.headers['x-cat-id'] as string | undefined;
+    // F192 eval:sop — verified eval cats are exempt (need cross-cat search for SOP predicate evaluation)
+    const callerCatId = resolveCallerCatId(request);
     const isEvalCat = await isVerifiedEvalCat(request, evalCatIds ?? new Set(), redis, evalDomainIds);
     const catsArr = callerCatId && !isEvalCat ? [callerCatId] : cats?.split(',').filter(Boolean);
     const sessionIdsArr = sessionIds?.split(',').filter(Boolean);

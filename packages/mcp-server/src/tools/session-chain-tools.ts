@@ -38,6 +38,11 @@ function buildAuthHeaders(): Record<string, string> {
     headers['x-invocation-id'] = invocationId;
     headers['x-callback-token'] = callbackToken;
   }
+  // Forward agent-key secret for persistent MCP auth (F192 eval:sop ACL)
+  const agentKeySecret = process.env['CAT_CAFE_AGENT_KEY_SECRET'];
+  if (agentKeySecret) {
+    headers['x-agent-key-secret'] = agentKeySecret;
+  }
   return headers;
 }
 

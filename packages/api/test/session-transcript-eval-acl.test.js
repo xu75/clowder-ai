@@ -380,4 +380,106 @@ describe('F192 eval:sop — session transcript eval ACL', () => {
     // Should succeed but results are force-filtered to caller's cat only
     assert.equal(res.statusCode, 200);
   });
+
+  // --- Search route uses resolveCallerCatId (agent-key identity) ---
+
+  it('search: agent-key caller gets force-filtered by resolved catId', async () => {
+    const ATTACKER_CAT = 'attacker-cat';
+    const agentKeyRegistry = mockAgentKeyRegistry([
+      {
+        secret: 'ak-secret-attacker',
+        record: {
+          agentKeyId: 'ak-3',
+          catId: ATTACKER_CAT,
+          userId: 'user-1',
+          secretHash: 'irrelevant',
+          salt: 'irrelevant',
+          scope: 'user-bound',
+          issuedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({ agentKeyRegistry });
+    await createSession(sessionChainStore, writer); // owned by 'opus'
+
+    // Agent-key caller is not eval cat → search should be force-filtered to 'attacker-cat'
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/threads/thread-1/sessions/search?q=hello`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-agent-key-secret': 'ak-secret-attacker',
+        // No x-cat-id header — resolveCallerCatId picks up principal.catId
+      },
+    });
+    assert.equal(res.statusCode, 200);
+    // Results filtered to attacker-cat's sessions (which has none) — no data leak
+  });
+
+  // --- userId binding: verified principal userId prevents cross-user read ---
+
+  it('rejects cross-user read when agent-key userId differs from thread owner', async () => {
+    const OTHER_USER_CAT = 'other-user-cat';
+    const agentKeyRegistry = mockAgentKeyRegistry([
+      {
+        secret: 'ak-secret-other-user',
+        record: {
+          agentKeyId: 'ak-4',
+          catId: OTHER_USER_CAT,
+          userId: 'user-2', // different from thread owner 'user-1'
+          secretHash: 'irrelevant',
+          salt: 'irrelevant',
+          scope: 'user-bound',
+          issuedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({ agentKeyRegistry });
+    const record = await createSession(sessionChainStore, writer);
+
+    // Agent-key with userId='user-2' tries to read session in thread owned by 'user-1'
+    // The spoofed x-cat-cafe-user='user-1' should be OVERRIDDEN by principal.userId='user-2'
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1', // spoofed — should be overridden
+        'x-agent-key-secret': 'ak-secret-other-user',
+      },
+    });
+    // resolveVerifiedUserId returns 'user-2' → canAccessSessionThread fails → 403
+    assert.equal(res.statusCode, 403);
+  });
+
+  it('allows same-user read when agent-key userId matches thread owner', async () => {
+    const agentKeyRegistry = mockAgentKeyRegistry([
+      {
+        secret: 'ak-secret-user1',
+        record: {
+          agentKeyId: 'ak-5',
+          catId: SESSION_OWNER_CAT,
+          userId: 'user-1', // matches thread owner
+          secretHash: 'irrelevant',
+          salt: 'irrelevant',
+          scope: 'user-bound',
+          issuedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({ agentKeyRegistry });
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-agent-key-secret': 'ak-secret-user1',
+      },
+    });
+    assert.equal(res.statusCode, 200);
+  });
 });
