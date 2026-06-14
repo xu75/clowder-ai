@@ -8,14 +8,18 @@
  * GET  /api/threads/:threadId/sessions/search              — Full-text search
  */
 
-import type { FastifyInstance, FastifyPluginOptions } from 'fastify';
+import type { FastifyInstance, FastifyPluginOptions, FastifyRequest } from 'fastify';
+import type { Redis } from 'ioredis';
 import { z } from 'zod';
 import { formatEventsChat, formatEventsHandoff } from '../domains/cats/services/session/TranscriptFormatter.js';
 import type { TranscriptReader } from '../domains/cats/services/session/TranscriptReader.js';
 import type { ISessionChainStore } from '../domains/cats/services/stores/ports/SessionChainStore.js';
 import type { IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
+import { getEvalCatOverride } from '../infrastructure/harness-eval/domain/eval-domain-override.js';
 import { isSharedDefaultThread } from '../domains/guides/guide-state-access.js';
 import { resolveUserId } from '../utils/request-identity.js';
+import type { AgentKeyAuthRegistry, CallbackAuthRegistry } from './callback-auth-prehandler.js';
+import { registerCallbackAuthHook } from './callback-auth-prehandler.js';
 
 const VALID_VIEWS = new Set(['raw', 'chat', 'handoff']);
 
@@ -23,6 +27,16 @@ interface SessionTranscriptRouteOptions extends FastifyPluginOptions {
   sessionChainStore: ISessionChainStore;
   threadStore: IThreadStore;
   transcriptReader: TranscriptReader;
+  /** Static eval cat IDs from registry (F192 eval:sop). */
+  evalCatIds?: ReadonlySet<string>;
+  /** Domain IDs for OQ-20 Redis override resolution. */
+  evalDomainIds?: ReadonlyArray<string>;
+  /** Redis for OQ-20 eval cat override resolution. */
+  redis?: Redis;
+  /** Callback auth registry for verified cat identity (prevents x-cat-id spoofing). */
+  callbackRegistry?: CallbackAuthRegistry;
+  /** Agent-key registry for persistent MCP auth. */
+  agentKeyRegistry?: AgentKeyAuthRegistry;
 }
 
 /** Strict integer parse: only pure decimal digit strings (no whitespace, no partial) */
@@ -38,12 +52,65 @@ const searchSchema = z.object({
   scope: z.enum(['digests', 'transcripts', 'both']).optional(),
 });
 
-function checkCatIdAccess(request: { headers: Record<string, unknown> }, sessionCatId: string): string | null {
-  const callerCatId = request.headers['x-cat-id'] as string | undefined;
-  if (callerCatId && sessionCatId !== callerCatId) {
-    return 'Access denied: session belongs to a different cat';
+/**
+ * Resolve whether the caller is an effective eval cat using VERIFIED identity
+ * (callback auth principal, not spoofable x-cat-id header). Checks both static
+ * registry and OQ-20 Redis override for dynamic cat swaps.
+ */
+async function isVerifiedEvalCat(
+  request: FastifyRequest,
+  staticEvalCatIds: ReadonlySet<string>,
+  redis?: Redis,
+  evalDomainIds?: ReadonlyArray<string>,
+): Promise<boolean> {
+  // Require verified identity from callback auth (not raw header)
+  const verifiedCatId = request.callbackAuth?.catId as string | undefined;
+  if (!verifiedCatId) return false;
+
+  // Fast path: in static registry
+  if (staticEvalCatIds.has(verifiedCatId)) return true;
+
+  // Slow path: check OQ-20 Redis overrides (dynamic cat swap)
+  if (redis && evalDomainIds?.length) {
+    for (const domainId of evalDomainIds) {
+      try {
+        const override = await getEvalCatOverride(redis, domainId);
+        if (override?.catId === verifiedCatId) return true;
+      } catch {
+        // Redis failures are non-fatal — fall through to deny
+      }
+    }
   }
-  return null;
+  return false;
+}
+
+/**
+ * Resolve the caller's cat identity from the most authoritative source.
+ * Priority: verified callback auth > agent-key principal > raw header.
+ * Returns undefined for panel/frontend requests (no cat identity → user-level ACL sufficient).
+ */
+function resolveCallerCatId(request: FastifyRequest): string | undefined {
+  // Callback auth: verified via InvocationRegistry (highest trust)
+  const cbCatId = request.callbackAuth?.catId as string | undefined;
+  if (cbCatId) return cbCatId;
+  // Agent-key: verified via AgentKeyRegistry (medium trust)
+  const principalCatId = request.callbackPrincipal?.catId as string | undefined;
+  if (principalCatId) return principalCatId;
+  // Raw header: backward compat for MCP tools not yet forwarding callback creds
+  return request.headers['x-cat-id'] as string | undefined;
+}
+
+function checkCatIdAccess(
+  request: FastifyRequest,
+  sessionCatId: string,
+  callerIsEvalCat: boolean,
+): string | null {
+  const callerCatId = resolveCallerCatId(request);
+  if (!callerCatId) return null;
+  if (callerCatId === sessionCatId) return null;
+  // F192 eval:sop — only allow cross-cat reads for VERIFIED eval cats
+  if (callerIsEvalCat) return null;
+  return 'Access denied: session belongs to a different cat';
 }
 
 function canAccessSessionThread(
@@ -61,7 +128,14 @@ export async function sessionTranscriptRoutes(
   app: FastifyInstance,
   opts: SessionTranscriptRouteOptions,
 ): Promise<void> {
-  const { sessionChainStore, threadStore, transcriptReader } = opts;
+  const { sessionChainStore, threadStore, transcriptReader, evalCatIds, evalDomainIds, redis, callbackRegistry, agentKeyRegistry } = opts;
+
+  // Register callback auth hook so request.callbackAuth is populated with
+  // verified cat identity when MCP tools call these routes via callbackPost.
+  // Panel/frontend requests (no callback creds) are unaffected (hook no-ops).
+  if (callbackRegistry) {
+    registerCallbackAuthHook(app, callbackRegistry, { agentKeyRegistry });
+  }
 
   // GET /api/sessions/:sessionId/events — Paginated event read (F98: view modes)
   app.get<{
@@ -86,7 +160,8 @@ export async function sessionTranscriptRoutes(
       return { error: 'Access denied' };
     }
 
-    const callerCatIdErr = checkCatIdAccess(request, session.catId);
+    const isEval = await isVerifiedEvalCat(request, evalCatIds ?? new Set(), redis, evalDomainIds);
+    const callerCatIdErr = checkCatIdAccess(request, session.catId, isEval);
     if (callerCatIdErr) {
       reply.status(403);
       return { error: callerCatIdErr };
@@ -156,7 +231,8 @@ export async function sessionTranscriptRoutes(
       return { error: 'Access denied' };
     }
 
-    const callerCatIdErr2 = checkCatIdAccess(request, session.catId);
+    const isEval2 = await isVerifiedEvalCat(request, evalCatIds ?? new Set(), redis, evalDomainIds);
+    const callerCatIdErr2 = checkCatIdAccess(request, session.catId, isEval2);
     if (callerCatIdErr2) {
       reply.status(403);
       return { error: callerCatIdErr2 };
@@ -192,7 +268,8 @@ export async function sessionTranscriptRoutes(
       return { error: 'Access denied' };
     }
 
-    const callerCatIdErr3 = checkCatIdAccess(request, session.catId);
+    const isEval3 = await isVerifiedEvalCat(request, evalCatIds ?? new Set(), redis, evalDomainIds);
+    const callerCatIdErr3 = checkCatIdAccess(request, session.catId, isEval3);
     if (callerCatIdErr3) {
       reply.status(403);
       return { error: callerCatIdErr3 };
@@ -239,8 +316,10 @@ export async function sessionTranscriptRoutes(
 
     // P0a enforcement: when x-cat-id header is present, force-filter to caller's own sessions only
     // Prevents game-playing cats from searching other cats' session content (KD-39)
+    // F192 eval:sop — eval cats are exempt (need cross-cat search for SOP predicate evaluation)
     const callerCatId = request.headers['x-cat-id'] as string | undefined;
-    const catsArr = callerCatId ? [callerCatId] : cats?.split(',').filter(Boolean);
+    const isEvalCat = await isVerifiedEvalCat(request, evalCatIds ?? new Set(), redis, evalDomainIds);
+    const catsArr = callerCatId && !isEvalCat ? [callerCatId] : cats?.split(',').filter(Boolean);
     const sessionIdsArr = sessionIds?.split(',').filter(Boolean);
 
     const hits = await transcriptReader.search(threadId, q, {

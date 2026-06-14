@@ -1,0 +1,383 @@
+/**
+ * Session Transcript Eval ACL Tests — F192 eval:sop
+ *
+ * Verifies that eval cat session read bypass:
+ * - Requires VERIFIED callback auth (not just x-cat-id header)
+ * - Supports OQ-20 Redis override (dynamic eval cat swap)
+ * - Rejects spoofed x-cat-id without callback auth
+ */
+
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, it } from 'node:test';
+import Fastify from 'fastify';
+
+function mockThreadStore(threads = {}) {
+  return {
+    get: async (id) => threads[id] ?? null,
+    list: async () => Object.values(threads),
+    create: async () => {},
+    update: async () => null,
+    delete: async () => false,
+  };
+}
+
+/**
+ * Mock CallbackAuthRegistry that verifies specific invocation/token pairs
+ * and returns an InvocationRecord with the given catId.
+ */
+function mockCallbackRegistry(validEntries = []) {
+  // validEntries: [{ invocationId, callbackToken, record }]
+  const map = new Map(validEntries.map((e) => [`${e.invocationId}:${e.callbackToken}`, e.record]));
+  return {
+    verify: async (invocationId, callbackToken) => {
+      const record = map.get(`${invocationId}:${callbackToken}`);
+      if (record) return { ok: true, record };
+      return { ok: false, reason: 'unknown_invocation' };
+    },
+  };
+}
+
+/** Mock Redis that returns JSON for specific keys (for OQ-20 override). */
+function mockRedis(kvStore = {}) {
+  return { get: async (key) => kvStore[key] ?? null };
+}
+
+/**
+ * Mock AgentKeyAuthRegistry that verifies specific secrets
+ * and returns an AgentKeyRecord with the given catId.
+ */
+function mockAgentKeyRegistry(validEntries = []) {
+  // validEntries: [{ secret, record }]
+  const map = new Map(validEntries.map((e) => [e.secret, e.record]));
+  return {
+    verify: async (secret) => {
+      const record = map.get(secret);
+      if (record) return { ok: true, record };
+      return { ok: false, reason: 'invalid_key' };
+    },
+  };
+}
+
+describe('F192 eval:sop — session transcript eval ACL', () => {
+  let app;
+  let tmpDir;
+
+  const THREAD = { id: 'thread-1', createdBy: 'user-1' };
+  const EVAL_CAT_ID = 'eval-sop-cat';
+  const OVERRIDE_CAT_ID = 'override-eval-cat';
+  const SESSION_OWNER_CAT = 'opus';
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'eval-acl-'));
+  });
+
+  afterEach(async () => {
+    if (app) await app.close();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  async function setup(opts = {}) {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const { TranscriptWriter } = await import('../dist/domains/cats/services/session/TranscriptWriter.js');
+    const { TranscriptReader } = await import('../dist/domains/cats/services/session/TranscriptReader.js');
+    const { sessionTranscriptRoutes } = await import('../dist/routes/session-transcript.js');
+
+    const sessionChainStore = new SessionChainStore();
+    const threadStore = mockThreadStore({ 'thread-1': THREAD });
+    const transcriptReader = new TranscriptReader({ dataDir: tmpDir });
+    const writer = new TranscriptWriter({ dataDir: tmpDir });
+
+    // Default: eval cat in static set, with callback registry that verifies it
+    const evalCatIds = opts.evalCatIds ?? new Set([EVAL_CAT_ID]);
+    const evalDomainIds = opts.evalDomainIds ?? ['eval:sop'];
+    const redis = opts.redis ?? undefined;
+
+    const callbackRegistry = opts.callbackRegistry ?? mockCallbackRegistry([
+      {
+        invocationId: 'inv-eval-1',
+        callbackToken: 'tok-eval-1',
+        record: {
+          invocationId: 'inv-eval-1',
+          threadId: 'thread-1',
+          catId: EVAL_CAT_ID,
+          userId: 'user-1',
+          createdAt: Date.now(),
+        },
+      },
+    ]);
+
+    const agentKeyRegistry = opts.agentKeyRegistry ?? undefined;
+
+    app = Fastify();
+    await app.register(sessionTranscriptRoutes, {
+      sessionChainStore,
+      threadStore,
+      transcriptReader,
+      evalCatIds,
+      evalDomainIds,
+      redis,
+      callbackRegistry,
+      agentKeyRegistry,
+    });
+    await app.ready();
+
+    return { sessionChainStore, writer, transcriptReader };
+  }
+
+  async function createSession(sessionChainStore, writer, catId = SESSION_OWNER_CAT) {
+    const record = sessionChainStore.create({
+      cliSessionId: 'cli-1',
+      threadId: 'thread-1',
+      catId,
+      userId: 'user-1',
+    });
+    const sessInfo = {
+      sessionId: record.id,
+      threadId: 'thread-1',
+      catId,
+      cliSessionId: 'cli-1',
+      seq: 0,
+    };
+    writer.appendEvent(sessInfo, { type: 'user', content: [{ type: 'text', text: 'Hello' }] }, 'inv-1');
+    writer.appendEvent(sessInfo, { type: 'assistant', content: [{ type: 'text', text: 'Hi' }] }, 'inv-1');
+    sessionChainStore.update(record.id, { status: 'sealed' });
+    await writer.flush(sessInfo, { createdAt: 1000, sealedAt: 2000 });
+    return record;
+  }
+
+  // --- P1: x-cat-id spoofing prevention ---
+
+  it('rejects cross-cat read with ONLY x-cat-id header (no callback auth)', async () => {
+    const { sessionChainStore, writer } = await setup();
+    const record = await createSession(sessionChainStore, writer);
+
+    // Attacker sends x-cat-id claiming to be eval cat, but no callback creds
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': EVAL_CAT_ID, // spoofed — not verified
+      },
+    });
+    // Session belongs to 'opus', caller claims 'eval-sop-cat' without proof → 403
+    assert.equal(res.statusCode, 403);
+    const body = JSON.parse(res.body);
+    assert.ok(body.error.includes('Access denied'));
+  });
+
+  // --- P1: verified callback auth allows cross-cat read ---
+
+  it('allows cross-cat read with verified callback auth (static eval cat)', async () => {
+    const { sessionChainStore, writer } = await setup();
+    const record = await createSession(sessionChainStore, writer);
+
+    // Eval cat sends both x-cat-id AND valid callback creds → verified
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': EVAL_CAT_ID,
+        'x-invocation-id': 'inv-eval-1',
+        'x-callback-token': 'tok-eval-1',
+      },
+    });
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.ok(Array.isArray(body.events));
+  });
+
+  // --- P1: OQ-20 Redis override support ---
+
+  it('allows cross-cat read for OQ-20 Redis override eval cat', async () => {
+    // Redis returns override entry mapping OVERRIDE_CAT_ID to eval:sop domain
+    const redisData = {
+      'eval-domain:eval:sop:evalCat-override': JSON.stringify({
+        catId: OVERRIDE_CAT_ID,
+        handle: 'override-cat',
+        model: 'test-model',
+        setAt: new Date().toISOString(),
+      }),
+    };
+
+    const callbackRegistry = mockCallbackRegistry([
+      {
+        invocationId: 'inv-override-1',
+        callbackToken: 'tok-override-1',
+        record: {
+          invocationId: 'inv-override-1',
+          threadId: 'thread-1',
+          catId: OVERRIDE_CAT_ID,
+          userId: 'user-1',
+          createdAt: Date.now(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({
+      evalCatIds: new Set([EVAL_CAT_ID]), // override cat NOT in static set
+      evalDomainIds: ['eval:sop'],
+      redis: mockRedis(redisData),
+      callbackRegistry,
+    });
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': OVERRIDE_CAT_ID,
+        'x-invocation-id': 'inv-override-1',
+        'x-callback-token': 'tok-override-1',
+      },
+    });
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.ok(Array.isArray(body.events));
+  });
+
+  // --- Same-cat access still works without callback auth ---
+
+  it('allows same-cat read without callback auth (x-cat-id matches session)', async () => {
+    const { sessionChainStore, writer } = await setup();
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': SESSION_OWNER_CAT, // matches session catId
+      },
+    });
+    assert.equal(res.statusCode, 200);
+  });
+
+  // --- Agent-key ACL hardening (resolveCallerCatId picks up callbackPrincipal) ---
+
+  it('rejects agent-key caller reading another cat session (no x-cat-id header)', async () => {
+    const ATTACKER_CAT = 'attacker-cat';
+    const agentKeyRegistry = mockAgentKeyRegistry([
+      {
+        secret: 'ak-secret-attacker',
+        record: {
+          agentKeyId: 'ak-1',
+          catId: ATTACKER_CAT,
+          userId: 'user-1',
+          secretHash: 'irrelevant',
+          salt: 'irrelevant',
+          scope: 'user-bound',
+          issuedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({ agentKeyRegistry });
+    const record = await createSession(sessionChainStore, writer); // owned by SESSION_OWNER_CAT='opus'
+
+    // Agent-key caller with catId='attacker-cat', NO x-cat-id header
+    // resolveCallerCatId should pick up callbackPrincipal.catId → 403
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-agent-key-secret': 'ak-secret-attacker',
+        // deliberately NO x-cat-id — testing that principal.catId is used
+      },
+    });
+    assert.equal(res.statusCode, 403);
+    const body = JSON.parse(res.body);
+    assert.ok(body.error.includes('Access denied'));
+  });
+
+  it('allows agent-key caller reading own session (catId matches)', async () => {
+    const agentKeyRegistry = mockAgentKeyRegistry([
+      {
+        secret: 'ak-secret-opus',
+        record: {
+          agentKeyId: 'ak-2',
+          catId: SESSION_OWNER_CAT, // 'opus' — matches session owner
+          userId: 'user-1',
+          secretHash: 'irrelevant',
+          salt: 'irrelevant',
+          scope: 'user-bound',
+          issuedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({ agentKeyRegistry });
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/events`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-agent-key-secret': 'ak-secret-opus',
+      },
+    });
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.ok(Array.isArray(body.events));
+  });
+
+  // --- Digest endpoint uses same verified auth ---
+
+  it('digest: rejects spoofed x-cat-id without callback auth', async () => {
+    const { sessionChainStore, writer } = await setup();
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/digest`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': EVAL_CAT_ID,
+      },
+    });
+    assert.equal(res.statusCode, 403);
+  });
+
+  it('digest: allows verified eval cat cross-cat read', async () => {
+    const { sessionChainStore, writer } = await setup();
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/digest`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': EVAL_CAT_ID,
+        'x-invocation-id': 'inv-eval-1',
+        'x-callback-token': 'tok-eval-1',
+      },
+    });
+    // Digest may be 200 or 404 (if digest file missing) — but NOT 403
+    assert.notEqual(res.statusCode, 403);
+  });
+
+  // --- Search endpoint uses verified auth for cat filter bypass ---
+
+  it('search: spoofed eval cat header gets force-filtered to own sessions', async () => {
+    const { sessionChainStore, writer } = await setup();
+    await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/threads/thread-1/sessions/search?q=hello`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': EVAL_CAT_ID, // spoofed, no callback creds
+      },
+    });
+    // Should succeed but results are force-filtered to caller's cat only
+    assert.equal(res.statusCode, 200);
+  });
+});

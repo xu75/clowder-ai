@@ -30,6 +30,14 @@ function buildAuthHeaders(): Record<string, string> {
   };
   const catId = resolveToolCatId();
   if (catId) headers['x-cat-id'] = catId;
+  // Forward invocation credentials so the API can verify caller identity
+  // (required for eval cat cross-cat session read bypass — F192 eval:sop)
+  const invocationId = process.env['CAT_CAFE_INVOCATION_ID'];
+  const callbackToken = process.env['CAT_CAFE_CALLBACK_TOKEN'];
+  if (invocationId && callbackToken) {
+    headers['x-invocation-id'] = invocationId;
+    headers['x-callback-token'] = callbackToken;
+  }
   return headers;
 }
 
