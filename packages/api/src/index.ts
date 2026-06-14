@@ -2573,7 +2573,9 @@ async function main(): Promise<void> {
     }
   } catch {
     // Non-fatal: if domain registry is missing/broken, eval cats just can't cross-read
-    app.log.warn('[api] F192: could not load eval domain registry for session ACL — eval cats will get 403 on cross-cat reads');
+    app.log.warn(
+      '[api] F192: could not load eval domain registry for session ACL — eval cats will get 403 on cross-cat reads',
+    );
   }
   await app.register(sessionTranscriptRoutes, {
     sessionChainStore,

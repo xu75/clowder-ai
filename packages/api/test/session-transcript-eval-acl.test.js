@@ -565,4 +565,157 @@ describe('F192 eval:sop — session transcript eval ACL', () => {
     });
     assert.equal(res.statusCode, 200);
   });
+
+  // --- P2: Invocation endpoint eval ACL (positive + negative) ---
+
+  it('invocation: rejects spoofed x-cat-id cross-cat read (no callback auth)', async () => {
+    const { sessionChainStore, writer } = await setup();
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/invocations/inv-1`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': EVAL_CAT_ID, // spoofed
+      },
+    });
+    assert.equal(res.statusCode, 403);
+    const body = JSON.parse(res.body);
+    assert.ok(body.error.includes('Access denied'));
+  });
+
+  it('invocation: allows verified eval cat cross-cat read', async () => {
+    const { sessionChainStore, writer } = await setup();
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/invocations/inv-1`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': EVAL_CAT_ID,
+        'x-invocation-id': 'inv-eval-1',
+        'x-callback-token': 'tok-eval-1',
+      },
+    });
+    // Should be 200 (found) or 404 (invocation not in transcript) — NOT 403
+    assert.notEqual(res.statusCode, 403);
+  });
+
+  it('invocation: allows agent-key eval cat cross-cat read', async () => {
+    const agentKeyRegistry = mockAgentKeyRegistry([
+      {
+        secret: 'ak-secret-eval-inv',
+        record: {
+          agentKeyId: 'ak-eval-inv',
+          catId: EVAL_CAT_ID,
+          userId: 'user-1',
+          secretHash: 'irrelevant',
+          salt: 'irrelevant',
+          scope: 'user-bound',
+          issuedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+
+    const { sessionChainStore, writer } = await setup({ agentKeyRegistry });
+    const record = await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${record.id}/invocations/inv-1`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-agent-key-secret': 'ak-secret-eval-inv',
+      },
+    });
+    assert.notEqual(res.statusCode, 403);
+  });
+
+  // --- P2: Search endpoint — scope assertion (verify force-filter works) ---
+
+  it('search: non-eval cat results are limited to own sessions only', async () => {
+    const { sessionChainStore, writer } = await setup();
+    // Create session owned by 'opus'
+    await createSession(sessionChainStore, writer, SESSION_OWNER_CAT);
+
+    // Search as 'other-cat' (not eval) — should get 200 but no hits from opus sessions
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/threads/thread-1/sessions/search?q=Hello`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': 'other-cat', // not eval, not session owner
+      },
+    });
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    // Force-filtered to 'other-cat' sessions which has none — hits must be empty
+    assert.ok(Array.isArray(body.hits));
+    assert.equal(body.hits.length, 0);
+  });
+
+  it('search: verified eval cat can see cross-cat results', async () => {
+    const { sessionChainStore, writer } = await setup();
+    // Create session owned by 'opus' with searchable content
+    await createSession(sessionChainStore, writer, SESSION_OWNER_CAT);
+
+    // Search as verified eval cat — should NOT be force-filtered
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/threads/thread-1/sessions/search?q=Hello`,
+      headers: {
+        'x-cat-cafe-user': 'user-1',
+        'x-cat-id': EVAL_CAT_ID,
+        'x-invocation-id': 'inv-eval-1',
+        'x-callback-token': 'tok-eval-1',
+      },
+    });
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    // Eval cat is exempt from force-filter — may see opus sessions
+    assert.ok(Array.isArray(body.hits));
+    // Note: hits may be 0 if full-text index is empty in test, but importantly no 403
+  });
+
+  // --- P2: Search schema validation ---
+
+  it('search: rejects missing query parameter', async () => {
+    const { sessionChainStore, writer } = await setup();
+    await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/threads/thread-1/sessions/search`,
+      headers: { 'x-cat-cafe-user': 'user-1' },
+    });
+    assert.equal(res.statusCode, 400);
+    const body = JSON.parse(res.body);
+    assert.ok(body.error);
+  });
+
+  it('search: accepts valid scope parameter', async () => {
+    const { sessionChainStore, writer } = await setup();
+    await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/threads/thread-1/sessions/search?q=test&scope=digests`,
+      headers: { 'x-cat-cafe-user': 'user-1' },
+    });
+    assert.equal(res.statusCode, 200);
+  });
+
+  it('search: rejects invalid scope parameter', async () => {
+    const { sessionChainStore, writer } = await setup();
+    await createSession(sessionChainStore, writer);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/threads/thread-1/sessions/search?q=test&scope=invalid`,
+      headers: { 'x-cat-cafe-user': 'user-1' },
+    });
+    assert.equal(res.statusCode, 400);
+  });
 });
