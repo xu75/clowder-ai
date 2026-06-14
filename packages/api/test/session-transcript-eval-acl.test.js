@@ -599,8 +599,12 @@ describe('F192 eval:sop — session transcript eval ACL', () => {
         'x-callback-token': 'tok-eval-1',
       },
     });
-    // Should be 200 (found) or 404 (invocation not in transcript) — NOT 403
-    assert.notEqual(res.statusCode, 403);
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.invocationId, 'inv-1');
+    assert.ok(Array.isArray(body.events));
+    assert.ok(body.events.length > 0, 'expected at least 1 event for inv-1');
+    assert.equal(body.total, body.events.length);
   });
 
   it('invocation: allows agent-key eval cat cross-cat read', async () => {
@@ -630,7 +634,12 @@ describe('F192 eval:sop — session transcript eval ACL', () => {
         'x-agent-key-secret': 'ak-secret-eval-inv',
       },
     });
-    assert.notEqual(res.statusCode, 403);
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.invocationId, 'inv-1');
+    assert.ok(Array.isArray(body.events));
+    assert.ok(body.events.length > 0, 'expected at least 1 event for inv-1');
+    assert.equal(body.total, body.events.length);
   });
 
   // --- P2: Search endpoint — scope assertion (verify force-filter works) ---
@@ -658,7 +667,7 @@ describe('F192 eval:sop — session transcript eval ACL', () => {
 
   it('search: verified eval cat can see cross-cat results', async () => {
     const { sessionChainStore, writer } = await setup();
-    // Create session owned by 'opus' with searchable content
+    // Create session owned by 'opus' with searchable content ("Hello")
     await createSession(sessionChainStore, writer, SESSION_OWNER_CAT);
 
     // Search as verified eval cat — should NOT be force-filtered
@@ -674,9 +683,9 @@ describe('F192 eval:sop — session transcript eval ACL', () => {
     });
     assert.equal(res.statusCode, 200);
     const body = JSON.parse(res.body);
-    // Eval cat is exempt from force-filter — may see opus sessions
     assert.ok(Array.isArray(body.hits));
-    // Note: hits may be 0 if full-text index is empty in test, but importantly no 403
+    // Eval cat is exempt from force-filter → sees opus's session content containing "Hello"
+    assert.ok(body.hits.length > 0, 'eval cat bypass must produce hits (non-eval same query gets 0)');
   });
 
   // --- P2: Search schema validation ---
