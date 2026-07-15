@@ -114,6 +114,20 @@ export function resolveFrontendCorsOrigins(env: NodeJS.ProcessEnv, logger?: Warn
     logger?.warn({ frontendPort: rawFrontendPort }, '[cors] Invalid FRONTEND_PORT, fallback to default origins');
   }
 
+  // CORS_ORIGINS: comma-separated list of additional allowed origins (e.g. FRP remote access).
+  // Separate from FRONTEND_URL which is used for screenshot export only.
+  const rawCorsOrigins = env.CORS_ORIGINS?.trim();
+  if (rawCorsOrigins) {
+    for (const raw of rawCorsOrigins.split(',')) {
+      const normalized = normalizeConfiguredOrigin(raw.trim());
+      if (normalized) {
+        origins.add(normalized);
+      } else if (raw.trim()) {
+        logger?.warn({ corsOrigin: raw.trim() }, '[cors] Invalid entry in CORS_ORIGINS, ignored');
+      }
+    }
+  }
+
   const result: (string | RegExp)[] = [...origins];
   // F156: Loopback is always safe — same machine, different from LAN.
   result.push(LOOPBACK_ORIGIN);
