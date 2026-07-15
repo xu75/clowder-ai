@@ -15,6 +15,7 @@ import { dirname } from 'node:path';
 import type { McpServerDescriptor } from '@cat-cafe/shared';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { createModuleLogger } from '../../infrastructure/logger.js';
+import { findMonorepoRoot } from '../../utils/monorepo-root.js';
 import { DEPRECATED_MANAGED_SERVERS, isOurOwnedDeprecatedEntry } from './deprecated-managed-servers.js';
 
 /**
@@ -112,7 +113,7 @@ export function resolveWorkspaceRoot(): string {
         `user workspace. Update runtime startup to export CAT_CAFE_WORKSPACE_ROOT.`,
     );
   }
-  return process.cwd();
+  return findMonorepoRoot(process.cwd());
 }
 
 /**

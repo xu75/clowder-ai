@@ -1,9 +1,9 @@
 {
   "entries": [
     {
-      "packVersion": "1.3.0",
-      "checksum": "73e4bf742d44",
-      "syncedAt": 1780812187674,
+      "packVersion": "1.4.1",
+      "checksum": "aa9b05eecf64",
+      "syncedAt": 1784099930802,
       "confirmedByUser": true,
       "projectPath": "/Users/xujinsong/VSCode/SynologyDrive/quant-strategy"
     },
@@ -20,6 +20,286 @@
       "syncedAt": 1779867929947,
       "confirmedByUser": true,
       "projectPath": "/Users/xujinsong/VSCode/SynologyDrive/Quant-Run"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097077032,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-e53a8c21-ec7a-4bcb-bbea-a3fe2ba7cb37/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097077402,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-96de4946-448a-4a04-9add-4195f57e92c2/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097108345,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-36ed4d21-f024-425f-ad80-2b7c07ff7d86"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097108686,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-623a1a0e-41fd-4671-ba31-efe81fbe15f8"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097198670,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-49491347-11bf-4864-87fd-f358fbfa54ba/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097198917,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-a76b90a9-15c8-4360-97b8-92dd6115ccd4/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097234413,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-45362fee-1b19-486d-a06a-f072360048cd"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097234762,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-de89b95b-6828-4631-abef-cb66ddd277c6"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097345970,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-15e4dee1-18f9-4163-a47f-8e85ce707b8f/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097346337,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-d501cf0a-ba8c-47e7-b03c-2e3e90325912/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097382060,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-935cbe4b-2812-4e39-8935-6829c484d706"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097382456,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-a971d50e-d840-4f62-b7f6-c67887081ed9"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097488659,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-5f294ff8-014e-46fe-9780-59ee3670d5d9/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097488866,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-bb78ef28-886b-4b50-913f-d884f1b6abb1/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097523948,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-15e3d438-4944-4bad-80fc-abacf1cbf9cc"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097524276,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-fee3cbf4-0d78-45b6-a2a5-82161d9878de"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097629237,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-ae56f770-4170-4fe0-b68a-ed2a56be99b1/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097629397,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-c679e979-560f-43cf-8b50-1088f1bbb779/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097663908,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-2ef8013c-2806-40cf-9766-680ab28e77b7"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097664288,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-9731c98f-a7d2-4b12-b9f8-6b1d610a5c94"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097768737,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-48e8720c-90f0-429f-97e5-ea9b9f040fbd/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097768976,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-f82f4861-5abc-429b-b15f-dac2a346ab91/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097803836,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-6a3be758-f858-4b80-8f31-d77c7c02b251"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097804181,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-2b918968-89cc-4d0a-9cc8-66b84c4f83ec"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097918679,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-b1e6d5a8-a7b5-47dd-8457-abc6924bb12b/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097919050,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-082c3815-cb1c-43ef-884d-b8505d8fd256/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097954459,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-1492253f-da9c-4621-9966-ed9ad3ffe9b3"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784097954910,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-3a497485-8836-4c13-9065-2549562e4a7f"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098066389,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-4d503380-5804-48f4-ba53-8b3e8482f0de/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098066693,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-d278ced0-0b91-4462-af92-22e7c1d15acf/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098104259,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-68c5fc11-52d0-49e4-b24e-986226c246f4"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098104645,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-c38b64bc-137e-4a02-91f1-7a6b19e8f605"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098215793,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-33adbe96-7ce1-4c6e-83bc-9d7489c5bf03/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098216170,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-1ac51a98-6a19-402c-81dd-9b336dec0365/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098253104,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-e322a300-973a-4bc2-8b46-50eb8f90b846"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098253553,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-53aa907c-a2c7-449d-8f13-79df77688c5e"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098365236,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-38945efb-bd02-4568-910a-445aabf53ae6/my-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098365497,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-flow-e122a163-2089-4668-b2fc-0057f354b5ea/skip-project"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098400071,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-7f0089b5-6553-40c7-a23a-9f95b23539be"
+    },
+    {
+      "packVersion": "1.4.1",
+      "checksum": "78cc6d78e95e",
+      "syncedAt": 1784098400445,
+      "confirmedByUser": true,
+      "projectPath": "/private/var/folders/y8/0h_kl0fx3c391rhxmhlfghpm0000gn/T/setup-test-82aeb277-0e84-40d7-bde8-5a03ec419ad7"
     }
   ]
 }

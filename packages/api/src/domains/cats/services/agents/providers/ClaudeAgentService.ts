@@ -18,7 +18,16 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { type CatId, createCatId } from '@cat-cafe/shared';
+import { type CatId, createCatId, type McpServerDescriptor } from '@cat-cafe/shared';
+import {
+  buildCatCafeSplitMcpDescriptors,
+  readCapabilitiesConfig,
+  resolveBinaryRoot,
+  resolveMachineSpecificServers,
+  resolveRequiredMcpStatus,
+  resolveServersForCat,
+} from '../../../../../config/capabilities/capability-orchestrator.js';
+import { resolveStartupCliConfigContext } from '../../../../../config/capabilities/startup-cli-config.js';
 import { getCatEffort } from '../../../../../config/cat-config-loader.js';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
@@ -27,6 +36,7 @@ import { formatCliExitError } from '../../../../../utils/cli-format.js';
 import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/cli-resolve.js';
 import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
+import { findMonorepoRoot } from '../../../../../utils/monorepo-root.js';
 import { CliRawArchive } from '../../session/CliRawArchive.js';
 import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata } from '../../types.js';
 import type { RawArchiveSink } from '../providers/codex-audit-hooks.js';
@@ -40,6 +50,15 @@ import { compileL0ViaSubprocess } from './l0-compiler.js';
 const log = createModuleLogger('claude-agent');
 
 const PERMISSION_MODE = 'bypassPermissions';
+const CLAUDE_RUNTIME_SKIPPED_EXTERNAL_IDS = new Set(['probe-off']);
+const MANAGED_CAT_CAFE_SERVER_IDS = new Set([
+  'cat-cafe-collab',
+  'cat-cafe-memory',
+  'cat-cafe-signals',
+  'cat-cafe-limb',
+  'cat-cafe-audio',
+  'cat-cafe-finance',
+]);
 const RESERVED_SYSTEM_PROMPT_FLAGS = new Set([
   '--system-prompt-file',
   '--system-prompt',
@@ -160,6 +179,107 @@ function removeAppendPromptTempDir(path: string | undefined): void {
   } catch (err) {
     log.warn({ err, promptDir }, 'Failed to remove Claude append-prompt temp directory');
   }
+}
+
+function writeClaudeMcpConfigToTempFile(config: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-claude-mcp-'));
+  const path = join(dir, 'mcp-config.json');
+  writeFileSync(path, JSON.stringify(config), 'utf8');
+  return path;
+}
+
+function removeClaudeMcpConfigTempDir(path: string | undefined): void {
+  if (!path) return;
+  const configDir = dirname(path);
+  try {
+    rmSync(configDir, { recursive: true, force: true });
+  } catch (err) {
+    log.warn({ err, configDir }, 'Failed to remove Claude MCP temp directory');
+  }
+}
+
+function resolveClaudeWorkspaceRoot(workingDirectory?: string): string {
+  const explicitAllowed = process.env.ALLOWED_WORKSPACE_DIRS?.trim();
+  if (explicitAllowed) return explicitAllowed;
+  const threadWorkspace = workingDirectory?.trim();
+  if (threadWorkspace) return resolve(threadWorkspace);
+  const explicitWorkspace = process.env.CAT_CAFE_WORKSPACE_ROOT?.trim();
+  if (explicitWorkspace) return explicitWorkspace;
+  return findMonorepoRoot(process.cwd());
+}
+
+function toClaudeMcpConfigEntry(
+  server: McpServerDescriptor,
+  allowedWorkspaceDirs: string,
+): Record<string, unknown> | null {
+  if (server.transport === 'streamableHttp') {
+    if (!server.url?.trim()) return null;
+    const entry: Record<string, unknown> = { type: 'http', url: server.url };
+    if (server.headers && Object.keys(server.headers).length > 0) entry.headers = server.headers;
+    return entry;
+  }
+  if (!server.command?.trim()) return null;
+  const entry: Record<string, unknown> = { command: server.command, args: server.args ?? [] };
+  const env =
+    server.source === 'cat-cafe'
+      ? { ...(server.env ?? {}), ALLOWED_WORKSPACE_DIRS: allowedWorkspaceDirs }
+      : server.env;
+  if (env && Object.keys(env).length > 0) entry.env = env;
+  if (server.workingDir?.trim()) entry.cwd = server.workingDir;
+  return entry;
+}
+
+async function buildClaudeInvocationMcpConfig(
+  catId: CatId,
+  workingDirectory?: string,
+): Promise<{ mcpServers: Record<string, unknown> } | null> {
+  const start = workingDirectory ?? process.cwd();
+  const { projectRoot } = resolveStartupCliConfigContext(start, process.env);
+  const capabilities = await readCapabilitiesConfig(projectRoot);
+  if (!capabilities) return null;
+
+  const servers = resolveServersForCat(capabilities, catId as string);
+  if (servers.length === 0) return null;
+
+  await resolveMachineSpecificServers({ anthropic: servers }, { projectRoot, env: process.env });
+
+  const managedServers = new Map(
+    buildCatCafeSplitMcpDescriptors(resolveBinaryRoot()).map((server) => [server.name, server] as const),
+  );
+  const allowedWorkspaceDirs = resolveClaudeWorkspaceRoot(workingDirectory);
+  const mcpServers: Record<string, unknown> = {};
+
+  for (const server of servers) {
+    if (!server.enabled) continue;
+    if (server.name === 'cat-cafe') continue;
+
+    if (server.source === 'cat-cafe' || MANAGED_CAT_CAFE_SERVER_IDS.has(server.name)) {
+      const canonical = managedServers.get(server.name);
+      if (!canonical) continue;
+      const entry = toClaudeMcpConfigEntry(canonical, allowedWorkspaceDirs);
+      if (entry) mcpServers[server.name] = entry;
+      continue;
+    }
+
+    if (CLAUDE_RUNTIME_SKIPPED_EXTERNAL_IDS.has(server.name)) {
+      log.info({ catId, serverName: server.name }, 'Skipping deprecated external MCP server for Claude runtime');
+      continue;
+    }
+
+    const status = await resolveRequiredMcpStatus(server.name, { capabilities, env: process.env, projectRoot });
+    if (status.status !== 'ready') {
+      log.info(
+        { catId, serverName: server.name, status: status.status, reason: status.reason },
+        'Skipping unresolved external MCP server for Claude runtime',
+      );
+      continue;
+    }
+
+    const entry = toClaudeMcpConfigEntry(server, allowedWorkspaceDirs);
+    if (entry) mcpServers[server.name] = entry;
+  }
+
+  return Object.keys(mcpServers).length > 0 ? { mcpServers } : null;
 }
 
 /**
@@ -338,6 +458,10 @@ export class ClaudeAgentService implements AgentService {
     // buildClaudeEnvOverrides() and --model must be omitted so the CLI honours it.
     // Empty model (OAuth without explicit model) → let CLI use its default.
     const modelArgs = !useEnvModelOverride && effectiveModel ? ['--model', effectiveModel] : [];
+    const invocationMcpConfig = options?.callbackEnv
+      ? await buildClaudeInvocationMcpConfig(this.catId, options?.workingDirectory)
+      : null;
+    let invocationMcpConfigPath: string | undefined;
 
     const args: string[] = [
       '-p',
@@ -367,32 +491,42 @@ export class ClaudeAgentService implements AgentService {
 
     // Add MCP server config when callback env is present
     // On Windows, Claude CLI treats inline JSON as a file path — write to temp file instead.
-    // The file is cached per-instance so concurrent invocations share one file (no temp spam).
-    if (options?.callbackEnv && this.mcpServerPath) {
-      if (IS_WINDOWS) {
-        if (!this.mcpConfigFilePath || !existsSync(this.mcpConfigFilePath)) {
-          const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-mcp-'));
-          this.mcpConfigFilePath = join(dir, 'mcp-config.json');
-          writeFileSync(
-            this.mcpConfigFilePath,
+    // The legacy fallback file is cached per-instance so concurrent invocations share one file (no temp spam).
+    if (options?.callbackEnv && (invocationMcpConfig || this.mcpServerPath)) {
+      if (invocationMcpConfig) {
+        if (IS_WINDOWS) {
+          invocationMcpConfigPath = writeClaudeMcpConfigToTempFile(invocationMcpConfig);
+          args.push('--mcp-config', invocationMcpConfigPath);
+        } else {
+          args.push('--mcp-config', JSON.stringify(invocationMcpConfig));
+        }
+        args.push('--strict-mcp-config');
+      } else {
+        if (IS_WINDOWS) {
+          if (!this.mcpConfigFilePath || !existsSync(this.mcpConfigFilePath)) {
+            const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-mcp-'));
+            this.mcpConfigFilePath = join(dir, 'mcp-config.json');
+            writeFileSync(
+              this.mcpConfigFilePath,
+              JSON.stringify({
+                mcpServers: {
+                  'cat-cafe': { command: 'node', args: [this.mcpServerPath] },
+                },
+              }),
+              'utf-8',
+            );
+          }
+          args.push('--mcp-config', this.mcpConfigFilePath);
+        } else {
+          args.push(
+            '--mcp-config',
             JSON.stringify({
               mcpServers: {
                 'cat-cafe': { command: 'node', args: [this.mcpServerPath] },
               },
             }),
-            'utf-8',
           );
         }
-        args.push('--mcp-config', this.mcpConfigFilePath);
-      } else {
-        args.push(
-          '--mcp-config',
-          JSON.stringify({
-            mcpServers: {
-              'cat-cafe': { command: 'node', args: [this.mcpServerPath] },
-            },
-          }),
-        );
       }
     }
 
@@ -811,6 +945,7 @@ export class ClaudeAgentService implements AgentService {
     } finally {
       removeL0TempDir(l0Path);
       removeAppendPromptTempDir(appendPromptPath);
+      removeClaudeMcpConfigTempDir(invocationMcpConfigPath);
     }
   }
 }

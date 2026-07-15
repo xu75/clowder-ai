@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +20,7 @@ import {
   writeGeminiMcpConfig,
   writeKimiMcpConfig,
 } from '../dist/config/capabilities/mcp-config-adapters.js';
+import { findMonorepoRoot } from '../dist/utils/monorepo-root.js';
 
 /** @param {string} prefix */
 async function makeTmpDir(prefix) {
@@ -394,6 +396,42 @@ describe('writeClaudeMcpConfig', () => {
     await writeClaudeMcpConfig(file, []);
     const raw = await readFile(file, 'utf-8');
     assert.ok(raw.includes('mcpServers'));
+  });
+
+  it('resolveWorkspaceRoot falls back to monorepo root when no workspace env is set', async () => {
+    // Regression guard for mcp-config-adapters change:
+    //   `return process.cwd()` → `return findMonorepoRoot(process.cwd())`
+    // When cwd is a subdirectory within a monorepo (pnpm-workspace.yaml at root),
+    // ALLOWED_WORKSPACE_DIRS must resolve to the monorepo root, not the subdirectory.
+    const root = mkdtempSync(join(tmpdir(), 'mcp-monorepo-root-'));
+    const subdir = join(root, 'packages', 'api');
+    mkdirSync(subdir, { recursive: true });
+    writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n', 'utf8');
+
+    const previousCwd = process.cwd();
+    const originalAwd = process.env.ALLOWED_WORKSPACE_DIRS;
+    const originalWs = process.env.CAT_CAFE_WORKSPACE_ROOT;
+    const file = join(subdir, '.mcp.json');
+    try {
+      process.chdir(subdir);
+      delete process.env.ALLOWED_WORKSPACE_DIRS;
+      delete process.env.CAT_CAFE_WORKSPACE_ROOT;
+
+      await writeClaudeMcpConfig(file, [
+        { name: 'cat-cafe-collab', command: 'node', args: ['collab.js'], enabled: true, source: 'cat-cafe' },
+      ]);
+
+      const data = JSON.parse(await readFile(file, 'utf-8'));
+      const awd = data.mcpServers['cat-cafe-collab']?.env?.ALLOWED_WORKSPACE_DIRS;
+      assert.equal(awd, realpathSync(root), `ALLOWED_WORKSPACE_DIRS must be monorepo root (${realpathSync(root)}), got ${awd}`);
+    } finally {
+      process.chdir(previousCwd);
+      if (originalAwd === undefined) delete process.env.ALLOWED_WORKSPACE_DIRS;
+      else process.env.ALLOWED_WORKSPACE_DIRS = originalAwd;
+      if (originalWs === undefined) delete process.env.CAT_CAFE_WORKSPACE_ROOT;
+      else process.env.CAT_CAFE_WORKSPACE_ROOT = originalWs;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   // F213 Phase B: L5 cleanup applied to Claude writer (.mcp.json).
@@ -915,7 +953,7 @@ describe('writeAntigravityMcpConfig', () => {
       assert.deepEqual(raw.mcpServers['cat-cafe'].env, {
         CAT_CAFE_API_URL: expectedAntigravityApiUrl(),
         CAT_CAFE_READONLY: 'true',
-        ALLOWED_WORKSPACE_DIRS: process.cwd(),
+        ALLOWED_WORKSPACE_DIRS: findMonorepoRoot(process.cwd()),
       });
     } finally {
       if (originalAwd === undefined) delete process.env.ALLOWED_WORKSPACE_DIRS;
@@ -988,7 +1026,7 @@ describe('writeAntigravityMcpConfig', () => {
       assert.deepEqual(legacy.env, {
         CAT_CAFE_API_URL: expectedAntigravityApiUrl(),
         CAT_CAFE_READONLY: 'true',
-        ALLOWED_WORKSPACE_DIRS: process.cwd(),
+        ALLOWED_WORKSPACE_DIRS: findMonorepoRoot(process.cwd()),
       });
     } finally {
       if (originalAwd === undefined) delete process.env.ALLOWED_WORKSPACE_DIRS;
@@ -1030,7 +1068,7 @@ describe('writeAntigravityMcpConfig', () => {
       assert.deepEqual(raw.mcpServers['cat-cafe'].env, {
         CAT_CAFE_API_URL: expectedAntigravityApiUrl(),
         CAT_CAFE_READONLY: 'true',
-        ALLOWED_WORKSPACE_DIRS: process.cwd(),
+        ALLOWED_WORKSPACE_DIRS: findMonorepoRoot(process.cwd()),
         EXTRA_FLAG: 'keep-me',
       });
     } finally {

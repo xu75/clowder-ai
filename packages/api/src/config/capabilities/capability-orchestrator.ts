@@ -608,7 +608,7 @@ export function resolveBinaryRoot(explicit?: string): string {
   return process.cwd();
 }
 
-function buildCatCafeSplitMcpDescriptors(binaryRoot: string): McpServerDescriptor[] {
+export function buildCatCafeSplitMcpDescriptors(binaryRoot: string): McpServerDescriptor[] {
   return [
     {
       name: 'cat-cafe-collab',

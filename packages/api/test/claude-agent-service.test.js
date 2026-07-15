@@ -73,6 +73,16 @@ function createMockSpawnFn(proc) {
   return mock.fn(() => proc);
 }
 
+async function waitForSpawn(spawnFn) {
+  const deadline = Date.now() + 5_000;
+  while (spawnFn.mock.calls.length === 0) {
+    if (Date.now() > deadline) {
+      throw new Error('spawn was not called before timeout');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
 function emitProcessExit(proc, code, signal = null) {
   process.nextTick(() => {
     proc._emitter.emit('exit', code, signal);
@@ -556,6 +566,7 @@ test('preserves inherited Anthropic credentials when no profile mode override is
         },
       }),
     );
+    await waitForSpawn(spawnFn);
     emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
     await promise;
 
@@ -591,6 +602,7 @@ test('F062: subscription profile clears inherited ANTHROPIC env vars', async () 
         },
       }),
     );
+    await waitForSpawn(spawnFn);
     emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
     await promise;
 
@@ -628,6 +640,7 @@ test('F062: api_key profile injects ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL', a
         },
       }),
     );
+    await waitForSpawn(spawnFn);
     emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
     await promise;
 
@@ -1065,6 +1078,7 @@ test('falls back to default MCP path when CAT_CAFE_MCP_SERVER_PATH is empty', as
         },
       }),
     );
+    await waitForSpawn(spawnFn);
     emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
     await promise;
 
@@ -1079,6 +1093,93 @@ test('falls back to default MCP path when CAT_CAFE_MCP_SERVER_PATH is empty', as
       delete process.env.CAT_CAFE_MCP_SERVER_PATH;
     } else {
       process.env.CAT_CAFE_MCP_SERVER_PATH = previousEnv;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('builds a strict filtered MCP config from capabilities when callbackEnv is present', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cat-cafe-mcp-cap-'));
+  const apiCwd = join(root, 'packages', 'api');
+  const catCafeDir = join(root, '.cat-cafe');
+  mkdirSync(apiCwd, { recursive: true });
+  mkdirSync(catCafeDir, { recursive: true });
+  // pnpm-workspace.yaml at root so findMonorepoRoot(apiCwd) resolves to root,
+  // which is where capabilities.json lives under .cat-cafe/.
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n', 'utf8');
+
+  // Capabilities with one managed cat-cafe server and one deprecated-external server
+  const capabilities = {
+    version: 1,
+    capabilities: [
+      {
+        id: 'cat-cafe-collab',
+        type: 'mcp',
+        enabled: true,
+        source: 'cat-cafe',
+        mcpServer: { command: 'node', args: ['placeholder.js'] },
+      },
+      {
+        id: 'probe-off',
+        type: 'mcp',
+        enabled: true,
+        source: 'external',
+        mcpServer: { command: 'node', args: ['probe.js'] },
+      },
+    ],
+  };
+  writeFileSync(join(catCafeDir, 'capabilities.json'), JSON.stringify(capabilities), 'utf8');
+
+  const previousCwd = process.cwd();
+  const previousRuntimeRoot = process.env.CAT_CAFE_RUNTIME_ROOT;
+  const proc = createMockProcess();
+  const spawnFn = createMockSpawnFn(proc);
+
+  try {
+    process.chdir(apiCwd);
+    // Point resolveBinaryRoot() to the temp monorepo root so canonical paths resolve correctly
+    process.env.CAT_CAFE_RUNTIME_ROOT = root;
+
+    const service = createClaudeAgentService({ catId: 'opus-47', model: 'claude-test-model', spawnFn });
+    const promise = collect(
+      service.invoke('hello', {
+        callbackEnv: {
+          CAT_CAFE_API_URL: 'http://localhost:3004',
+          CAT_CAFE_INVOCATION_ID: 'inv-cap',
+          CAT_CAFE_CALLBACK_TOKEN: 'token-cap',
+        },
+      }),
+    );
+    await waitForSpawn(spawnFn);
+    emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
+    await promise;
+
+    const args = spawnFn.mock.calls[0].arguments[1];
+
+    // strict mode must be engaged when capabilities resolves servers
+    assert.ok(args.includes('--strict-mcp-config'), '--strict-mcp-config must be present');
+
+    // --mcp-config must carry inline JSON (non-Windows path)
+    const mcpConfigIdx = args.indexOf('--mcp-config');
+    assert.ok(mcpConfigIdx >= 0, '--mcp-config must be present');
+    const config = JSON.parse(args[mcpConfigIdx + 1]);
+
+    // managed cat-cafe server must appear with canonical dist path
+    assert.ok(config.mcpServers['cat-cafe-collab'], 'cat-cafe-collab must be included');
+    assert.equal(config.mcpServers['cat-cafe-collab'].command, 'node');
+    assert.ok(
+      config.mcpServers['cat-cafe-collab'].args[0].includes(join('packages', 'mcp-server', 'dist', 'collab.js')),
+      'cat-cafe-collab args must use canonical collab.js path',
+    );
+
+    // deprecated external server must be skipped
+    assert.ok(!config.mcpServers['probe-off'], 'probe-off must be excluded (deprecated external)');
+  } finally {
+    process.chdir(previousCwd);
+    if (previousRuntimeRoot === undefined) {
+      delete process.env.CAT_CAFE_RUNTIME_ROOT;
+    } else {
+      process.env.CAT_CAFE_RUNTIME_ROOT = previousRuntimeRoot;
     }
     rmSync(root, { recursive: true, force: true });
   }
@@ -1384,6 +1485,7 @@ test('third-party model (glm-5): omits --model flag and injects ANTHROPIC_MODEL 
       },
     }),
   );
+  await waitForSpawn(spawnFn);
   emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
   await promise;
 
@@ -1413,6 +1515,7 @@ test('native Anthropic model (claude-sonnet-4-6): keeps --model flag, no ANTHROP
       },
     }),
   );
+  await waitForSpawn(spawnFn);
   emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
   await promise;
 
