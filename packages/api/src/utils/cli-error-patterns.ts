@@ -164,4 +164,11 @@ export const CLASSIFIER_PATTERNS: Array<{ code: CliErrorReasonCode; regex: RegEx
     code: 'tool_call_parse_failed',
     regex: /tool calls? could not be parsed|could not parse[^.\n]{0,30}tool call/i,
   },
+  // Codex CLI version too old for the requested model — e.g.
+  // "The 'gpt-5.6-sol' model requires a newer version of Codex".
+  // Fix: `npm install -g @openai/codex` to upgrade.
+  {
+    code: 'cli_version_outdated',
+    regex: /requires a newer version of Codex/i,
+  },
 ];

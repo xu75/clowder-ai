@@ -97,6 +97,13 @@ const REASON_TEXT: Record<CliErrorReasonCode, { summary: string; hint: string }>
     // Markdown version. Provider-neutral phrasing per cloud codex R2 P2.
     hint: '不是你的额度问题——是 CLI 上游 provider 服务器侧临时限流（provider 错误里通常会明示如 "not your usage limit" / "529 Overloaded"）。等 30-60 秒重试或换一只猫（不同 provider）；反复出现去你用的 provider 状态页（Anthropic / OpenAI / Google / DeepSeek 各有 status 页）。',
   },
+  // Codex CLI 版本过低，不支持请求的模型（如 gpt-5.6-sol 等新模型）。
+  // 升级命令：`npm install -g @openai/codex`（macOS Homebrew 安装走 `brew upgrade node`
+  // 后用 `npm install -g @openai/codex` 覆盖最新版）。
+  cli_version_outdated: {
+    summary: 'Codex CLI 版本过低，不支持该模型',
+    hint: '请升级 Codex CLI：运行 `npm install -g @openai/codex` 安装最新版，再重试。macOS Homebrew 安装：先 `brew upgrade node`，再 `npm install -g @openai/codex`。',
+  },
   // F212 Phase G (AC-G1): silent_completion — CLI 正常完成但事件流里没有 text event
   // (e.g. OpenCode + DeepSeek 用户撞的 step_start-only NDJSON, clowder-ai#875)。NOT 真错误
   // 但走 cliDiagnostics surface 让用户拿到结构化证据替代 generic "completed without

@@ -31,7 +31,11 @@ export type CliErrorReasonCode =
    *  no text events (e.g. OpenCode + DeepSeek producing only `step_start`). NOT an error
    *  per se but surfaced via cliDiagnostics so users get evidence instead of generic
    *  "completed without textual output" message. */
-  | 'silent_completion';
+  | 'silent_completion'
+  /** CLI binary is too old to support the requested model (e.g. codex stderr:
+   *  "The 'gpt-5.6-sol' model requires a newer version of Codex"). User action:
+   *  upgrade the CLI binary. */
+  | 'cli_version_outdated';
 
 /**
  * Structured CLI error payload (Phase A KD-1 white-list admission).
