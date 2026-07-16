@@ -119,10 +119,12 @@ describe('Eval Hub API route', () => {
       };
       const mockGenerator = async (packet, sources, deps) => {
         if (generatorSpy) generatorSpy(packet, sources, deps);
-        return {
-          verdictPath: `${deps.harnessFeedbackRoot}/verdicts/${packet.id}.md`,
-          bundleDir: `${deps.harnessFeedbackRoot}/bundles/${packet.id}`,
-        };
+        // Write provenance.json (as every real generator does) so the central
+        // sourceThreadId stamp finds it; agent-key path stamps the domain's systemThreadId.
+        const bundleDir = `${deps.harnessFeedbackRoot}/bundles/${packet.id}`;
+        mkdirSync(bundleDir, { recursive: true });
+        writeFileSync(resolve(bundleDir, 'provenance.json'), JSON.stringify({ verdictId: packet.id }, null, 2));
+        return { verdictPath: `${deps.harnessFeedbackRoot}/verdicts/${packet.id}.md`, bundleDir };
       };
       app.register(evalHubRoutes, {
         harnessFeedbackRoot: liveHarnessRoot ?? repoHarnessFeedbackRoot,

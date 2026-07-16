@@ -1,7 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { CapabilityWakeupSourceSelector } from '../capability-wakeup/capability-wakeup-trial-provider.js';
-import { validateCapabilityWakeupSelector } from '../capability-wakeup/capability-wakeup-trial-provider.js';
 import { getEvalCatOverride } from '../domain/eval-domain-override.js';
 import { loadDomains } from '../hub/eval-hub-read-model.js';
 import {
@@ -11,6 +9,8 @@ import {
 } from '../verdict-handoff.js';
 import { mapPublishVerdictError } from './error-mapping.js';
 import { computePublishPolicy } from './publish-policy.js';
+import { validateSourceRefsForDomain } from './source-refs-domain-validation.js';
+import { resolveSourceThreadId, stampSourceThreadId } from './source-thread-provenance.js';
 import type {
   GitPublisher,
   HandlerError,
@@ -19,18 +19,7 @@ import type {
   PublishVerdictSuccess,
   VerdictGenerator,
 } from './types.js';
-import {
-  assertNoNewlineInBulletFields,
-  inferSourceRefsKind,
-  isA2aSourceRefs,
-  isMemorySourceRefs,
-  isSopSourceRefs,
-  isTaskOutcomeSourceRefs,
-  validateMemoryRecallSelector,
-  validateSopTraceSelector,
-  validateSourceRefsFormat,
-  validateTaskOutcomeSourceRefs,
-} from './validation.js';
+import { assertNoNewlineInBulletFields } from './validation.js';
 
 export type {
   GitPublisher,
@@ -151,6 +140,13 @@ export async function handlePublishVerdict(
     };
   }
 
+  // F192 — resolve canonical sourceThreadId (provenance.json traceability contract).
+  // Fail-closed BEFORE the generator runs: a trusted invocation thread that does not
+  // match the domain's registered systemThreadId is a 403, never a silent relabel.
+  const threadResolution = resolveSourceThreadId(input.principalThreadId, domainEntry.systemThreadId);
+  if (!threadResolution.ok) return threadResolution.error;
+  const sourceThreadId = threadResolution.sourceThreadId;
+
   // AC-H8: length + slug + idempotency (复用 generate-now 模式)
   if (packet.id.length > MAX_VERDICT_ID_LEN) {
     return {
@@ -186,60 +182,11 @@ export async function handlePublishVerdict(
     };
   }
 
-  // PR-2 (砚砚 R1 P1): handler pre-validates sourceRefs shape per kind for proper
-  // 4xx error codes. Adapter-level validation is defense-in-depth (catches when
-  // generator called outside handler flow), but user-facing validation lives here.
-  //
-  // cloud R8 P2 (PR-2): cross-check sourceRefs.kind ↔ packet.domainId BEFORE
-  // per-kind validation. Wrong-shape input for a supported domain (e.g. a2a refs
-  // sent for capability-wakeup domain, or cw selector sent for a2a domain) is
-  // user-correctable; rejecting at 400 here is better UX than letting it
-  // dispatch to adapter → throw `*_adapter_wrong_kind` → 500 generator_failed.
-  const refsKind = inferSourceRefsKind(input.sourceRefs);
-  const EXPECTED_REFS_KIND_BY_DOMAIN: Partial<Record<string, string>> = {
-    'eval:a2a': 'a2a-snapshot-attribution',
-    'eval:capability-wakeup': 'capability-wakeup-trial-window',
-    'eval:sop': 'sop-trace-eval',
-    'eval:task-outcome': 'task-outcome-snapshot',
-    'eval:memory': 'memory-recall-snapshot',
-  };
-  const expectedKind = EXPECTED_REFS_KIND_BY_DOMAIN[packet.domainId];
-  if (expectedKind && expectedKind !== refsKind) {
-    return {
-      status: 400,
-      error: 'sourceRefs_kind_mismatch',
-      detail: `Domain '${packet.domainId}' expects sourceRefs.kind='${expectedKind}', got '${refsKind}'. Each domain has a specific evidence shape: eval:a2a → {snapshotName, attributionName}; eval:capability-wakeup → {kind:'capability-wakeup-trial-window', ...}; eval:memory → {kind:'memory-recall-snapshot', ...}; eval:sop → {kind:'sop-trace-eval', sopDefinitionId, trace}; eval:task-outcome → {kind:'task-outcome-snapshot', ...}.`,
-    };
-  }
-
-  if (isSopSourceRefs(input.sourceRefs)) {
-    const selectorError = validateSopTraceSelector(input.sourceRefs);
-    if (selectorError) return { status: 400, error: 'invalid_source_ref', detail: selectorError };
-  } else if (isMemorySourceRefs(input.sourceRefs)) {
-    const selectorError = validateMemoryRecallSelector(input.sourceRefs);
-    if (selectorError) return { status: 400, error: 'invalid_source_ref', detail: selectorError };
-  } else if (isA2aSourceRefs(input.sourceRefs)) {
-    const refsCheck = validateSourceRefsFormat(input.sourceRefs);
-    if (!refsCheck.ok) return refsCheck.error;
-  } else if (isTaskOutcomeSourceRefs(input.sourceRefs)) {
-    const refsCheck = validateTaskOutcomeSourceRefs(input.sourceRefs);
-    if (!refsCheck.ok) return refsCheck.error;
-  } else {
-    const cwSelector = input.sourceRefs as unknown as CapabilityWakeupSourceSelector;
-    // PR-1a structural validator (capability non-empty / no newlines / window edges finite + ordered).
-    const selectorError = validateCapabilityWakeupSelector(cwSelector);
-    if (selectorError) return { status: 400, error: 'invalid_source_ref', detail: selectorError };
-    // trial-ids selector remains unsupported until a durable trial store ships.
-    // Window selectors may omit sessionIds: provider resolves an unbiased runtime-session
-    // window scan when production wires SessionWindowEnumerator.
-    if (cwSelector.kind !== 'capability-wakeup-trial-window') {
-      return {
-        status: 400,
-        error: 'invalid_source_ref',
-        detail: `PR-2 wired only 'capability-wakeup-trial-window' kind for capability-wakeup domain (got '${cwSelector.kind}'; trial-ids selector reserved for future durable trial store PR)`,
-      };
-    }
-  }
+  // PR-2 (砚砚 R1 P1) + cloud R8 P2: pre-validate sourceRefs shape per kind for proper
+  // 4xx codes (kind↔domain cross-check + per-kind structural validation). Extracted to
+  // validation.ts per AGENTS.md 350-line hard limit; adapter-level checks are defense-in-depth.
+  const sourceRefsError = validateSourceRefsForDomain(packet.domainId, input.sourceRefs);
+  if (sourceRefsError) return sourceRefsError;
 
   // PR-2 (砚砚 R1 P1): route layer dispatches per-domain generator from
   // `opts.verdictGenerators?.[domainId]` → if undefined, no generator wired → 501.
@@ -288,6 +235,10 @@ export async function handlePublishVerdict(
           taskOutcomeDbPath: deps.taskOutcomeDbPath,
           eventMemoryDbPath: deps.eventMemoryDbPath,
         });
+        // F192 — central provenance stamp: honor the cat_cafe_publish_verdict
+        // "which thread produced this PR" contract for EVERY domain without editing
+        // each per-domain generator. Fails closed if the generator skipped provenance.json.
+        stampSourceThreadId(artifact.bundleDir, sourceThreadId);
         // PR-3 (砚砚 R2): read attribution.json from bundle to compute publish policy.
         // Generator writes attribution.json into bundleDir; if absent or parse fails,
         // `computePublishPolicy` fail-opens to regular_pr (砚砚 R2 contract).
@@ -313,7 +264,7 @@ export async function handlePublishVerdict(
           paths: [artifact.verdictPath, artifact.bundleDir, ...(artifact.extraStagedPaths ?? [])],
           commitMessage: `verdict(${packet.domainId}): ${packet.id} — ${packet.verdict}\n\n${packet.phenomenon}\n\n[published via cat_cafe_publish_verdict MCP]`,
           prTitle: `verdict(${packet.domainId}): ${packet.id}`,
-          prBody: `Verdict published via cat_cafe_publish_verdict MCP tool.\n\nVerdict: ${packet.verdict}\nDomain: ${packet.domainId}\nPhenomenon: ${packet.phenomenon}\n\nReviewed by: ${packet.ownerAsk.targetOwnerCatId}\nAction: ${packet.ownerAsk.requestedAction}${policyFooter}`,
+          prBody: `Verdict published via cat_cafe_publish_verdict MCP tool.\n\nVerdict: ${packet.verdict}\nDomain: ${packet.domainId}\nSource thread: ${sourceThreadId}\nPhenomenon: ${packet.phenomenon}\n\nReviewed by: ${packet.ownerAsk.targetOwnerCatId}\nAction: ${packet.ownerAsk.requestedAction}${policyFooter}`,
           labels: policy.labels,
           afterPublish: artifact.afterPublish,
         };

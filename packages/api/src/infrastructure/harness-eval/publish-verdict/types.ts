@@ -204,6 +204,13 @@ export interface PublishVerdictInput {
   catId: string;
   /** Server-trusted callback principal userId (not user-supplied). */
   ownerUserId?: string;
+  /**
+   * F192 — trusted invocation threadId from the callback principal.
+   * `invocation` principals carry it (route passes `principal.threadId`);
+   * `agent_key` principals do NOT → `undefined` → registry systemThreadId fallback.
+   * Never user-supplied. Used to resolve/stamp `provenance.json → sourceThreadId`.
+   */
+  principalThreadId?: string;
   /** 砚砚 R1 P1 #2: explicit evidence refs (sanitized YAML basenames OR replayable selector). Tool NEVER fabricates. */
   sourceRefs: VerdictSourceRefs;
 }

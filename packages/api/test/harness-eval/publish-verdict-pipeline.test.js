@@ -62,9 +62,15 @@ describe('handlePublishVerdict — AC-H2 pipeline', () => {
         assert.equal(sourceRefs.attributionName, 'attr.yaml');
         assert.equal(deps.harnessFeedbackRoot, `${isolatedWorktree}/docs/harness-feedback`);
         assert.equal(deps.liveHarnessFeedbackRoot, root, 'live root from handler deps.harnessFeedbackRoot');
+        // Every real generator writes provenance.json into bundleDir; the central
+        // sourceThreadId stamp reads it. Mirror that so the pipeline reaches the
+        // GitPublisher as intended (stub previously skipped it → stamp fail-closed).
+        const bundleDir = `${deps.harnessFeedbackRoot}/bundles/${packet.id}`;
+        mkdirSync(bundleDir, { recursive: true });
+        writeFileSync(resolvePath(bundleDir, 'provenance.json'), JSON.stringify({ verdictId: packet.id }, null, 2));
         return {
           verdictPath: `${deps.harnessFeedbackRoot}/verdicts/${packet.id}.md`,
-          bundleDir: `${deps.harnessFeedbackRoot}/bundles/${packet.id}`,
+          bundleDir,
         };
       };
 
@@ -143,10 +149,15 @@ describe('handlePublishVerdict — AC-H2 pipeline', () => {
         {
           harnessFeedbackRoot: root,
           gitPublisher: mockGitPublisher,
-          generator: async (p) => ({
-            verdictPath: `/x/${p.id}.md`,
-            bundleDir: `/x/${p.id}`,
-          }),
+          generator: async (p, _sources, deps) => {
+            // Write provenance.json (as every real generator does) so the central
+            // sourceThreadId stamp passes and the pipeline reaches the GitPublisher,
+            // which is what this test exercises (post-generator push/PR failure).
+            const bundleDir = `${deps.harnessFeedbackRoot}/bundles/${p.id}`;
+            mkdirSync(bundleDir, { recursive: true });
+            writeFileSync(resolvePath(bundleDir, 'provenance.json'), JSON.stringify({ verdictId: p.id }, null, 2));
+            return { verdictPath: `${deps.harnessFeedbackRoot}/verdicts/${p.id}.md`, bundleDir };
+          },
         },
         {
           packet: buildPacket({ domainId: 'eval:a2a' }),
