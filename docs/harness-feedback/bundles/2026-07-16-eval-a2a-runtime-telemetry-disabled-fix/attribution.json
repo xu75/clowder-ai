@@ -1,0 +1,56 @@
+{
+  "verdictId": "2026-07-16-eval-a2a-runtime-telemetry-disabled-fix",
+  "featureId": "F167",
+  "evalSnapshotId": "eval-F167-2026-07-16",
+  "generatedAt": "2026-07-16T03:05:56.326Z",
+  "findings": [
+    {
+      "id": "AR-2026-07-16-001",
+      "relatedFeature": "F167",
+      "frictionSignal": {
+        "type": "telemetry-runtime-disabled",
+        "severity": "high",
+        "confidence": 0.99
+      },
+      "attribution": {
+        "primaryLayer": "environment_drift",
+        "pipelineOrHuman": "human-required",
+        "evidence": [
+          {
+            "type": "telemetry-health",
+            "anchor": "L1/l1.streak_warn_count",
+            "excerpt": "/api/telemetry/health returned HTTP 200 status=healthy while otelEnabled=false, disabledReason reports missing TELEMETRY_HMAC_SALT, and both traceStore and metricsSnapshotStore are null after 18.59h uptime."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "C1/c1.hold_zombie_count",
+            "excerpt": "/api/telemetry/traces/stats returned 503 Trace store not available; hold_ball throughput and zombie/cancel samples cannot be evaluated."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "C2/c2.verdict_without_pass_count",
+            "excerpt": "/api/telemetry/metrics and /api/telemetry/metrics/history returned 503; forced-pass and void-hold rates cannot be evaluated despite an 18.59h counter window."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "route-serial/inline_action.checked",
+            "excerpt": "In-process metrics are unavailable, so serial-route activation and friction counters have no current denominator or trend sample."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "grounding-phase-o/grounding.check_total",
+            "excerpt": "/api/telemetry/grounding-samples returned 503. Grounding check_total, verdict_total, mismatch_sample_count, and mismatch patterns cannot be evaluated; zero samples is a telemetry gap, not a healthy distribution."
+          }
+        ]
+      },
+      "proposedAction": [
+        {
+          "action": "runtime-fix",
+          "target": "F167/runtime-telemetry-wiring",
+          "rationale": "The F167 counter-window and grounding hooks exist in source, but the acceptance runtime does not initialize telemetry. Coordinate the required operator-managed TELEMETRY_HMAC_SALT configuration, rebuild/restart the runtime, and make health/prerequisite gating report degraded or skip eval when OTel is disabled instead of emitting an unevaluable daily run."
+        }
+      ],
+      "status": "open"
+    }
+  ]
+}

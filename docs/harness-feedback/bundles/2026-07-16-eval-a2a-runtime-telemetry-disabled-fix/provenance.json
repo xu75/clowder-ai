@@ -1,0 +1,19 @@
+{
+  "verdictId": "2026-07-16-eval-a2a-runtime-telemetry-disabled-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/snapshots/2026-07-16T03-05-56-326Z-F167-eval.yaml",
+      "sha256": "d77d7c71df9e9c3e877a37ad45526adcb1adb98cb6cc1fd61d4a2d368dfc3da6"
+    },
+    {
+      "path": "docs/harness-feedback/attributions/2026-07-16T03-05-56-326Z-F167-attribution.yaml",
+      "sha256": "62927bd5625a0fe61aa10e55923a8a145e8e69fefd9f3ab475900db817eeda36"
+    }
+  ],
+  "generatedAt": "2026-07-16T03:05:56.326Z",
+  "generator": {
+    "name": "eval-a2a-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f192-e-pilot-v1"
+}
