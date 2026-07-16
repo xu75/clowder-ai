@@ -240,6 +240,21 @@ export function requireCallbackPrincipal(request: FastifyRequest, reply: Fastify
   return null;
 }
 
+/**
+ * F192 source-thread provenance: the server-trusted threadId a callback principal
+ * was invoked from, or `undefined` when there is none to trust.
+ *
+ * Only `invocation` principals carry a per-call `threadId` (verified by the auth
+ * preHandler). `agent_key` principals (shared persistent MCP — Antigravity) have
+ * no invocation thread, so this returns `undefined` and callers fall back to a
+ * canonical source (e.g. the eval domain's registry systemThreadId). Kept here
+ * next to the CallbackPrincipal type so the union's provenance shape stays in one
+ * place and callers don't re-narrow `principal.kind` inline.
+ */
+export function trustedThreadId(principal: CallbackPrincipal): string | undefined {
+  return principal.kind === 'invocation' ? principal.threadId : undefined;
+}
+
 /** Require callbackAuth on the request — returns record or sends 401. */
 export function requireCallbackAuth(request: FastifyRequest, reply: FastifyReply): InvocationRecord | null {
   if (request.callbackAuth) return request.callbackAuth;

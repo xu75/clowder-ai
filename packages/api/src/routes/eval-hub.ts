@@ -21,7 +21,7 @@ import {
   type VerdictGenerator,
 } from '../infrastructure/harness-eval/publish-verdict/publish-verdict.js';
 import type { AgentKeyAuthRegistry, CallbackAuthRegistry } from './callback-auth-prehandler.js';
-import { registerCallbackAuthHook, requireCallbackPrincipal } from './callback-auth-prehandler.js';
+import { registerCallbackAuthHook, requireCallbackPrincipal, trustedThreadId } from './callback-auth-prehandler.js';
 
 export type {
   GenerateNowInput,
@@ -334,10 +334,7 @@ export const evalHubRoutes: FastifyPluginAsync<EvalHubRoutesOptions> = async (ap
         domain: domainId,
         catId: principal.catId,
         ownerUserId: principal.userId,
-        // F192 source-thread provenance: invocation principals carry a server-trusted
-        // threadId (must match domain systemThreadId or fail closed); agent_key principals
-        // have none → handler falls back to registry systemThreadId as canonical source.
-        principalThreadId: principal.kind === 'invocation' ? principal.threadId : undefined,
+        principalThreadId: trustedThreadId(principal),
         // PR-2 (砚砚 R1 Q3): sourceRefs is a discriminated union (a2a vs capability-wakeup-trial-window);
         // adapter discriminates by `kind` field. Cast through unknown — handler/adapter validate shape.
         sourceRefs: (body.sourceRefs ??
