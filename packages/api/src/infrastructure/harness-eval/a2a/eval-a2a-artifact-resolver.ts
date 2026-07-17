@@ -117,6 +117,11 @@ const bundleProvenanceSchema = z.object({
     commit: z.string().min(1).optional(),
   }),
   sanitizeRulesVersion: z.string().optional(),
+  // F192 — the central publish-stage stamp (stampSourceThreadId) writes this into
+  // provenance.json for every newly published bundle. Declared optional so the typed
+  // canonical reader preserves it (default z.object() strips undeclared keys), while
+  // historical bundles written before the stamp existed still parse.
+  sourceThreadId: z.string().min(1).optional(),
 });
 
 export interface ResolveA2aEvidenceBundleInput {

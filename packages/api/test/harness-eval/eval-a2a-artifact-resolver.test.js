@@ -501,4 +501,25 @@ describe('eval:a2a evidence bundle resolver', () => {
 
     assert.deepEqual(resolved.attributionRefs, [`attribution:bundle/${verdictId}/eval-F167-2026-05-22:no-finding`]);
   });
+
+  // F192 regression — the central stampSourceThreadId writes sourceThreadId into raw
+  // provenance.json; the typed canonical reader MUST surface it (default z.object()
+  // strips undeclared keys, which previously dropped it silently after .parse()).
+  it('preserves sourceThreadId on newly stamped bundles through the typed resolver', () => {
+    const bundleDir = createBundle({ provenance: { sourceThreadId: 'thread_eval_a2a' } });
+
+    const resolved = resolveA2aEvidenceBundle({ bundleDir, verdictId });
+
+    assert.equal(resolved.provenance.sourceThreadId, 'thread_eval_a2a');
+  });
+
+  it('still resolves historical bundles written before sourceThreadId existed (optional, back-compat)', () => {
+    // Default createBundle() omits sourceThreadId — mirrors a pre-F192 committed bundle.
+    const bundleDir = createBundle();
+
+    const resolved = resolveA2aEvidenceBundle({ bundleDir, verdictId });
+
+    assert.equal(resolved.provenance.sourceThreadId, undefined);
+    assert.equal(resolved.provenance.verdictId, verdictId);
+  });
 });
