@@ -3,51 +3,44 @@
     {
       "path": "packages/api/src/routes",
       "owner": "opus",
-      "reason": "Routes 按功能已分文件（147 files），ADR-010 重构 scope 不含 routes，需要按 HTTP verb / domain 重新评估子拆分边界。SECOND-ROUND unblock（首轮 a4e81b8791 续期到 2026-06-01）。Follow-up split plan 记在 F23 § Phase 2 follow-up。",
-      "expiresAt": "2026-06-30",
+      "reason": "Routes 按功能已分文件（158 files），ADR-010 重构 scope 不含 routes，需要按 HTTP verb / domain 重新评估子拆分边界。Follow-up split plan 记在 F23 § Phase 2 follow-up。RENEWED 2026-07-17→2026-07-31（采用 upstream f2bcd0a41 已批准日期；base-rot unblock）。",
+      "expiresAt": "2026-07-31",
       "ticket": "F23-followup"
     },
     {
       "path": "packages/api/src/config",
       "owner": "opus",
-      "reason": "Config 38 files（cat-budgets/cat-config/env 等独立配置项）。需要先做 config 域 audit 再确定子拆分边界。SECOND-ROUND unblock（首轮 a4e81b8791 续期到 2026-06-01）。Follow-up split plan 记在 F23 § Phase 2 follow-up。",
-      "expiresAt": "2026-06-30",
+      "reason": "Config 38 files（cat-budgets/cat-config/env 等独立配置项）。需要先做 config 域 audit 再确定子拆分边界。Follow-up split plan 记在 F23 § Phase 2 follow-up。RENEWED 2026-07-17→2026-07-31（采用 upstream f2bcd0a41 已批准日期；base-rot unblock）。",
+      "expiresAt": "2026-07-31",
       "ticket": "F23-followup"
     },
     {
       "path": "packages/api/src/domains/cats/services/agents/invocation",
       "owner": "opus",
-      "reason": "Invocation 控制面 25 files；按 queue/registry/tracker/progress/reconciliation/delivery/auth 子域拆分。SECOND-ROUND unblock（首轮 4136847b10 砚砚 2026-05-18 续期到 2026-06-01）。Follow-up split plan 记在 F23 § Phase 2 follow-up。",
-      "expiresAt": "2026-06-30",
+      "reason": "Invocation 控制面 27 files；按 queue/registry/tracker/progress/reconciliation/delivery/auth 子域拆分。Follow-up split plan 记在 F23 § Phase 2 follow-up。RENEWED 2026-07-17→2026-07-31（采用 upstream f2bcd0a41 已批准日期；base-rot unblock）。",
+      "expiresAt": "2026-07-31",
       "ticket": "F23-followup"
     },
     {
       "path": "packages/api/src/domains/cats/services/agents/providers",
       "owner": "opus",
-      "reason": "Agent providers 32 files；按 agents/event-transforms/carriers/image/configs 子域拆分。SECOND-ROUND unblock（首轮 4136847b10 砚砚 2026-05-18 续期到 2026-06-01）。Follow-up split plan 记在 F23 § Phase 2 follow-up。",
-      "expiresAt": "2026-06-30",
+      "reason": "Agent providers 34 files；按 agents/event-transforms/carriers/image/configs 子域拆分。Follow-up split plan 记在 F23 § Phase 2 follow-up。RENEWED 2026-07-17→2026-07-31（采用 upstream f2bcd0a41 已批准日期；base-rot unblock）。",
+      "expiresAt": "2026-07-31",
       "ticket": "F23-followup"
     },
     {
       "path": "packages/api/src/domains/memory",
       "owner": "gpt52",
-      "reason": "Memory 域现有 72 个非 index.ts 文件，职责已横跨 indexing/query/governance/library；先短续期，按真实边界拆子目录",
-      "expiresAt": "2026-06-15",
+      "reason": "Memory 域现有 89 个非 index.ts 文件，职责已横跨 indexing/query/governance/library；按真实边界拆子目录。RENEWED 2026-07-17→2026-07-31 by opus on behalf of owner gpt52（采用 upstream f2bcd0a41 已批准日期；base-rot unblock，owner 请复核）。",
+      "expiresAt": "2026-07-31",
       "ticket": "F102"
     },
     {
       "path": "packages/api/src/utils",
       "owner": "codex",
-      "reason": "API utils 31 files；按 cli/process/media/paths/network/parsing/skills 子域拆分（详见 F23 § Phase 2）。SECOND-ROUND unblock（首轮 4136847b10 砚砚 2026-05-18 续期到 2026-06-01）。Follow-up split plan 记在 F23 § Phase 2 follow-up。",
-      "expiresAt": "2026-06-30",
+      "reason": "API utils 35 files；按 cli/process/media/paths/network/parsing/skills 子域拆分（详见 F23 § Phase 2）。RENEWED 2026-07-17→2026-07-31 by opus on behalf of owner codex（采用 upstream f2bcd0a41 已批准日期；base-rot unblock，owner 请复核）。",
+      "expiresAt": "2026-07-31",
       "ticket": "F23-followup"
-    },
-    {
-      "path": "packages/api/src/infrastructure/harness-eval",
-      "owner": "opus",
-      "reason": "F192 socio-technical harness eval 当前 29 .ts（Phase F capability-wakeup 一批 eval-capability-wakeup-* 加入超 error=25）；登记基线红灯，后续按 capability-wakeup / a2a / domain / hub 子域拆分。详见 F192 feat doc Known Debt + GitHub issue。",
-      "expiresAt": "2026-06-15",
-      "ticket": "F192"
     }
   ]
 }
