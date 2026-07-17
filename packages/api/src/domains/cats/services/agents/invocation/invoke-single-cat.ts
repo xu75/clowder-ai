@@ -2490,13 +2490,26 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
 
       // F089: Use abortableNext instead of `for await` so the invocation timeout
       // can break out even when the service generator is stuck on an unresolvable await.
-      log.info({ invocationId, catId, threadId, attempt, sessionId: sessionId ?? null, signalAborted: signal?.aborted ?? false }, '[DIAG] checkpoint-B: about to call service.invoke()');
+      log.info(
+        {
+          invocationId,
+          catId,
+          threadId,
+          attempt,
+          sessionId: sessionId ?? null,
+          signalAborted: signal?.aborted ?? false,
+        },
+        '[DIAG] checkpoint-B: about to call service.invoke()',
+      );
       const serviceIter = service.invoke(effectivePrompt, options)[Symbol.asyncIterator]();
       let iterCount = 0;
       for (;;) {
         const iterResult = await abortableNext(serviceIter, signal);
         if (iterResult.done) {
-          log.info({ invocationId, catId, threadId, iterCount, signalAborted: signal?.aborted ?? false }, '[DIAG] checkpoint-C: service iterator done');
+          log.info(
+            { invocationId, catId, threadId, iterCount, signalAborted: signal?.aborted ?? false },
+            '[DIAG] checkpoint-C: service iterator done',
+          );
           break;
         }
         iterCount++;

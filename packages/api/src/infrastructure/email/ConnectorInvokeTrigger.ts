@@ -463,7 +463,9 @@ export class ConnectorInvokeTrigger {
               governanceErrorReason = parsed.reason || 'Governance gate blocked this invocation.';
               governanceErrorCatId = msg.catId;
             }
-          } catch { /* non-JSON system_info — ignore */ }
+          } catch {
+            /* non-JSON system_info — ignore */
+          }
         }
         if (msg.type === 'done' && msg.errorCode && !governanceErrorReason) {
           governanceErrorReason = `Invocation failed: ${msg.errorCode}`;
@@ -690,7 +692,10 @@ export class ConnectorInvokeTrigger {
                 messageId,
               );
             } catch (deliverErr) {
-              log.warn({ err: deliverErr, threadId }, '[ConnectorInvokeTrigger] Silent invocation fallback delivery failed');
+              log.warn(
+                { err: deliverErr, threadId },
+                '[ConnectorInvokeTrigger] Silent invocation fallback delivery failed',
+              );
             }
           }
           if (this.opts.streamingHook?.cleanupPlaceholders) {

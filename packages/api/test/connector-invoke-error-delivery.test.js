@@ -45,7 +45,9 @@ function mockSocketManager() {
   return {
     messages,
     broadcastToRoom() {},
-    broadcastAgentMessage(msg) { messages.push(msg); },
+    broadcastAgentMessage(msg) {
+      messages.push(msg);
+    },
   };
 }
 

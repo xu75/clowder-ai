@@ -905,7 +905,10 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
     assert.ok(errMsg, 'should yield terminal reconnect error');
     assert.ok(errMsg.error.includes('重连 5 次后仍失败'));
     assert.ok(errMsg.error.includes('Reconnecting... 5/5'));
-    assert.ok(msgs.some((m) => m.type === 'done'), 'should always end with done');
+    assert.ok(
+      msgs.some((m) => m.type === 'done'),
+      'should always end with done',
+    );
     assert.ok(proc.kill.mock.callCount() >= 1, 'should terminate hanging child process');
   });
 

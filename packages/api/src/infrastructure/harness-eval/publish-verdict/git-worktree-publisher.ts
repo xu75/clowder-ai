@@ -180,19 +180,7 @@ export function createGitWorktreePublisher(deps: GitWorktreePublisherDeps): GitP
         const labelFlags = successfulLabels.flatMap((label) => ['--label', label]);
         const prResult = await exec(
           'gh',
-          [
-            'pr',
-            'create',
-            '--base',
-            'main',
-            '--head',
-            headRef,
-            '--title',
-            prTitle,
-            '--body',
-            prBody,
-            ...labelFlags,
-          ],
+          ['pr', 'create', '--base', 'main', '--head', headRef, '--title', prTitle, '--body', prBody, ...labelFlags],
           { cwd: worktreePath, timeout: 60_000 },
         );
         prUrl =

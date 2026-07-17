@@ -478,7 +478,9 @@ async function main(): Promise<void> {
       } catch (err) {
         lastPingErr = err;
         if (attempt < REDIS_PING_MAX_RETRIES) {
-          app.log.warn(`[api] Redis PING attempt ${attempt}/${REDIS_PING_MAX_RETRIES} failed, retrying in ${REDIS_PING_BACKOFF_MS * attempt}ms...`);
+          app.log.warn(
+            `[api] Redis PING attempt ${attempt}/${REDIS_PING_MAX_RETRIES} failed, retrying in ${REDIS_PING_BACKOFF_MS * attempt}ms...`,
+          );
           await new Promise((r) => setTimeout(r, REDIS_PING_BACKOFF_MS * attempt));
         }
       }

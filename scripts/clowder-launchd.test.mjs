@@ -32,7 +32,9 @@ describe('clowder-launchd script', () => {
     assert.match(result.stdout, new RegExp(`<string>${repoRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<\\/string>`));
     assert.match(
       result.stdout,
-      new RegExp(`<string>${resolve(fakeHome, '.cat-cafe', 'launchd', 'logs', 'com.cat-cafe.test.log').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<\\/string>`),
+      new RegExp(
+        `<string>${resolve(fakeHome, '.cat-cafe', 'launchd', 'logs', 'com.cat-cafe.test.log').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<\\/string>`,
+      ),
     );
   });
 
