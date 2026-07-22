@@ -36,17 +36,20 @@ import type {
   PrReviewDecision,
   ReviewFeedbackRouter,
 } from '../../infrastructure/email/ReviewFeedbackRouter.js';
-import type { ReviewFeedbackPrMetadata } from '../../infrastructure/email/ReviewFeedbackTaskSpec.js';
+import type {
+  PrFeedbackCommentCursors,
+  ReviewFeedbackPrMetadata,
+} from '../../infrastructure/email/ReviewFeedbackTaskSpec.js';
 import { createReviewFeedbackTaskSpec } from '../../infrastructure/email/ReviewFeedbackTaskSpec.js';
 import type { TaskSpec_P1 } from '../../infrastructure/scheduler/types.js';
 import type { ITaskStore } from '../cats/services/stores/ports/TaskStore.js';
 import type { IThreadStore } from '../cats/services/stores/ports/ThreadStore.js';
 import type { ICommunityEventLog } from '../community/CommunityEventLog.js';
 import type { ICommunityObjectStore } from '../community/CommunityObjectStore.js';
-import type { GitHubSnapshot } from '../community/CommunityReconciler.js';
-import { createCommunityReconcilerTaskSpec } from '../community/CommunityReconcilerTaskSpec.js';
-import type { CommunityReconciliationFindingStore } from '../community/CommunityReconciliationFindingStore.js';
 import type { SlaPolicy } from '../community/community-sla-policy.js';
+import type { GitHubSnapshot } from '../community/reconciliation/CommunityReconciler.js';
+import { createCommunityReconcilerTaskSpec } from '../community/reconciliation/CommunityReconcilerTaskSpec.js';
+import type { CommunityReconciliationFindingStore } from '../community/reconciliation/CommunityReconciliationFindingStore.js';
 import type { ScheduleFactory, ScheduleFactoryDeps, ScheduleFactoryRegistry } from './ScheduleFactoryRegistry.js';
 
 /** Minimal projector interface for optional DI in factories — avoids importing concrete class. */
@@ -75,7 +78,7 @@ export interface GitHubScheduleDeps extends ScheduleFactoryDeps {
   checkMergeable: (repo: string, pr: number) => Promise<{ mergeState: string; headSha: string }>;
   autoExecutor: ConflictAutoExecutor;
   fetchPrMetadata: (repo: string, pr: number) => Promise<ReviewFeedbackPrMetadata | null>;
-  fetchComments: (repo: string, pr: number, sinceId?: number) => Promise<PrFeedbackComment[]>;
+  fetchComments: (repo: string, pr: number, cursors: PrFeedbackCommentCursors) => Promise<PrFeedbackComment[]>;
   fetchReviews: (repo: string, pr: number, sinceId?: number) => Promise<PrReviewDecision[]>;
   isEchoComment: (c: PrFeedbackComment) => boolean;
   isEchoReview: (r: PrReviewDecision) => boolean;

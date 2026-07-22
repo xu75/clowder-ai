@@ -156,7 +156,10 @@ import {
   fetchPrCiStatus,
   ReviewFeedbackRouter,
 } from './infrastructure/email/index.js';
-import { fetchLatestIssueCommentCursor, maxGithubId } from './infrastructure/github/comment-cursors.js';
+import {
+  fetchInitialPrTrackingBoundary,
+  fetchLatestIssueCommentCursor,
+} from './infrastructure/github/comment-cursors.js';
 import { buildGhCliEnv, resolveGhCliToken, withHiddenGhCliWindow } from './infrastructure/github/gh-cli-env.js';
 import type { EvalDomainId } from './infrastructure/harness-eval/domain/eval-domain-registry.js';
 import { runSchedulerReplyUserIdBackfill } from './infrastructure/scheduler/scheduler-reply-userid-backfill.js';
@@ -609,7 +612,7 @@ async function main(): Promise<void> {
   let communityProjector: import('./domains/community/community-projector.js').CommunityProjector | undefined;
   // F168 Phase D D3/D4: reconciliation finding store (Redis-backed, no TTL)
   let communityFindingStore:
-    | import('./domains/community/CommunityReconciliationFindingStore.js').CommunityReconciliationFindingStore
+    | import('./domains/community/reconciliation/CommunityReconciliationFindingStore.js').CommunityReconciliationFindingStore
     | undefined;
   // F233 Phase B (B2): ball-custody ingest（fire-and-forget 旁路写球权事件，注入 AgentRouter）
   let ballCustodyIngest: import('./domains/ball-custody/BallCustodyIngest.js').BallCustodyIngest | undefined;
@@ -621,7 +624,7 @@ async function main(): Promise<void> {
       import('./domains/community/CommunityEventLog.js'),
       import('./domains/community/CommunityObjectStore.js'),
       import('./domains/community/community-projector.js'),
-      import('./domains/community/CommunityReconciliationFindingStore.js'),
+      import('./domains/community/reconciliation/CommunityReconciliationFindingStore.js'),
     ]);
     communityEventLog = new elMod.RedisCommunityEventLog(redis);
     communityObjectStore = new osMod.RedisCommunityObjectStore(redis);
@@ -886,7 +889,7 @@ async function main(): Promise<void> {
         memoryServices.catalog!,
         memoryServices.collectionStores ?? new Map(),
         memoryServices.dataDir!,
-        memoryServices.embeddingService,
+        () => memoryServices.embeddingLifecycle.getService(),
       );
     },
     getFingerprint,
@@ -1129,12 +1132,13 @@ async function main(): Promise<void> {
         },
         generateAbstractive,
         // Re-embed thread after abstractive summary update (semantic search uses vectors)
-        reEmbed: memoryServices.embeddingService?.isReady()
-          ? async (anchor: string, text: string) => {
-              const [vec] = await memoryServices.embeddingService!.embed([text]);
-              memoryServices.vectorStore?.upsert(anchor, vec);
-            }
-          : undefined,
+        reEmbed: async (anchor: string, text: string) => {
+          const embeddingService = memoryServices.embeddingLifecycle.getService();
+          const vectorStore = memoryServices.embeddingLifecycle.getVectorStore();
+          if (!embeddingService?.isReady() || !vectorStore) return;
+          const [vec] = await embeddingService.embed([text]);
+          vectorStore.upsert(anchor, vec);
+        },
         // H-3: Submit durable candidates to knowledge emergence pipeline
         // Gated by F102_DURABLE_CANDIDATES flag (spec §F102 env config)
         submitCandidate:
@@ -2257,41 +2261,9 @@ async function main(): Promise<void> {
   const { createRepoActivityTemplate } = await import('./infrastructure/scheduler/templates/repo-activity.js');
   templateRegistry.register(createRepoActivityTemplate({ getGitHubToken }));
   const fetchPrTrackingBoundary = async (repoFullName: string, prNumber: number) => {
-    const { fetchPaginated } = await import('./infrastructure/github/fetch-paginated.js');
-    const [reviewComments, issueComments, reviews, ciStatus] = await Promise.all([
-      fetchPaginated(`/repos/${repoFullName}/pulls/${prNumber}/comments`, {
-        ghToken: getGitHubToken(),
-      }),
-      fetchPaginated(`/repos/${repoFullName}/issues/${prNumber}/comments`, {
-        ghToken: getGitHubToken(),
-      }),
-      fetchPaginated(`/repos/${repoFullName}/pulls/${prNumber}/reviews`, {
-        ghToken: getGitHubToken(),
-      }),
-      fetchPrCiStatus(repoFullName, prNumber, app.log, { ghToken: getGitHubToken() }),
-    ]);
-    return {
-      review: {
-        lastCommentCursor: maxGithubId([
-          ...(reviewComments as { id?: unknown }[]),
-          ...(issueComments as { id?: unknown }[]),
-        ]),
-        lastDecisionCursor: maxGithubId(reviews as { id?: unknown }[]),
-      },
-      ...(ciStatus
-        ? {
-            ci: {
-              headSha: ciStatus.headSha,
-              ...(ciStatus.aggregateBucket === 'pending'
-                ? {}
-                : {
-                    lastFingerprint: `${ciStatus.headSha}:${ciStatus.aggregateBucket}`,
-                    lastBucket: ciStatus.aggregateBucket,
-                  }),
-            },
-          }
-        : {}),
-    };
+    return fetchInitialPrTrackingBoundary(repoFullName, prNumber, {
+      fetchCiStatus: (repo, pr) => fetchPrCiStatus(repo, pr, app.log, { ghToken: getGitHubToken() }),
+    });
   };
   const fetchIssueCommentCursor = async (repoFullName: string, issueNumber: number): Promise<number> =>
     fetchLatestIssueCommentCursor(repoFullName, issueNumber, { ghToken: getGitHubToken() });
@@ -2825,7 +2797,7 @@ async function main(): Promise<void> {
 
   // F235: Community issue draft routes (publish to community flow)
   {
-    const { GitHubIssuePublisher } = await import('./domains/community/GitHubIssuePublisher.js');
+    const { GitHubIssuePublisher } = await import('./domains/community/github/GitHubIssuePublisher.js');
     const defaultRepo = process.env.COMMUNITY_PUBLISH_DEFAULT_REPO ?? 'clowder-ai/cat-cafe';
     // Phase B: default allowlist includes tutorials repo for multi-target publishing (AC-B2)
     const repoAllowlist = (
@@ -2956,7 +2928,7 @@ async function main(): Promise<void> {
   // D0.3: boot warning when narrator role configured but thread ID absent
   const communityNarratorThreadId = process.env.COMMUNITY_NARRATOR_THREAD_ID;
   {
-    const { NarratorDriver: ND } = await import('./domains/community/NarratorDriver.js');
+    const { NarratorDriver: ND } = await import('./domains/community/narrator/NarratorDriver.js');
     const { DEFAULT_COMMUNITY_ROLE_BINDINGS: bindings } = await import('./domains/community/RoleResolver.js');
     ND.checkNarratorBootConfig({
       narratorRoleConfigured: !!bindings.narrator,
@@ -2964,14 +2936,14 @@ async function main(): Promise<void> {
       log: app.log,
     });
   }
-  let communityNarratorDriver: import('./domains/community/NarratorDriver.js').NarratorDriver | undefined;
+  let communityNarratorDriver: import('./domains/community/narrator/NarratorDriver.js').NarratorDriver | undefined;
   if (communityNarratorThreadId) {
-    const { NarratorDriver } = await import('./domains/community/NarratorDriver.js');
+    const { NarratorDriver } = await import('./domains/community/narrator/NarratorDriver.js');
     const { createRoleResolver, DEFAULT_COMMUNITY_ROLE_BINDINGS } = await import('./domains/community/RoleResolver.js');
     const { createWakeCatFn } = await import('./domains/cats/services/game/wakeCatImpl.js');
     // D0.2: persistent narrator dedup store (Redis-backed)
     const { RedisNarratorDedupStore, InMemoryNarratorDedupStore } = await import(
-      './domains/community/RedisNarratorDedupStore.js'
+      './domains/community/narrator/RedisNarratorDedupStore.js'
     );
     const narratorDedupStore = redis ? new RedisNarratorDedupStore(redis) : new InMemoryNarratorDedupStore();
     const communityWakeCat = createWakeCatFn({
@@ -3185,38 +3157,53 @@ async function main(): Promise<void> {
   await app.register(servicesRoutes, {
     lifecycle: {
       autoStartEnabled: true,
-      onServiceReady: ({ service, operator, reason }) => {
+      onServiceReady: async ({ service, operator, reason }) => {
         if (service.id !== 'embedding-model' || !memoryServices.indexBuilder) return;
+        const activationMode = resolvedEmbedMode === 'shadow' ? 'shadow' : 'on';
+        const activation = await memoryServices.embeddingLifecycle.activate(activationMode);
+        if (!activation.ok) {
+          const detail = activation.reason ?? activation.status;
+          appendServiceLog(service.id, `[start] memory embedding activation degraded: ${detail}\n`);
+          app.log.warn(
+            { serviceId: service.id, operator, reason, activation },
+            '[api] F102: embedding service ready but memory activation degraded',
+          );
+          return;
+        }
         appendServiceLog(service.id, `[start] embedding service ready (${reason}); scheduling evidence rebuild\n`);
         app.log.info(
           { serviceId: service.id, operator, reason },
           '[api] F102: embedding service ready; scheduling evidence rebuild',
         );
         const startedAt = Date.now();
-        void memoryServices.indexBuilder
-          .rebuild({ force: true })
-          .then((result) => {
-            const elapsedMs = Date.now() - startedAt;
-            appendServiceLog(
-              service.id,
-              `[start] evidence rebuild completed: ${result.docsIndexed} indexed, ${result.docsSkipped} skipped (${elapsedMs}ms)\n`,
-            );
-            app.log.info(
-              `[api] F102: embedding service catch-up rebuild completed - ${result.docsIndexed} indexed, ${result.docsSkipped} skipped (${elapsedMs}ms)`,
-            );
-            // Backfill passage vectors that were missed when API started before
-            // the embedding service was ready. Without this, only newly indexed
-            // passages get vectors — the ~N thousands indexed while embed was
-            // down remain lexical-only until the next full restart.
-            memoryServices.indexBuilder?.startPassageEmbeddingWarmup();
-          })
-          .catch((error) => {
-            appendServiceLog(service.id, `[start] evidence rebuild failed: ${String(error)}\n`);
-            app.log.warn(
-              { err: error, serviceId: service.id },
-              '[api] F102: embedding service catch-up rebuild failed',
-            );
-          });
+        try {
+          const result = await memoryServices.indexBuilder.rebuild({ force: true });
+          const elapsedMs = Date.now() - startedAt;
+          appendServiceLog(
+            service.id,
+            `[start] evidence rebuild completed: ${result.docsIndexed} indexed, ${result.docsSkipped} skipped (${elapsedMs}ms)\n`,
+          );
+          app.log.info(
+            `[api] F102: embedding service catch-up rebuild completed - ${result.docsIndexed} indexed, ${result.docsSkipped} skipped (${elapsedMs}ms)`,
+          );
+          // Backfill passage vectors that were missed when API started before
+          // the embedding service was ready. Without this, only newly indexed
+          // passages get vectors — the ~N thousands indexed while embed was
+          // down remain lexical-only until the next full restart.
+          memoryServices.indexBuilder.startPassageEmbeddingWarmup();
+        } catch (error) {
+          appendServiceLog(service.id, `[start] evidence rebuild failed: ${String(error)}\n`);
+          app.log.warn({ err: error, serviceId: service.id }, '[api] F102: embedding service catch-up rebuild failed');
+        }
+      },
+      onServiceUnavailable: ({ service, operator, reason }) => {
+        if (service.id !== 'embedding-model') return;
+        memoryServices.embeddingLifecycle.deactivate();
+        appendServiceLog(service.id, `[${reason}] memory embedding dependencies deactivated\n`);
+        app.log.info(
+          { serviceId: service.id, operator, reason },
+          '[api] F102: memory embedding dependencies deactivated',
+        );
       },
     },
   });
@@ -3313,7 +3300,7 @@ async function main(): Promise<void> {
   // Evidence search (SQLite) + reindex endpoint (D-11) + F-4 federated search + F188 rebuild
   await app.register(evidenceRoutes, {
     evidenceStore: memoryServices.evidenceStore,
-    embeddingService: memoryServices.embeddingService,
+    getEmbeddingService: () => memoryServices.embeddingLifecycle.getService(),
     indexBuilder: memoryServices.indexBuilder,
     knowledgeResolver: memoryServices.knowledgeResolver,
     rebuildJobTracker,
@@ -3405,16 +3392,16 @@ async function main(): Promise<void> {
     if (!libraryStores.has('project:cat-cafe')) libraryStores.set('project:cat-cafe', memoryServices.store);
     if (memoryServices.globalStore && !libraryStores.has('global:methods'))
       libraryStores.set('global:methods', memoryServices.globalStore);
-    // Use the resolvedEmbedMode computed above (service.enabled overrides EMBED_MODE=off).
-    const libraryEmbedMode: 'shadow' | 'on' | undefined =
-      resolvedEmbedMode === 'shadow' || resolvedEmbedMode === 'on' ? resolvedEmbedMode : undefined;
     await app.register(libraryRoutes, {
       catalog: memoryServices.catalog,
       stores: libraryStores,
       dataDir: memoryServices.dataDir,
       managedVaultBase: memoryServices.dataDir,
-      embeddingService: memoryServices.embeddingService,
-      embedMode: libraryEmbedMode,
+      getEmbeddingService: () => memoryServices.embeddingLifecycle.getService(),
+      getEmbedMode: () => {
+        const mode = memoryServices.embeddingLifecycle.getMode();
+        return mode === 'off' ? undefined : mode;
+      },
       // F188 Phase F AC-F9: pass redis for tool-usage-metrics endpoint (砚砚 review P1-2)
       ...(redisClient ? { redis: redisClient } : {}),
       // AC-H1 P1 R3: runtime exclude updates for parent IndexBuilder
@@ -4026,11 +4013,11 @@ async function main(): Promise<void> {
       }
     };
 
-    const fetchComments = async (repo: string, pr: number, sinceId?: number) => {
+    const fetchComments = async (repo: string, pr: number, cursors: { inline: number; conversation: number }) => {
       await refreshGitHubSelfLogin();
       const [reviewComments, issueComments] = await Promise.all([
-        fetchPaginated(`/repos/${repo}/pulls/${pr}/comments`, sinceId),
-        fetchPaginated(`/repos/${repo}/issues/${pr}/comments`, sinceId),
+        fetchPaginated(`/repos/${repo}/pulls/${pr}/comments`, cursors.inline),
+        fetchPaginated(`/repos/${repo}/issues/${pr}/comments`, cursors.conversation),
       ]);
       return [...reviewComments, ...issueComments].map(
         (c: {
