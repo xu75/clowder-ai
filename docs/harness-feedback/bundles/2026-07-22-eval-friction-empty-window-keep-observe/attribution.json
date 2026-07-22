@@ -1,0 +1,11 @@
+{
+  "verdictId": "2026-07-22-eval-friction-empty-window-keep-observe",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-07-22",
+  "generatedAt": "2026-07-22T03:43:48.410Z",
+  "findings": [],
+  "noFindingRecord": {
+    "reason": "no friction cluster surfaced in the selected window",
+    "evidence": "friction-rollup/cluster_count"
+  }
+}
