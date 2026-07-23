@@ -128,6 +128,7 @@ const bundleProvenanceSchema = z.object({
     commit: z.string().min(1).optional(),
   }),
   sanitizeRulesVersion: z.string().optional(),
+  sourceThreadId: z.string().min(1).optional(),
 });
 
 export interface ResolveA2aEvidenceBundleInput {
