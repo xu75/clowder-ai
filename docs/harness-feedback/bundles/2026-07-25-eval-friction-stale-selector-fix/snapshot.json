@@ -1,0 +1,25 @@
+{
+  "verdictId": "2026-07-25-eval-friction-stale-selector-fix",
+  "evalSnapshotId": "eval-F245-2026-07-25",
+  "featureId": "F245",
+  "generatedAt": "2026-07-25T03:02:57.124Z",
+  "window": {
+    "startMs": 1759276800000,
+    "endMs": 1759363200000,
+    "durationHours": 24
+  },
+  "components": [
+    {
+      "id": "friction-rollup",
+      "name": "friction rollup (Top-N + sensorForm)",
+      "confidence": "low",
+      "activationCounts": {},
+      "frictionCounts": {
+        "cluster_count": 0,
+        "top_cluster_count": 0,
+        "tail_cluster_count": 0,
+        "tail_signal_count": 0
+      }
+    }
+  ]
+}
