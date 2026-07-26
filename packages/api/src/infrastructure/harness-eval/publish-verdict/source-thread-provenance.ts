@@ -21,20 +21,20 @@ import type { HandlerError } from './types.js';
  * @param systemThreadId    registry-canonical domain thread (`domainEntry.systemThreadId`)
  */
 export function resolveSourceThreadId(
-	principalThreadId: string | undefined,
-	systemThreadId: string,
+  principalThreadId: string | undefined,
+  systemThreadId: string,
 ): { ok: true; sourceThreadId: string } | { ok: false; error: HandlerError } {
-	if (principalThreadId !== undefined && principalThreadId !== systemThreadId) {
-		return {
-			ok: false,
-			error: {
-				status: 403,
-				error: 'source_thread_mismatch',
-				detail: `Publish principal thread '${principalThreadId}' does not match domain systemThreadId '${systemThreadId}'. Eval verdicts must be published from the domain's registered working-home thread (registry is SoT). A legitimate cross-thread publish should preserve trusted invocation provenance instead of being relabeled.`,
-			},
-		};
-	}
-	return { ok: true, sourceThreadId: principalThreadId ?? systemThreadId };
+  if (principalThreadId !== undefined && principalThreadId !== systemThreadId) {
+    return {
+      ok: false,
+      error: {
+        status: 403,
+        error: 'source_thread_mismatch',
+        detail: `Publish principal thread '${principalThreadId}' does not match domain systemThreadId '${systemThreadId}'. Eval verdicts must be published from the domain's registered working-home thread (registry is SoT). A legitimate cross-thread publish should preserve trusted invocation provenance instead of being relabeled.`,
+      },
+    };
+  }
+  return { ok: true, sourceThreadId: principalThreadId ?? systemThreadId };
 }
 
 /**
@@ -51,13 +51,13 @@ export function resolveSourceThreadId(
  * never something to paper over with a fabricated provenance record.
  */
 export function stampSourceThreadId(bundleDir: string, sourceThreadId: string): void {
-	const provenancePath = join(bundleDir, 'provenance.json');
-	if (!existsSync(provenancePath)) {
-		throw new Error(
-			`provenance_stamp_failed: provenance.json not found in bundleDir '${bundleDir}' — cannot stamp sourceThreadId (every publishable bundle must write provenance.json).`,
-		);
-	}
-	const provenance = JSON.parse(readFileSync(provenancePath, 'utf8')) as Record<string, unknown>;
-	provenance.sourceThreadId = sourceThreadId;
-	writeFileSync(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`, 'utf8');
+  const provenancePath = join(bundleDir, 'provenance.json');
+  if (!existsSync(provenancePath)) {
+    throw new Error(
+      `provenance_stamp_failed: provenance.json not found in bundleDir '${bundleDir}' — cannot stamp sourceThreadId (every publishable bundle must write provenance.json).`,
+    );
+  }
+  const provenance = JSON.parse(readFileSync(provenancePath, 'utf8')) as Record<string, unknown>;
+  provenance.sourceThreadId = sourceThreadId;
+  writeFileSync(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`, 'utf8');
 }

@@ -62,9 +62,12 @@ describe('handlePublishVerdict — AC-H2 pipeline', () => {
         assert.equal(sourceRefs.attributionName, 'attr.yaml');
         assert.equal(deps.harnessFeedbackRoot, `${isolatedWorktree}/docs/harness-feedback`);
         assert.equal(deps.liveHarnessFeedbackRoot, root, 'live root from handler deps.harnessFeedbackRoot');
+        const bundleDir = `${deps.harnessFeedbackRoot}/bundles/${packet.id}`;
+        mkdirSync(bundleDir, { recursive: true });
+        writeFileSync(resolvePath(bundleDir, 'provenance.json'), JSON.stringify({ verdictId: packet.id }, null, 2));
         return {
           verdictPath: `${deps.harnessFeedbackRoot}/verdicts/${packet.id}.md`,
-          bundleDir: `${deps.harnessFeedbackRoot}/bundles/${packet.id}`,
+          bundleDir,
         };
       };
 
@@ -143,10 +146,15 @@ describe('handlePublishVerdict — AC-H2 pipeline', () => {
         {
           harnessFeedbackRoot: root,
           gitPublisher: mockGitPublisher,
-          generator: async (p) => ({
-            verdictPath: `/x/${p.id}.md`,
-            bundleDir: `/x/${p.id}`,
-          }),
+          generator: async (packet, _sourceRefs, deps) => {
+            const bundleDir = `${deps.harnessFeedbackRoot}/bundles/${packet.id}`;
+            mkdirSync(bundleDir, { recursive: true });
+            writeFileSync(resolvePath(bundleDir, 'provenance.json'), JSON.stringify({ verdictId: packet.id }, null, 2));
+            return {
+              verdictPath: `${deps.harnessFeedbackRoot}/verdicts/${packet.id}.md`,
+              bundleDir,
+            };
+          },
         },
         {
           packet: buildPacket({ domainId: 'eval:a2a' }),

@@ -34,9 +34,7 @@ export type {
   TriggerNowInput,
   TriggerNowSuccess,
 } from '../infrastructure/harness-eval/manual-trigger/index.js';
-// Re-export handler types so existing test imports from this file keep working
-// (cloud codex R5 P1: handlers split out to manual-trigger/ to keep this file
-// under the 350-line hard limit per AGENTS.md).
+// Keep existing test imports stable after the manual-trigger split.
 export {
   handleGenerateNow,
   handleTriggerNow,
@@ -298,9 +296,7 @@ export const evalHubRoutes: FastifyPluginAsync<EvalHubRoutesOptions> = async (ap
   // from the server-trusted callback principal, NOT body (which is spoofable).
   // Generator + GitPublisher injected at bootstrap (real impls), tests pass mocks.
   app.post('/api/eval-domains/:domainId/publish-verdict', async (request, reply) => {
-    // 砚砚 R4 P1 #1 + R9 P1: requireCallbackPrincipal (NOT requireSession).
-    // Accept both invocation principals (per-call MCP) AND agent_key principals
-    // (shared persistent MCP — Antigravity). Both have server-trusted catId.
+    // Callback and agent-key principals both supply a server-trusted catId.
     const principal = requireCallbackPrincipal(request, reply);
     if (!principal) return;
     if (principal.kind !== 'invocation' && principal.kind !== 'agent_key') {
