@@ -234,6 +234,7 @@ describe('F212 CliDiagnosticsPanel (AC-B2/B3/B4)', () => {
       'auth_failed',
       'invalid_config',
       'model_not_found',
+      'cli_version_outdated',
       'quota_exceeded',
       'network_error',
       'spawn_failed',
@@ -243,6 +244,7 @@ describe('F212 CliDiagnosticsPanel (AC-B2/B3/B4)', () => {
       'invalid_thinking_signature',
       'tool_call_parse_failed',
       'server_overloaded',
+      'silent_completion',
     ];
 
     for (const reasonCode of reasonCodes) {

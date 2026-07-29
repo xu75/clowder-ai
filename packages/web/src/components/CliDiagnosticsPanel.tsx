@@ -80,6 +80,7 @@ const REASON_PALETTE: Record<CliErrorReasonCode, Palette> = {
   auth_failed: { ...PALETTE_USER_FIX, Icon: KeyRoundIcon },
   invalid_config: { ...PALETTE_USER_FIX, Icon: SettingsXIcon },
   model_not_found: { ...PALETTE_USER_FIX, Icon: PackageXIcon },
+  cli_version_outdated: { ...PALETTE_USER_FIX, Icon: WrenchIcon },
   // Tier 2 — transient, retry later
   quota_exceeded: { ...PALETTE_TRANSIENT, Icon: GaugeIcon },
   network_error: { ...PALETTE_TRANSIENT, Icon: CloudOffIcon },
