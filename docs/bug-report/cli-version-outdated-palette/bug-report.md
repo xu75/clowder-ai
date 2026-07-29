@@ -12,4 +12,3 @@
 | **6. 预警策略** | 若出现第二个遗漏 consumer 或三个以上并行映射表，改为统一从共享 metadata 派生，而不是继续逐点补键。 |
 | **7. 用户可见交互修正** | Codex 版本过旧错误会显示已分类的配置修复型 banner，而不是未知错误 fallback。 |
 | **8. 验收** | `CliDiagnosticsPanel.test.ts` 覆盖 `cli_version_outdated` 且通过；`pnpm --filter @cat-cafe/web build` 通过；相关 CLI diagnostics 测试无回归。 |
-
