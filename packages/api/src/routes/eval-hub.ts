@@ -34,9 +34,7 @@ export type {
   TriggerNowInput,
   TriggerNowSuccess,
 } from '../infrastructure/harness-eval/manual-trigger/index.js';
-// Re-export handler types so existing test imports from this file keep working
-// (cloud codex R5 P1: handlers split out to manual-trigger/ to keep this file
-// under the 350-line hard limit per AGENTS.md).
+// Keep existing test imports stable after the manual-trigger split.
 export {
   handleGenerateNow,
   handleTriggerNow,
@@ -298,9 +296,7 @@ export const evalHubRoutes: FastifyPluginAsync<EvalHubRoutesOptions> = async (ap
   // from the server-trusted callback principal, NOT body (which is spoofable).
   // Generator + GitPublisher injected at bootstrap (real impls), tests pass mocks.
   app.post('/api/eval-domains/:domainId/publish-verdict', async (request, reply) => {
-    // 砚砚 R4 P1 #1 + R9 P1: requireCallbackPrincipal (NOT requireSession).
-    // Accept both invocation principals (per-call MCP) AND agent_key principals
-    // (shared persistent MCP — Antigravity). Both have server-trusted catId.
+    // Callback and agent-key principals both supply a server-trusted catId.
     const principal = requireCallbackPrincipal(request, reply);
     if (!principal) return;
     if (principal.kind !== 'invocation' && principal.kind !== 'agent_key') {
@@ -334,6 +330,10 @@ export const evalHubRoutes: FastifyPluginAsync<EvalHubRoutesOptions> = async (ap
         domain: domainId,
         catId: principal.catId,
         ownerUserId: principal.userId,
+        // F192 source-thread provenance: invocation principals carry a server-trusted
+        // threadId (must match domain systemThreadId or fail closed); agent_key principals
+        // have none → handler falls back to registry systemThreadId as canonical source.
+        principalThreadId: principal.kind === 'invocation' ? principal.threadId : undefined,
         // PR-2 (砚砚 R1 Q3): sourceRefs is a discriminated union (a2a vs capability-wakeup-trial-window);
         // adapter discriminates by `kind` field. Cast through unknown — handler/adapter validate shape.
         sourceRefs: (body.sourceRefs ??

@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
+import { InvocationRegistry } from '../../dist/domains/cats/services/agents/invocation/InvocationRegistry.js';
 import { evalHubRoutes } from '../../dist/routes/eval-hub.js';
 
 /**
@@ -119,9 +120,12 @@ describe('Eval Hub API route', () => {
       };
       const mockGenerator = async (packet, sources, deps) => {
         if (generatorSpy) generatorSpy(packet, sources, deps);
+        const bundleDir = `${deps.harnessFeedbackRoot}/bundles/${packet.id}`;
+        mkdirSync(bundleDir, { recursive: true });
+        writeFileSync(resolve(bundleDir, 'provenance.json'), JSON.stringify({ verdictId: packet.id }, null, 2));
         return {
           verdictPath: `${deps.harnessFeedbackRoot}/verdicts/${packet.id}.md`,
-          bundleDir: `${deps.harnessFeedbackRoot}/bundles/${packet.id}`,
+          bundleDir,
         };
       };
       app.register(evalHubRoutes, {
@@ -185,6 +189,51 @@ describe('Eval Hub API route', () => {
       const body = response.json();
       assert.equal(body.commitSha, 'mock-sha');
       assert.equal(body.prUrl, 'https://example.com/pr/1');
+      await app.close();
+    });
+
+    it('forwards the trusted invocation threadId and rejects a cross-thread publish', async () => {
+      const callbackRegistry = new InvocationRegistry();
+      const { invocationId, callbackToken } = await callbackRegistry.create('you', 'codex', 'thread_wrong');
+      const liveHarnessRoot = makeLiveHarnessFeedbackWithEvidence('snap.yaml', 'attr.yaml');
+      let generatorRan = false;
+      let gitPublisherRan = false;
+      const app = Fastify({ logger: false });
+      await app.register(evalHubRoutes, {
+        harnessFeedbackRoot: liveHarnessRoot,
+        callbackRegistry,
+        gitPublisher: {
+          async publishOnIsolatedWorktree() {
+            gitPublisherRan = true;
+            return { commitSha: 'unreachable', prUrl: 'unreachable' };
+          },
+        },
+        verdictGenerators: {
+          'eval:a2a': async () => {
+            generatorRan = true;
+            return { verdictPath: '/unreachable', bundleDir: '/unreachable' };
+          },
+        },
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/eval-domains/eval:a2a/publish-verdict',
+        headers: {
+          'x-invocation-id': invocationId,
+          'x-callback-token': callbackToken,
+          'content-type': 'application/json',
+        },
+        payload: JSON.stringify({
+          packet: validPacket,
+          sourceRefs: { snapshotName: 'snap.yaml', attributionName: 'attr.yaml' },
+        }),
+      });
+
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.json().error, 'source_thread_mismatch');
+      assert.equal(generatorRan, false);
+      assert.equal(gitPublisherRan, false);
       await app.close();
     });
 

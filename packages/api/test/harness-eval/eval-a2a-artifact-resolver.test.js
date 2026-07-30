@@ -501,4 +501,23 @@ describe('eval:a2a evidence bundle resolver', () => {
 
     assert.deepEqual(resolved.attributionRefs, [`attribution:bundle/${verdictId}/eval-F167-2026-05-22:no-finding`]);
   });
+
+  it('preserves sourceThreadId on newly stamped bundles through the typed resolver', () => {
+    const bundleDir = createBundle({
+      provenance: { sourceThreadId: 'thread_eval_a2a' },
+    });
+
+    const resolved = resolveA2aEvidenceBundle({ bundleDir, verdictId });
+
+    assert.equal(resolved.provenance.sourceThreadId, 'thread_eval_a2a');
+  });
+
+  it('still resolves historical bundles that predate sourceThreadId', () => {
+    const bundleDir = createBundle();
+
+    const resolved = resolveA2aEvidenceBundle({ bundleDir, verdictId });
+
+    assert.equal(resolved.provenance.sourceThreadId, undefined);
+    assert.equal(resolved.provenance.verdictId, verdictId);
+  });
 });
