@@ -1,0 +1,15 @@
+{
+  "verdictId": "2026-07-31-eval-friction-stale-selector-auth-budget-gap-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-07-31-eval-friction-stale-selector-auth-budget-gap-fix/raw/rollup-report.json",
+      "sha256": "fbba87d95fee87dcaa00d81f5d960d65e855ec74d4aab7bd9ccab86e98de6eaa"
+    }
+  ],
+  "generatedAt": "2026-07-31T03:05:44.688Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1"
+}
