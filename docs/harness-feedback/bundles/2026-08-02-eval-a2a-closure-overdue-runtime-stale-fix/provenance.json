@@ -1,0 +1,20 @@
+{
+  "verdictId": "2026-08-02-eval-a2a-closure-overdue-runtime-stale-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/snapshots/2026-07-20T03-04-16-751Z-F167-eval.yaml",
+      "sha256": "c2b8b3bcceb13795a8c1de598ee4a4a3f0ade325e564b43a794c63fa2fc9e984"
+    },
+    {
+      "path": "docs/harness-feedback/attributions/2026-07-20T03-04-16-751Z-F167-attribution.yaml",
+      "sha256": "4b296ebb3964709e27db911fff6749003ebedc32edd5d3ea494109cba55e9c72"
+    }
+  ],
+  "generatedAt": "2026-07-20T03:04:16.751Z",
+  "generator": {
+    "name": "eval-a2a-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f192-e-pilot-v1",
+  "sourceThreadId": "thread_eval_a2a"
+}
