@@ -1,0 +1,36 @@
+{
+  "verdictId": "2026-08-03-eval-friction-paw-feel-meta-marker-fix",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-08-03",
+  "generatedAt": "2026-08-03T03:03:41.360Z",
+  "findings": [
+    {
+      "id": "FR-2026-08-03-3eb416223e9e",
+      "relatedFeature": "F245",
+      "frictionSignal": {
+        "type": "friction.cluster_3eb416223e9e",
+        "severity": "medium",
+        "confidence": 0.7,
+        "detectedAt": "2026-08-03T03:03:41.360Z"
+      },
+      "attribution": {
+        "primaryLayer": "needs_investigation",
+        "evidence": [
+          {
+            "type": "counter",
+            "anchor": "friction-rollup/cluster_3eb416223e9e",
+            "excerpt": "cluster '...' count=1 severity=medium sensorForms=[reason]"
+          }
+        ]
+      },
+      "proposedAction": [
+        {
+          "action": "triage-top-friction-cluster",
+          "target": "F245/friction-rollup",
+          "rationale": "Highest-ranked friction cluster in the window — eval cat assigns the 7-class root cause in the verdict before handoff."
+        }
+      ],
+      "status": "open"
+    }
+  ]
+}
