@@ -1,0 +1,92 @@
+{
+  "verdictId": "2026-08-03-eval-friction-operator-runtime-budget-blocked-fix",
+  "selector": {
+    "kind": "friction-rollup-snapshot",
+    "windowStartMs": 1785466800000,
+    "windowEndMs": 1785726000000,
+    "topN": 10,
+    "tokenCap": 4000
+  },
+  "window": {
+    "sinceMs": 1785466800000,
+    "untilMs": 1785726000000
+  },
+  "signalCount": 1,
+  "clusterCount": 1,
+  "degraded": true,
+  "droppedChannels": [],
+  "report": {
+    "window": {
+      "sinceMs": 1785466800000,
+      "untilMs": 1785726000000
+    },
+    "generatedAt": "2026-08-03T03:02:21.353Z",
+    "topClusters": [
+      {
+        "clusterId": "3eb416223e9e",
+        "representative": "...",
+        "channels": [
+          "paw-feel"
+        ],
+        "count": 1,
+        "members": [
+          {
+            "signalId": "paw-feel:0001785467199640-000095-8b4288c9#0",
+            "rawRef": "0001785467199640-000095-8b4288c9#0",
+            "channel": "paw-feel"
+          }
+        ],
+        "method": "rule",
+        "sensorForms": [
+          "reason"
+        ],
+        "severity": "medium"
+      }
+    ],
+    "actionableCandidates": [
+      {
+        "clusterId": "3eb416223e9e",
+        "representative": "...",
+        "channels": [
+          "paw-feel"
+        ],
+        "count": 1,
+        "members": [
+          {
+            "signalId": "paw-feel:0001785467199640-000095-8b4288c9#0",
+            "rawRef": "0001785467199640-000095-8b4288c9#0",
+            "channel": "paw-feel"
+          }
+        ],
+        "method": "rule",
+        "sensorForms": [
+          "reason"
+        ],
+        "severity": "medium",
+        "actionability": "actionable_candidate",
+        "followupDraft": {
+          "clusterId": "3eb416223e9e",
+          "title": "Investigate friction cluster: ...",
+          "summary": "...",
+          "evidenceRefs": [
+            "0001785467199640-000095-8b4288c9#0"
+          ],
+          "reportingMode": "final-only"
+        },
+        "referenceOnlyEvidenceRefs": []
+      }
+    ],
+    "referenceOnly": [],
+    "tailSummary": {
+      "clusterCount": 0,
+      "signalCount": 0,
+      "byChannel": {}
+    },
+    "degraded": true,
+    "droppedChannels": [],
+    "tokenBudget": {
+      "cap": 4000,
+      "estimated": 285
+    }
+  }
+}

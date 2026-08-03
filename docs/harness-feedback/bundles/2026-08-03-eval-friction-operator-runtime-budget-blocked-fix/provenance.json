@@ -1,0 +1,15 @@
+{
+  "verdictId": "2026-08-03-eval-friction-operator-runtime-budget-blocked-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-08-03-eval-friction-operator-runtime-budget-blocked-fix/raw/rollup-report.json",
+      "sha256": "d25175846a4be1ae2cc0765da5b4d7a8bfa777fdf40fd6437fd858e33a16af4e"
+    }
+  ],
+  "generatedAt": "2026-08-03T03:02:21.353Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1"
+}
