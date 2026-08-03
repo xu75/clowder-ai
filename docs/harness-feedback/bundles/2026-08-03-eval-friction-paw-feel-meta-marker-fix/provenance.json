@@ -1,0 +1,15 @@
+{
+  "verdictId": "2026-08-03-eval-friction-paw-feel-meta-marker-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-08-03-eval-friction-paw-feel-meta-marker-fix/raw/rollup-report.json",
+      "sha256": "5b18f299a6c954467aa39ce9439d0a717556dd0342b772c27d81dfd6faa2998f"
+    }
+  ],
+  "generatedAt": "2026-08-03T03:03:41.360Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1"
+}
