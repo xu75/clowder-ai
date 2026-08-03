@@ -1,0 +1,20 @@
+{
+  "verdictId": "2026-08-03-eval-a2a-stalled-repair-loop-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/snapshots/2026-08-03T03-03-50-072Z-F167-eval.yaml",
+      "sha256": "f2ac6bd487ba2ea29c2ba09efa729b15efb28d06142a69e0fd6fdee5dbb88140"
+    },
+    {
+      "path": "docs/harness-feedback/attributions/2026-08-03T03-03-50-072Z-F167-attribution.yaml",
+      "sha256": "2480fffb92b7ce8ca6f0c3d2708123366aa946dfdca3a43d391153cf4424148c"
+    }
+  ],
+  "generatedAt": "2026-08-03T03:03:50.072Z",
+  "generator": {
+    "name": "eval-a2a-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f192-e-pilot-v1",
+  "sourceThreadId": "thread_eval_a2a"
+}

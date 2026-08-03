@@ -1,0 +1,56 @@
+{
+  "verdictId": "2026-08-03-eval-a2a-stalled-repair-loop-fix",
+  "featureId": "F167",
+  "evalSnapshotId": "eval-F167-2026-08-03",
+  "generatedAt": "2026-08-03T03:03:50.072Z",
+  "findings": [
+    {
+      "id": "AR-2026-08-03-001",
+      "relatedFeature": "F167",
+      "frictionSignal": {
+        "type": "eval-repair-loop-stalled",
+        "severity": "high",
+        "confidence": 0.99
+      },
+      "attribution": {
+        "primaryLayer": "environment_drift",
+        "pipelineOrHuman": "human-required",
+        "evidence": [
+          {
+            "type": "runtime-process",
+            "anchor": "runtime/pid-4096",
+            "excerpt": "The live API process still runs node dist/index.js from the dirty main worktree, started 2026-07-24T14:09:56Z. At snapshot time it had run 228.898353 hours and had not loaded PR #9 or later main commits."
+          },
+          {
+            "type": "runtime-config",
+            "anchor": "runtime/TELEMETRY_HMAC_SALT",
+            "excerpt": "A presence-only inspection of the live process environment found no configured TELEMETRY_HMAC_SALT; no secret values were read or emitted."
+          },
+          {
+            "type": "github-pr",
+            "anchor": "github/xu75/clowder-ai/pull/11@6ae3f310248d374e32a448dd587b804141a7139e",
+            "excerpt": "PR #11 implements fresh eval source refs but has remained unchanged since 2026-07-28T03:15:04Z. Its sole failed Build reflects the CLI palette baseline issue later fixed by merged PR #10, yet the PR has not been rebased or rerun against current main."
+          },
+          {
+            "type": "owner-handoff",
+            "anchor": "thread_eval_friction/0001785640392054-000115-8c24cf3b",
+            "excerpt": "The owner dispatch triggered by the 2026-08-02 eval:a2a fix verdict failed immediately with provider HTTP 403 due insufficient prepaid budget; no owner follow-through message or repair PR appeared."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "grounding-phase-o/grounding.check_total",
+            "excerpt": "The evaluator received HTTP 401 Session required from telemetry health, metrics, history, grounding-samples, and trace-stats endpoints even when using current invocation callback headers. grounding.check_total, grounding.verdict_total, mismatch_sample_count, and mismatch patterns therefore remain unevaluable; no-data is a telemetry gap, not evidence that the shadow distribution is healthy."
+          }
+        ]
+      },
+      "proposedAction": [
+        {
+          "action": "runtime-fix",
+          "target": "F167/eval-source-freshness-and-deployment",
+          "rationale": "Resume PR #11 by rebasing its focused sourceRefs implementation onto current main, rerun CI, and send the final SHA through normal cross-review. After merge, coordinate operator preservation of the dirty main worktree, restart API/MCP from clean origin/main with operator-managed telemetry salt, and verify a runtime-generated F167 snapshot plus non-null Grounding Phase O counters before closing the finding."
+        }
+      ],
+      "status": "open"
+    }
+  ]
+}

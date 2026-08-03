@@ -1,0 +1,30 @@
+{
+  "verdictId": "2026-08-03-eval-a2a-stalled-repair-loop-fix",
+  "evalSnapshotId": "eval-F167-2026-08-03",
+  "featureId": "F167",
+  "generatedAt": "2026-08-03T03:03:50.072Z",
+  "window": {
+    "startMs": 1785726230072,
+    "endMs": 1785726230072,
+    "durationHours": 0
+  },
+  "counterWindow": {
+    "startMs": 1784902196000,
+    "endMs": 1785726230072,
+    "durationHours": 228.898353
+  },
+  "components": [
+    {
+      "id": "grounding-phase-o",
+      "name": "claim grounding (Phase O shadow)",
+      "confidence": "no-data",
+      "activationCounts": {
+        "grounding.check_total": null,
+        "grounding.verdict_total": null
+      },
+      "frictionCounts": {
+        "grounding.mismatch_sample_count": null
+      }
+    }
+  ]
+}
