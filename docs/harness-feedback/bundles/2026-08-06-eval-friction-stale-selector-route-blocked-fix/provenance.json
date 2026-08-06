@@ -1,0 +1,15 @@
+{
+  "verdictId": "2026-08-06-eval-friction-stale-selector-route-blocked-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-08-06-eval-friction-stale-selector-route-blocked-fix/raw/rollup-report.json",
+      "sha256": "bcb2b5302e3832a20ace4be21b34bf9a7d3fd0a3ee38b8b6e4d457ece49c0e41"
+    }
+  ],
+  "generatedAt": "2026-08-06T03:05:01.401Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1"
+}

@@ -1,0 +1,11 @@
+{
+  "verdictId": "2026-08-06-eval-friction-stale-selector-route-blocked-fix",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-08-06",
+  "generatedAt": "2026-08-06T03:05:01.401Z",
+  "findings": [],
+  "noFindingRecord": {
+    "reason": "no friction cluster surfaced in the selected window",
+    "evidence": "friction-rollup/cluster_count"
+  }
+}
