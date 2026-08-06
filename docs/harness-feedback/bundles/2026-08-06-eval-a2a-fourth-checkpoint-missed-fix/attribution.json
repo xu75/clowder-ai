@@ -1,0 +1,76 @@
+{
+  "verdictId": "2026-08-06-eval-a2a-fourth-checkpoint-missed-fix",
+  "featureId": "F167",
+  "evalSnapshotId": "eval-F167-2026-08-06",
+  "generatedAt": "2026-08-06T03:02:13.857Z",
+  "findings": [
+    {
+      "id": "AR-2026-08-06-001",
+      "relatedFeature": "F167",
+      "frictionSignal": {
+        "type": "remediation-fourth-checkpoint-missed",
+        "severity": "high",
+        "confidence": 0.99
+      },
+      "attribution": {
+        "primaryLayer": "environment_drift",
+        "pipelineOrHuman": "human-required",
+        "evidence": [
+          {
+            "type": "runtime-process",
+            "anchor": "runtime/pid-4096",
+            "excerpt": "The live API still runs node dist/index.js from the dirty main worktree, started 2026-07-24T14:09:56Z. At snapshot time its counter window was 300.871627 hours and it still had not loaded PR #9 or later main commits."
+          },
+          {
+            "type": "runtime-config",
+            "anchor": "runtime/TELEMETRY_HMAC_SALT",
+            "excerpt": "A presence-only inspection of the live process environment found no configured TELEMETRY_HMAC_SALT or OTEL_SDK_DISABLED; no secret values were read or emitted."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "L1/l1.streak_warn_count",
+            "excerpt": "WorklistRegistry activation remains unavailable; no runtime-generated F167 source artifact exists for the current window."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C1/c1.hold_zombie_count",
+            "excerpt": "hold_ball zombie and cancellation evidence remains unavailable because the scheduled evaluator cannot access trace or metric stores."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C2/c2.verdict_without_pass_count",
+            "excerpt": "Forced-pass counts remain unavailable; the 300.871627-hour counter window is valid and exceeds two hours, but all counter values are null, so no counter-derived rate is computed."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "route-serial/inline_action.checked",
+            "excerpt": "Serial-route activation remains unavailable; absent counters are not interpreted as zero activity."
+          },
+          {
+            "type": "github-pr",
+            "anchor": "github/xu75/clowder-ai/pull/11@6ae3f310248d374e32a448dd587b804141a7139e",
+            "excerpt": "PR #11 remains open and unchanged since 2026-07-28T03:15:04Z, 215.786071 hours at snapshot time. Four checks are green and the same Build check remains failed; no rebase, rerun, or replacement repair PR has appeared."
+          },
+          {
+            "type": "owner-handoff",
+            "anchor": "thread_eval_friction/0001785899358040-000138-223c5845",
+            "excerpt": "The 2026-08-05 actionable owner dispatch terminated immediately with provider HTTP 403 due insufficient prepaid budget, and no owner follow-through appeared before this evaluation."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "grounding-phase-o/grounding.check_total",
+            "excerpt": "Telemetry health, metrics, history, grounding-samples, trace-stats, and process-info endpoints all return HTTP 401 Session required to the scheduled evaluator. grounding.check_total, grounding.verdict_total, mismatch_sample_count, and mismatch patterns remain unevaluable; no-data is a telemetry access gap, not a healthy shadow distribution."
+          }
+        ]
+      },
+      "proposedAction": [
+        {
+          "action": "runtime-fix",
+          "target": "F167/eval-source-freshness-and-deployment",
+          "rationale": "Restore the owner execution route, resume PR #11 by rebasing onto current main, rerun CI, and send the final SHA through normal cross-review. After merge, preserve the dirty main worktree and restart API/MCP from clean origin/main with operator-managed telemetry salt; then verify a runtime-generated F167 snapshot, non-null core and Grounding Phase O counters, and valid sourceThreadId provenance."
+        }
+      ],
+      "status": "open"
+    }
+  ]
+}
