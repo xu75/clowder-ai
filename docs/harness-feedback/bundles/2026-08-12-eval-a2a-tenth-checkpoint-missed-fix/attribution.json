@@ -1,0 +1,86 @@
+{
+  "verdictId": "2026-08-12-eval-a2a-tenth-checkpoint-missed-fix",
+  "featureId": "F167",
+  "evalSnapshotId": "eval-F167-2026-08-12",
+  "generatedAt": "2026-08-12T03:02:11.535Z",
+  "findings": [
+    {
+      "id": "AR-2026-08-12-001",
+      "relatedFeature": "F167",
+      "frictionSignal": {
+        "type": "remediation-tenth-checkpoint-missed",
+        "severity": "high",
+        "confidence": 0.99
+      },
+      "attribution": {
+        "primaryLayer": "environment_drift",
+        "pipelineOrHuman": "human-required",
+        "evidence": [
+          {
+            "type": "runtime-process",
+            "anchor": "runtime/pid-4096",
+            "excerpt": "The live API still runs node dist/index.js from the dirty primary checkout, started 2026-07-24T14:09:56Z. At snapshot time its counter window was 444.870982 hours and it still had not loaded PR #9 or any later main commit."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "L1/l1.streak_warn_count",
+            "excerpt": "WorklistRegistry activation remains unavailable; no runtime-generated current-window F167 source artifact exists."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C1/c1.hold_zombie_count",
+            "excerpt": "hold_ball zombie and cancellation evidence remains unavailable because the scheduled evaluator cannot access trace or metric stores."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C2/c2.verdict_without_pass_count",
+            "excerpt": "Forced-pass counts remain unavailable; the 444.870982-hour counter window exceeds two hours, but every counter value is null, so no counter-derived rate is computed."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "route-serial/inline_action.checked",
+            "excerpt": "Serial-route activation remains unavailable; absent counters are not interpreted as zero activity."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "grounding-phase-o/grounding.check_total",
+            "excerpt": "grounding.check_total, grounding.verdict_total, and grounding.mismatch_sample_count remain null. There is no mismatch sample distribution to review, so no escalation from shadow to fail-closed is supported."
+          },
+          {
+            "type": "github-pr",
+            "anchor": "github/xu75/clowder-ai/pull/11@6ae3f310248d374e32a448dd587b804141a7139e",
+            "excerpt": "PR #11 remains open and unchanged since 2026-07-28T03:15:04Z, 359.785426 hours at snapshot time. Four checks are green and the same Build check remains failed; no rebase, rerun, or replacement repair PR appeared."
+          },
+          {
+            "type": "owner-handoff",
+            "anchor": "thread_eval_friction/0001786417539329-000191-12a41e66",
+            "excerpt": "The 2026-08-11 actionable owner dispatch terminated immediately with provider HTTP 403 due insufficient prepaid budget, and no owner follow-through appeared before this evaluation."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "grounding-phase-o/grounding.verdict_total",
+            "excerpt": "Telemetry health, metrics, metrics history, trace stats, grounding samples, and process-info endpoints all return HTTP 401 Session required to the scheduled evaluator. Grounding and core counters remain unevaluable; no-data is a telemetry access gap, not a healthy zero-event distribution."
+          },
+          {
+            "type": "publisher-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/29@403967d6b8b11fdd5b64d904732b53a64e105c4f",
+            "excerpt": "PR #29 remains the latest live-publisher acceptance attempt. It was closed without merge because provenance.json and the PR body omitted sourceThreadId, confirming the still-running API has not loaded the merged PR #9 fix."
+          },
+          {
+            "type": "legacy-schedule",
+            "anchor": "scheduler/eval-a2a/legacy-disabled",
+            "excerpt": "The scheduled payload declares legacyScheduledTaskIds empty and legacyCleanup disabled, so there is no duplicate legacy trigger to remove."
+          }
+        ]
+      },
+      "proposedAction": [
+        {
+          "action": "runtime-fix",
+          "target": "F167/eval-source-freshness-and-deployment",
+          "rationale": "Restore the owner execution route, resume PR #11 by rebasing onto current main, rerun CI, and send the final SHA through normal cross-review. After merge, preserve the dirty primary checkout and restart API/MCP from clean origin/main with operator-managed telemetry salt; then verify a runtime-generated F167 snapshot, accessible telemetry, non-null core and Grounding Phase O counters, and valid sourceThreadId provenance."
+        }
+      ],
+      "status": "open"
+    }
+  ]
+}
