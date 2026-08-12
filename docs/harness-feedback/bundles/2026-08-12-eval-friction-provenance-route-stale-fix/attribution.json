@@ -1,0 +1,11 @@
+{
+  "verdictId": "2026-08-12-eval-friction-provenance-route-stale-fix",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-08-12",
+  "generatedAt": "2026-08-12T03:02:16.405Z",
+  "findings": [],
+  "noFindingRecord": {
+    "reason": "no friction cluster surfaced in the selected window",
+    "evidence": "friction-rollup/cluster_count"
+  }
+}
