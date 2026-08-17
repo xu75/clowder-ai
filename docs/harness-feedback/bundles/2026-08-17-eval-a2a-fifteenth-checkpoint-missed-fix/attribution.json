@@ -1,0 +1,91 @@
+{
+  "verdictId": "2026-08-17-eval-a2a-fifteenth-checkpoint-missed-fix",
+  "featureId": "F167",
+  "evalSnapshotId": "eval-F167-2026-08-17",
+  "generatedAt": "2026-08-17T03:08:10.542Z",
+  "findings": [
+    {
+      "id": "AR-2026-08-17-001",
+      "relatedFeature": "F167",
+      "frictionSignal": {
+        "type": "remediation-fifteenth-checkpoint-missed",
+        "severity": "high",
+        "confidence": 0.99
+      },
+      "attribution": {
+        "primaryLayer": "environment_drift",
+        "pipelineOrHuman": "human-required",
+        "evidence": [
+          {
+            "type": "runtime-process",
+            "anchor": "runtime/pid-4096",
+            "excerpt": "Live API still runs node dist/index.js from the dirty primary checkout, started 2026-07-24T14:10:05.361Z; counter window is 564.968106 hours and the process predates merged PR 9."
+          },
+          {
+            "type": "telemetry-health",
+            "anchor": "telemetry/health",
+            "excerpt": "Authenticated telemetry health is readable but reports otelEnabled=false because TELEMETRY_HMAC_SALT is not configured."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "telemetry/endpoints",
+            "excerpt": "Only health and process-info are readable; traces stats, metrics, metrics history, and grounding samples return HTTP 503. Accessible endpoint count is 2 of 6."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "L1/l1.streak_warn_count",
+            "excerpt": "WorklistRegistry activation counter is unavailable; absent counter is not zero activity."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C1/c1.hold_zombie_count",
+            "excerpt": "hold_ball zombie evidence is unavailable because trace and metric stores are disabled."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C2/c2.verdict_without_pass_count",
+            "excerpt": "Forced-pass count is unavailable. Counter window 564.968106 hours exceeds two hours, but null counters do not support a rate."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "route-serial/inline_action.checked",
+            "excerpt": "Serial-route activation is unavailable; absent counters are not interpreted as zero."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "grounding-phase-o/grounding.check_total",
+            "excerpt": "grounding.check_total, grounding.verdict_total, and grounding.mismatch_sample_count are unavailable; grounding samples return 503, so no distribution supports fail-closed escalation."
+          },
+          {
+            "type": "github-pr",
+            "anchor": "github/xu75/clowder-ai/pull/11@6ae3f310248d374e32a448dd587b804141a7139e",
+            "excerpt": "PR 11 remains open and unchanged since 2026-07-28T03:15:04Z with Build failed; no rebase or replacement repair PR appeared."
+          },
+          {
+            "type": "owner-handoff",
+            "anchor": "thread_eval_friction/0001786763175525-000228-0bb916ee",
+            "excerpt": "The 2026-08-15 actionable owner dispatch ended immediately with provider HTTP 403 due insufficient prepaid budget; no owner follow-through appeared before this evaluation."
+          },
+          {
+            "type": "source-ref-gap",
+            "anchor": "scheduler/navigation/2026-08-08T03-03-31-828Z",
+            "excerpt": "The scheduler navigation references an 8 August attribution file that is absent from the live checkout, acceptance checkout, full workspace search, and reachable Git objects; raw sourceRefs had to be regenerated from current resolvers."
+          },
+          {
+            "type": "legacy-schedule",
+            "anchor": "scheduler/eval-a2a/legacy-disabled",
+            "excerpt": "The scheduled payload declares legacyScheduledTaskIds empty and legacyCleanup disabled, so there is no duplicate legacy trigger to remove."
+          }
+        ]
+      },
+      "proposedAction": [
+        {
+          "action": "runtime-fix",
+          "target": "F167/eval-source-freshness-owner-route-and-deployment",
+          "rationale": "Restore the owner route; replace or rebase PR 11 on current main and complete cross-review; preserve the dirty primary checkout, then restart API and MCP from clean current main with operator-managed TELEMETRY_HMAC_SALT; make scheduler navigation point to a current existing source artifact and verify non-null core plus Grounding counters."
+        }
+      ],
+      "status": "open"
+    }
+  ]
+}
