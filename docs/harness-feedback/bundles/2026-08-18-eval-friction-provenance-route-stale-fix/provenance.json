@@ -1,0 +1,15 @@
+{
+  "verdictId": "2026-08-18-eval-friction-provenance-route-stale-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-08-18-eval-friction-provenance-route-stale-fix/raw/rollup-report.json",
+      "sha256": "3b5a6c498b93a377c378634a9682c0a18d42fbbdb03f28082e8ca088efd4b153"
+    }
+  ],
+  "generatedAt": "2026-08-18T03:01:46.371Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1"
+}

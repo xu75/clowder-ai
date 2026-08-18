@@ -1,0 +1,39 @@
+{
+  "verdictId": "2026-08-18-eval-friction-provenance-route-stale-fix",
+  "selector": {
+    "kind": "friction-rollup-snapshot",
+    "windowStartMs": 1786762800000,
+    "windowEndMs": 1787022000000,
+    "topN": 10,
+    "tokenCap": 4000
+  },
+  "window": {
+    "sinceMs": 1786762800000,
+    "untilMs": 1787022000000
+  },
+  "signalCount": 0,
+  "clusterCount": 0,
+  "degraded": true,
+  "droppedChannels": [],
+  "report": {
+    "window": {
+      "sinceMs": 1786762800000,
+      "untilMs": 1787022000000
+    },
+    "generatedAt": "2026-08-18T03:01:46.371Z",
+    "topClusters": [],
+    "actionableCandidates": [],
+    "referenceOnly": [],
+    "tailSummary": {
+      "clusterCount": 0,
+      "signalCount": 0,
+      "byChannel": {}
+    },
+    "degraded": true,
+    "droppedChannels": [],
+    "tokenBudget": {
+      "cap": 4000,
+      "estimated": 78
+    }
+  }
+}
