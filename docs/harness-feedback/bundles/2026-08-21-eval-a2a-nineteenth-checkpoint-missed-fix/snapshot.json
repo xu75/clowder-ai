@@ -1,0 +1,66 @@
+{
+  "verdictId": "2026-08-21-eval-a2a-nineteenth-checkpoint-missed-fix",
+  "evalSnapshotId": "eval-F167-2026-08-21",
+  "featureId": "F167",
+  "generatedAt": "2026-08-21T03:02:55.167Z",
+  "window": {
+    "startMs": 1787281375167,
+    "endMs": 1787281375167,
+    "durationHours": 0
+  },
+  "counterWindow": {
+    "startMs": 1784902206566,
+    "endMs": 1787281375167,
+    "durationHours": 660.880167
+  },
+  "components": [
+    {
+      "id": "L1",
+      "name": "WorklistRegistry (ping-pong breaker)",
+      "confidence": "no-data",
+      "activationCounts": {
+        "l1.streak_warn_count": null
+      },
+      "frictionCounts": {}
+    },
+    {
+      "id": "C1",
+      "name": "hold_ball (MCP tool)",
+      "confidence": "no-data",
+      "activationCounts": {},
+      "frictionCounts": {
+        "c1.hold_zombie_count": null
+      }
+    },
+    {
+      "id": "C2",
+      "name": "exit-check (forced-pass guard)",
+      "confidence": "no-data",
+      "activationCounts": {},
+      "frictionCounts": {
+        "c2.verdict_without_pass_count": null
+      }
+    },
+    {
+      "id": "route-serial",
+      "name": "route-serial (A2A handoff routing)",
+      "confidence": "no-data",
+      "activationCounts": {
+        "inline_action.checked": null
+      },
+      "frictionCounts": {}
+    },
+    {
+      "id": "grounding-phase-o",
+      "name": "claim grounding (Phase O shadow)",
+      "confidence": "no-data",
+      "activationCounts": {
+        "grounding.check_total": null,
+        "grounding.verdict_total": null
+      },
+      "frictionCounts": {
+        "grounding.mismatch_sample_count": null
+      }
+    }
+  ]
+}
