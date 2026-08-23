@@ -1,0 +1,96 @@
+{
+  "verdictId": "2026-08-23-eval-a2a-twenty-first-checkpoint-missed-fix-v2",
+  "featureId": "F167",
+  "evalSnapshotId": "eval-F167-2026-08-23",
+  "generatedAt": "2026-08-23T03:07:16.271Z",
+  "findings": [
+    {
+      "id": "AR-2026-08-23-001",
+      "relatedFeature": "F167",
+      "frictionSignal": {
+        "type": "remediation-twenty-first-checkpoint-missed",
+        "severity": "high",
+        "confidence": 0.99
+      },
+      "attribution": {
+        "primaryLayer": "environment_drift",
+        "pipelineOrHuman": "human-required",
+        "evidence": [
+          {
+            "type": "runtime-process",
+            "anchor": "runtime/pid-4096",
+            "excerpt": "Live API still runs node dist/index.js from the dirty primary checkout with processStartMs 1784902207160. The counter window is now 708.952531 hours, and the process started 132.892456 hours before provenance fix PR 9 merged."
+          },
+          {
+            "type": "telemetry-health",
+            "anchor": "telemetry/health",
+            "excerpt": "Authenticated telemetry health is readable but reports otelEnabled=false because TELEMETRY_HMAC_SALT is not configured."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "telemetry/endpoints",
+            "excerpt": "Only health and process-info are readable; traces stats, metrics, metrics history, and grounding samples return HTTP 503. Accessible endpoint count remains 2 of 6."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "L1/l1.streak_warn_count",
+            "excerpt": "WorklistRegistry activation counter is unavailable; absent counter is not zero activity."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C1/c1.hold_zombie_count",
+            "excerpt": "hold_ball zombie evidence is unavailable because trace and metric stores are disabled."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C2/c2.verdict_without_pass_count",
+            "excerpt": "Forced-pass count is unavailable. Counter window 708.952531 hours exceeds two hours, but null counters do not support a rate."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "route-serial/inline_action.checked",
+            "excerpt": "Serial-route activation is unavailable; absent counters are not interpreted as zero."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "grounding-phase-o/grounding.check_total",
+            "excerpt": "grounding.check_total, grounding.verdict_total, and grounding.mismatch_sample_count are unavailable; grounding samples return 503, so no distribution supports fail-closed escalation."
+          },
+          {
+            "type": "github-pr",
+            "anchor": "github/xu75/clowder-ai/pull/11@6ae3f310248d374e32a448dd587b804141a7139e",
+            "excerpt": "PR 11 remains the only open pull request on the same head for 623.870075 hours since 2026-07-28T03:15:04Z. Build is still failed and no replacement repair PR is visible."
+          },
+          {
+            "type": "owner-handoff",
+            "anchor": "thread_eval_friction/0001787281867331-000281-42c56312",
+            "excerpt": "The 21 August owner dispatch routed successfully but the Opus invocation immediately failed with provider HTTP 403 because prepaid budget was insufficient; no owner remediation followed."
+          },
+          {
+            "type": "evaluator-gap",
+            "anchor": "thread_eval_a2a/0001787367638365-000287-8f07d8a7",
+            "excerpt": "The 22 August scheduled eval invocation exited before analysis because the Codex refresh token had been revoked. This creates one daily publication gap; uninterrupted PID 4096 establishes process continuity but is not a substitute for an independent 22 August telemetry sample."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/51@561e215b38407db41a8438301d7e7fe112153688",
+            "excerpt": "The 21 August a2a evidence PR merged and its bundle provenance carries sourceThreadId=thread_eval_a2a, so the a2a publisher path was healthy at the last completed checkpoint even though functional remediation remained absent."
+          },
+          {
+            "type": "legacy-schedule",
+            "anchor": "scheduler/eval-a2a/legacy-disabled",
+            "excerpt": "The scheduled payload declares legacyScheduledTaskIds empty and legacyCleanup disabled, so there is no duplicate legacy trigger to remove."
+          }
+        ]
+      },
+      "proposedAction": [
+        {
+          "action": "runtime-fix",
+          "target": "F167/owner-route-and-current-main-deployment",
+          "rationale": "Restore a routable owner execution path; replace or rebase PR 11 on current main and complete cross-review; preserve the dirty primary checkout, then restart API and MCP from clean current main with operator-managed TELEMETRY_HMAC_SALT; retain sourceRef and sourceThreadId provenance and verify non-null core plus Grounding counters."
+        }
+      ],
+      "status": "open"
+    }
+  ]
+}
