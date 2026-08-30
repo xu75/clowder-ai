@@ -1,0 +1,15 @@
+{
+  "verdictId": "2026-08-30-eval-friction-provenance-backlog-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-08-30-eval-friction-provenance-backlog-fix/raw/rollup-report.json",
+      "sha256": "b8b54fed0b46060a04c50c6d4c3f1752c411bc9215ce3d9a9ebc04e077bc44ce"
+    }
+  ],
+  "generatedAt": "2026-08-30T03:02:16.521Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1"
+}
