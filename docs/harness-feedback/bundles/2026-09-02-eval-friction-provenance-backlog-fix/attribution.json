@@ -1,0 +1,11 @@
+{
+  "verdictId": "2026-09-02-eval-friction-provenance-backlog-fix",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-09-02",
+  "generatedAt": "2026-09-02T03:02:08.347Z",
+  "findings": [],
+  "noFindingRecord": {
+    "reason": "no friction cluster surfaced in the selected window",
+    "evidence": "friction-rollup/cluster_count"
+  }
+}
