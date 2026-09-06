@@ -1,0 +1,40 @@
+{
+  "verdictId": "2026-09-06-anchor-first-stale-selector-keep-observe",
+  "selector": {
+    "kind": "anchor-telemetry-snapshot",
+    "windowStartMs": 1759276800000,
+    "windowEndMs": 1759363200000
+  },
+  "rollup": {
+    "perTool": {},
+    "orphanDrills": 0,
+    "adoption": {
+      "explicitAnchorCalls": 0,
+      "explicitFullCalls": 0,
+      "defaultAnchorCalls": 0,
+      "defaultFullCalls": 0,
+      "legacyEquivalentAnchorCalls": 0,
+      "legacyEquivalentFullCalls": 0,
+      "unknownModeCalls": 0,
+      "uniqueCatsExplicitAnchor": 0
+    },
+    "track1Snapshot": {
+      "returnedByTool": {
+        "list-tasks": 1,
+        "thread-context": 72,
+        "pending-mentions": 1
+      },
+      "returnedCharsByTool": {
+        "list-tasks": 12,
+        "thread-context": 1293826,
+        "pending-mentions": 2288
+      },
+      "drillByTool": {
+        "get-message": 32
+      },
+      "drillCharsByTool": {
+        "get-message": 254444
+      }
+    }
+  }
+}
