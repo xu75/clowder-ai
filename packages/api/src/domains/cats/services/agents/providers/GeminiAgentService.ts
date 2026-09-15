@@ -334,11 +334,11 @@ const AGY_GEMINI_MODEL_BY_LEGACY_MODEL_ID = new Map([
   ['gemini-2.5-pro', 'Gemini 3.1 Pro (High)'],
   ['gemini-2.5-pro-preview', 'Gemini 3.1 Pro (High)'],
   ['gemini-2.5-pro-exp', 'Gemini 3.1 Pro (High)'],
-  ['gemini-2.5-flash', 'Gemini 3.5 Flash (High)'],
-  ['gemini-2.5-flash-preview', 'Gemini 3.5 Flash (High)'],
+  ['gemini-2.5-flash', 'Gemini 3.7 Flash (High)'],
+  ['gemini-2.5-flash-preview', 'Gemini 3.7 Flash (High)'],
   ['gemini-3.1-pro', 'Gemini 3.1 Pro (High)'],
   ['gemini-3.1-pro-preview', 'Gemini 3.1 Pro (High)'],
-  ['gemini-3.5-flash', 'Gemini 3.5 Flash (High)'],
+  ['gemini-3.5-flash', 'Gemini 3.7 Flash (High)'],
 ]);
 
 function normalizeAgyModelSelector(model: string): string {

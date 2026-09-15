@@ -44,18 +44,18 @@ const CLIENT_ID_VALUES = new Set(['anthropic', 'openai', 'google', 'kimi', 'anti
 const LEGACY_GEMINI_CONSUMER_CAT_IDS = new Set(['gemini', 'gemini25', 'gemini35']);
 const AGY_GEMINI_DEFAULT_MODEL_BY_CAT_ID = new Map([
   ['gemini', 'Gemini 3.1 Pro (High)'],
-  ['gemini25', 'Gemini 3.5 Flash (High)'],
-  ['gemini35', 'Gemini 3.5 Flash (High)'],
+  ['gemini25', 'Gemini 3.7 Flash (High)'],
+  ['gemini35', 'Gemini 3.7 Flash (High)'],
 ]);
 const AGY_GEMINI_MODEL_BY_LEGACY_MODEL_ID = new Map([
   ['gemini-2.5-pro', 'Gemini 3.1 Pro (High)'],
   ['gemini-2.5-pro-preview', 'Gemini 3.1 Pro (High)'],
   ['gemini-2.5-pro-exp', 'Gemini 3.1 Pro (High)'],
-  ['gemini-2.5-flash', 'Gemini 3.5 Flash (High)'],
-  ['gemini-2.5-flash-preview', 'Gemini 3.5 Flash (High)'],
+  ['gemini-2.5-flash', 'Gemini 3.7 Flash (High)'],
+  ['gemini-2.5-flash-preview', 'Gemini 3.7 Flash (High)'],
   ['gemini-3.1-pro', 'Gemini 3.1 Pro (High)'],
   ['gemini-3.1-pro-preview', 'Gemini 3.1 Pro (High)'],
-  ['gemini-3.5-flash', 'Gemini 3.5 Flash (High)'],
+  ['gemini-3.5-flash', 'Gemini 3.7 Flash (High)'],
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
