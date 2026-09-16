@@ -1281,6 +1281,8 @@ export async function* routeSerial(
           : {}),
         invocationSpanRef,
         isLastCat: false,
+        // F167: Forward allowResumeFallback from route options
+        ...(options.allowResumeFallback !== undefined ? { allowResumeFallback: options.allowResumeFallback } : {}),
       })) {
         // F39 bugfix: stop yielding after cancel (pipe buffer may still drain)
         if (catSignal?.aborted) break;
@@ -1772,6 +1774,8 @@ export async function* routeSerial(
             : {}),
           invocationSpanRef,
           isLastCat: false,
+          // F167: Forward allowResumeFallback from route options
+          ...(options.allowResumeFallback !== undefined ? { allowResumeFallback: options.allowResumeFallback } : {}),
         })) {
           if (catSignal?.aborted) break;
 

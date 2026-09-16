@@ -100,6 +100,8 @@ export interface ScheduleTriggerPolicy {
   readonly reason?: string;
   readonly sourceCategory?: string;
   readonly suggestedSkill?: string;
+  /** F167: Allow fallback to fresh session on resume capability errors */
+  readonly allowResumeFallback?: boolean;
 }
 
 export interface ScheduleLifecycleNotice {

@@ -2896,6 +2896,136 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
     assert.equal(done.metadata.usage.lastTurnInputTokens, 186_749);
   });
 
+  test('F167: resume capability error triggers fresh session fallback when allowResumeFallback=true', async () => {
+    let spawnCallCount = 0;
+    const spawnFn = mock.fn((cmd, args, opts) => {
+      spawnCallCount++;
+      const proc = createMockProcess();
+
+      // First call: resume attempt that fails with capability error
+      if (spawnCallCount === 1) {
+        assert.equal(args[0], 'exec', 'first call should be exec');
+        assert.equal(args[1], 'resume', 'first call should be resume');
+        assert.equal(args[2], 'existing-session-123', 'first call should pass sessionId');
+
+        setImmediate(() => {
+          proc.stdout.push(
+            JSON.stringify({
+              type: 'error',
+              message: 'paginated_threads is not supported yet',
+            }) + '\n',
+          );
+          proc.emit('exit', 1);
+        });
+        return proc;
+      }
+
+      // Second call: fresh session fallback
+      if (spawnCallCount === 2) {
+        assert.equal(args[0], 'exec', 'fallback call should be exec');
+        assert.ok(!args.includes('resume'), 'fallback call should NOT use resume subcommand');
+        assert.ok(!args.includes('existing-session-123'), 'fallback call should NOT include old sessionId');
+
+        setImmediate(() => {
+          emitCodexEvents(proc, [
+            { type: 'thread.started', thread_id: 'fresh-thread-789' },
+            {
+              type: 'item.completed',
+              item: { id: 'msg-1', type: 'agent_message', text: 'Fresh session started' },
+            },
+          ]);
+        });
+        return proc;
+      }
+
+      throw new Error(`Unexpected spawn call ${spawnCallCount}`);
+    });
+
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn });
+
+    const msgs = await collect(
+      service.invoke('Continue the task', {
+        sessionId: 'existing-session-123',
+        allowResumeFallback: true,
+      }),
+    );
+
+    assert.equal(spawnCallCount, 2, 'should spawn twice: resume attempt + fresh fallback');
+
+    const textMsgs = msgs.filter((m) => m.type === 'text');
+    assert.ok(textMsgs.length > 0, 'should receive text from fresh session');
+    assert.ok(
+      textMsgs.some((m) => m.text.includes('Fresh session started')),
+      'should receive content from fresh session',
+    );
+
+    const sessionInit = msgs.find((m) => m.type === 'session_init');
+    assert.ok(sessionInit, 'should emit session_init from fresh session');
+    assert.equal(sessionInit.sessionId, 'fresh-thread-789', 'session_init should have fresh sessionId');
+  });
+
+  test('F167: resume capability error does NOT fallback when allowResumeFallback=false', async () => {
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn });
+
+    const promise = collect(
+      service.invoke('Continue', {
+        sessionId: 'existing-session-456',
+        allowResumeFallback: false,
+      }),
+    );
+
+    setImmediate(() => {
+      proc.stdout.push(
+        JSON.stringify({
+          type: 'error',
+          message: 'list_turns is not supported yet',
+        }) + '\n',
+      );
+      proc.emit('exit', 1);
+    });
+
+    await assert.rejects(
+      promise,
+      /list_turns is not supported yet/,
+      'should reject with capability error when fallback disabled',
+    );
+
+    assert.equal(spawnFn.mock.callCount(), 1, 'should only spawn once (no fallback)');
+  });
+
+  test('F167: generic resume error does NOT trigger fallback even with allowResumeFallback=true', async () => {
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn });
+
+    const promise = collect(
+      service.invoke('Continue', {
+        sessionId: 'existing-session-789',
+        allowResumeFallback: true,
+      }),
+    );
+
+    setImmediate(() => {
+      proc.stdout.push(
+        JSON.stringify({
+          type: 'error',
+          message: 'Network timeout during thread fetch',
+        }) + '\n',
+      );
+      proc.emit('exit', 1);
+    });
+
+    await assert.rejects(
+      promise,
+      /Network timeout/,
+      'should reject with generic error (no fallback for non-capability errors)',
+    );
+
+    assert.equal(spawnFn.mock.callCount(), 1, 'should only spawn once (no fallback for generic errors)');
+  });
+
   test('Issue #116: turn.completed unblocks done even when process exit is delayed', async () => {
     const stdout = new PassThrough();
     const stderr = new PassThrough();

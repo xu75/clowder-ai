@@ -295,6 +295,11 @@ export interface AgentServiceOptions {
   cliConfigArgs?: readonly string[];
   /** F153 Phase B: Parent OTel span for creating CLI session child span */
   parentSpan?: Span;
+  /** F167: Allow automatic fallback to fresh session when resume fails with capability error.
+   *  When true AND sessionId is provided AND resume fails with "paginated_threads/list_turns
+   *  is not supported yet" error AND no substantive output has been produced yet, the provider
+   *  will automatically retry with a fresh session instead of yielding the error. */
+  allowResumeFallback?: boolean;
 }
 
 /**
