@@ -1,0 +1,16 @@
+{
+  "verdictId": "2026-09-17-eval-friction-f167-repair-gate-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-09-17-eval-friction-f167-repair-gate-fix/raw/rollup-report.json",
+      "sha256": "1c53fd903bf2b1cdc38e55d7518d4b5114b21239c35e86aa2fff75d425ef1eb8"
+    }
+  ],
+  "generatedAt": "2026-09-17T03:02:32.654Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1",
+  "sourceThreadId": "thread_eval_friction"
+}
