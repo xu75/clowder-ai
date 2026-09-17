@@ -117,6 +117,31 @@ function applyAuthMode(env: Record<string, string>, authMode: CodexAuthMode): Re
 const MAX_RECENT_STREAM_ERRORS = 5;
 const MAX_STREAM_ERROR_LENGTH = 240;
 
+/**
+ * F167: Detect precise resume capability errors that warrant fallback to fresh session.
+ * Only matches specific capability missing errors, not generic resume failures.
+ * Matches: "paginated_threads is not supported yet" | "list_turns is not supported yet"
+ */
+function isResumeCapabilityError(
+  event: {
+    message?: string;
+    cliDiagnostics?: { publicSummary?: string; safeExcerpt?: string };
+  },
+  recentErrors: string[],
+): boolean {
+  const diagnosticText = [
+    event.message,
+    event.cliDiagnostics?.publicSummary,
+    event.cliDiagnostics?.safeExcerpt,
+    ...recentErrors,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join('\n');
+
+  // Only match exact capability errors, not generic "thread/resume failed"
+  return /paginated_threads is not supported yet|list_turns is not supported yet/i.test(diagnosticText);
+}
+
 function collectCodexStreamError(event: unknown, recentErrors: string[]): void {
   if (typeof event !== 'object' || event === null) return;
   const record = event as Record<string, unknown>;
@@ -1044,10 +1069,11 @@ export class CodexAgentService implements AgentService {
         ? options.spawnCliOverride(cliOpts)
         : spawnCli(cliOpts, this.spawnFn ? { spawnFn: this.spawnFn } : undefined);
 
-      // Track substantive output (item.completed with text/tool results).
-      // Used to suppress Codex CLI 0.98+ false exit-code-1 errors:
-      // thread.started alone is NOT substantive (just session init).
-      let sawSubstantiveOutput = false;
+      // F167 P1-fix: Split two independent safety flags:
+      // 1. sawCompletedOutput: track item.completed for exit-code-1 suppression
+      // 2. retryUnsafe: track side-effect starts (command/MCP tool) that make fallback unsafe
+      let sawCompletedOutput = false;
+      let retryUnsafe = false;
       const codexStreamState: CodexStreamState = { hadPriorTextTurn: false };
 
       for await (const event of events) {
@@ -1115,18 +1141,51 @@ export class CodexAgentService implements AgentService {
           continue;
         }
         if (isCliError(event)) {
+          // F167: Resume capability error detection and fallback
+          // When resume fails with "paginated_threads/list_turns is not supported yet"
+          // AND allowResumeFallback is true AND no side effects or output have occurred,
+          // fallback to a fresh session instead of yielding error.
+          // After any command/MCP tool starts OR any completed output, we MUST surface the error (fail-closed).
+          const resumeCapabilityError = isResumeCapabilityError(event, recentStreamErrors);
+          if (
+            options?.allowResumeFallback &&
+            options?.sessionId &&
+            !retryUnsafe &&
+            !sawCompletedOutput &&
+            resumeCapabilityError
+          ) {
+            log.warn(
+              { sessionId: options.sessionId, catId: this.catId },
+              '[F167] Resume capability error detected, falling back to fresh session',
+            );
+            // Recursively call invoke with sessionId=undefined to create fresh session
+            // F167 P1-fix: Restore resumeFallbackSystemPrompt to systemPrompt for fresh session
+            // and disable further fallback (allowResumeFallback=false) to prevent infinite loops
+            const freshOptions = {
+              ...options,
+              sessionId: undefined,
+              systemPrompt: options.resumeFallbackSystemPrompt ?? options.systemPrompt,
+              resumeFallbackSystemPrompt: undefined,
+              allowResumeFallback: false,
+            };
+            yield* this.invoke(prompt, freshOptions);
+            return;
+          }
+
           // Codex CLI 0.98+ returns exit code 1 after successful completion.
-          // Suppress the error ONLY if we saw substantive output (item.completed).
+          // Suppress the error ONLY if we saw completed output (item.completed) AND it's not a resume capability error.
           // thread.started alone is NOT enough — that just means session init.
+          // Resume capability errors must always be surfaced, even if output occurred before the error.
           if (
             event.exitCode === 1 &&
             event.signal === null &&
-            sawSubstantiveOutput &&
+            sawCompletedOutput &&
+            !resumeCapabilityError &&
             !hasNonSuppressibleCodexExitOneDiagnostics(event, recentStreamErrors)
           ) {
             log.warn(
               {},
-              `[codex] Codex CLI exited with code 1 after substantive output (suppressing as Codex 0.98+ quirk)`,
+              `[codex] Codex CLI exited with code 1 after completed output (suppressing as Codex 0.98+ quirk)`,
             );
             continue;
           }
@@ -1141,7 +1200,8 @@ export class CodexAgentService implements AgentService {
               publicSummary: event.cliDiagnostics?.publicSummary,
               safeExcerpt: event.cliDiagnostics?.safeExcerpt,
               debugRef: event.cliDiagnostics?.debugRef,
-              sawSubstantiveOutput,
+              sawCompletedOutput,
+              retryUnsafe,
               recentStreamErrors,
             },
             '[codex-diag] CLI error exit — full diagnostics',
@@ -1158,11 +1218,20 @@ export class CodexAgentService implements AgentService {
           continue;
         }
 
-        // Track substantive events: item.completed produces text/tool_result/tool_use
+        // Track completed output and retry-unsafe side effects independently:
+        // - sawCompletedOutput: item.completed produces text/tool_result/tool_use (for exit-code-1 suppression)
+        // - retryUnsafe: command_execution or mcp_tool_call started (prevents resume fallback replay)
         if (typeof event === 'object' && event !== null) {
           const e = event as Record<string, unknown>;
           if (e.type === 'item.completed') {
-            sawSubstantiveOutput = true;
+            sawCompletedOutput = true;
+          }
+          // Mark retry unsafe when command or MCP tool execution starts (side effects may have occurred)
+          if (e.type === 'item.started') {
+            const item = e.item as Record<string, unknown> | undefined;
+            if (item?.type === 'command_execution' || item?.type === 'mcp_tool_call') {
+              retryUnsafe = true;
+            }
           }
         }
 
