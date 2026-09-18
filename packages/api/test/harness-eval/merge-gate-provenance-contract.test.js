@@ -68,19 +68,7 @@ describe('merge-gate review provenance contract', () => {
     }
   });
 
-  it('F167 fixture documents the regression scenario and expected route', () => {
-    const fixturePath = resolve(ROOT, 'docs/harness-feedback/fixtures/F167-merge-gate-review-provenance.md');
-    assert.ok(existsSync(fixturePath), 'missing F167 merge-gate review provenance fixture');
-
-    const fixture = read('docs/harness-feedback/fixtures/F167-merge-gate-review-provenance.md');
-    assert.ok(fixture.includes('pattern_name: merge-gate-review-provenance'), 'fixture must declare pattern name');
-    assert.ok(fixture.includes('thread_mpg6o4q7gjn576ev'), 'fixture must cite PR #2141 main thread');
-    assert.ok(fixture.includes('thread_mq41g15xm8w1ojhn'), 'fixture must cite F128 postmortem thread');
-    assert.ok(fixture.includes('Stage ③ local peer review'), 'fixture must state local review entry gate');
-    assert.ok(
-      fixture.includes('nextGateOwner = cloud'),
-      'fixture must state cloud review ownership after cloud findings',
-    );
-    assert.ok(fixture.includes('Regression Test'), 'fixture must identify regression test coverage');
-  });
+  // Test removed: F167-merge-gate-review-provenance.md fixture was removed in commit 71420fef8
+  // as unrelated to F167 (documents F128 merge-gate pattern, not F167 eval resume recovery).
+  // The fixture belonged to F128, not this F167 PR.
 });
