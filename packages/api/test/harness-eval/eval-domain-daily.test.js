@@ -242,6 +242,34 @@ describe('eval-domain-daily task spec', () => {
     assert.ok(domainIds.includes('eval:memory'), 'eval:memory (daily) must appear');
     assert.ok(domainIds.includes('eval:task-outcome'), 'eval:task-outcome (daily) must appear');
   });
+
+  it('F167: execute passes allowResumeFallback=true to invokeTrigger for eval domains', async () => {
+    const spec = createEvalDomainDailySpec({
+      harnessFeedbackRoot: repoHarnessFeedbackRoot,
+      defaultUserId: 'default-user',
+    });
+
+    const gateResult = await spec.admission.gate();
+    assert.equal(gateResult.run, true);
+    const a2aItem = gateResult.workItems.find((w) => w.subjectKey === 'eval:a2a');
+    assert.ok(a2aItem);
+
+    const triggerMock = mock.fn();
+    const ctx = {
+      assignedCatId: null,
+      deliver: mock.fn(async () => 'msg_f167'),
+      invokeTrigger: { trigger: triggerMock },
+    };
+
+    await spec.run.execute(a2aItem.signal, a2aItem.subjectKey, ctx);
+
+    assert.equal(triggerMock.mock.callCount(), 1);
+    const triggerArgs = triggerMock.mock.calls[0].arguments;
+    // Args: threadId, catId, userId, reason, messageId, contentBlocks, policy
+    const policy = triggerArgs[6];
+    assert.ok(policy, 'policy parameter must be provided');
+    assert.equal(policy.allowResumeFallback, true, 'allowResumeFallback must be true for isolated eval invocations');
+  });
 });
 
 describe('eval-domain-weekly task spec (AC-E19, AC-E20)', () => {
