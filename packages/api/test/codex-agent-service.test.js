@@ -3266,9 +3266,10 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
     assert.match(errorMsgs[0].error, /list_turns/, 'error should mention the capability failure');
   });
 
-  test('F167: fresh session gets new sessionId persisted', async () => {
+  test('F167: fresh session emits new sessionId in session_init event', async () => {
     let spawnCallCount = 0;
     const newSessionId = `session-${Date.now()}`;
+
     const spawnFn = mock.fn(() => {
       spawnCallCount++;
       if (spawnCallCount === 1) {
@@ -3304,18 +3305,28 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
       throw new Error(`Unexpected spawn call ${spawnCallCount}`);
     });
 
-    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+    const service = new CodexAgentService({
+      l0CompilerFn: fakeL0Compiler,
+      spawnFn,
+      model: 'gpt-5.3-codex',
+    });
 
     const msgs = await collect(
       service.invoke('Continue the task', {
         sessionId: 'old-session-persistent',
         allowResumeFallback: true,
+        userId: 'test-user',
+        threadId: 'test-thread',
       }),
     );
 
     assert.equal(spawnFn.mock.callCount(), 2, 'should spawn twice (fallback happened)');
 
     // Verify fresh session emitted new sessionId via session_init event
+    // Note: Actual sessionManager.store() persistence happens in invoke-single-cat.ts
+    // when it receives this session_init event. This test only verifies the provider
+    // emits the correct event; integration test coverage for full persistence path
+    // should be added to invoke-single-cat.test.js
     const sessionInit = msgs.find((m) => m.type === 'session_init');
     assert.ok(sessionInit, 'should emit session_init event');
     assert.equal(sessionInit.sessionId, newSessionId, 'should use new sessionId from fresh session');
