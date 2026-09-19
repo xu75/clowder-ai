@@ -3150,4 +3150,69 @@ describe('QueueProcessor', () => {
       });
     }
   });
+
+  describe('F167: QueueProcessor propagates allowResumeFallback to router', () => {
+    it('allowResumeFallback=true from queue entry passes to router.routeExecution', async () => {
+      let capturedOptions;
+      deps.router.routeExecution = mock.fn(
+        async function* (_userId, _content, _threadId, _messageId, _targetCats, _intent, options) {
+          capturedOptions = options;
+          yield { type: 'done', catId: 'opus', isFinal: true, timestamp: Date.now() };
+        },
+      );
+
+      enqueueEntry(deps.queue, { allowResumeFallback: true });
+      const result = await processor.processNext('t1', 'u1');
+      assert.equal(result.started, true);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      assert.equal(
+        capturedOptions?.allowResumeFallback,
+        true,
+        'F167: QueueProcessor must pass allowResumeFallback=true to router',
+      );
+    });
+
+    it('allowResumeFallback=false from queue entry passes to router.routeExecution', async () => {
+      let capturedOptions;
+      deps.router.routeExecution = mock.fn(
+        async function* (_userId, _content, _threadId, _messageId, _targetCats, _intent, options) {
+          capturedOptions = options;
+          yield { type: 'done', catId: 'opus', isFinal: true, timestamp: Date.now() };
+        },
+      );
+
+      enqueueEntry(deps.queue, { allowResumeFallback: false });
+      const result = await processor.processNext('t1', 'u1');
+      assert.equal(result.started, true);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      assert.equal(
+        capturedOptions?.allowResumeFallback,
+        false,
+        'F167: QueueProcessor must pass allowResumeFallback=false to router',
+      );
+    });
+
+    it('missing allowResumeFallback in queue entry results in undefined in router call', async () => {
+      let capturedOptions;
+      deps.router.routeExecution = mock.fn(
+        async function* (_userId, _content, _threadId, _messageId, _targetCats, _intent, options) {
+          capturedOptions = options;
+          yield { type: 'done', catId: 'opus', isFinal: true, timestamp: Date.now() };
+        },
+      );
+
+      enqueueEntry(deps.queue, {}); // no allowResumeFallback
+      const result = await processor.processNext('t1', 'u1');
+      assert.equal(result.started, true);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      assert.equal(
+        capturedOptions?.allowResumeFallback,
+        undefined,
+        'F167: missing allowResumeFallback should not add field to router options',
+      );
+    });
+  });
 });
