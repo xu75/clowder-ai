@@ -97,6 +97,31 @@ describe('createEvalDomainNDaySpec — execute (Redis last-dispatch update)', ()
     assert.equal(storedVal, undefined, 'Redis must NOT be written when trigger failed');
   });
 
+  it('F167: execute passes allowResumeFallback=true to invokeTrigger for N-day eval domains', async () => {
+    const root = makeTempRoot(FIXTURE_FRICTION_3D_YAML);
+    const redis = makeRedis();
+    const spec = createEvalDomainNDaySpec({ harnessFeedbackRoot: root, redis });
+
+    const gateResult = await spec.admission.gate();
+    const item = gateResult.workItems.find((w) => w.subjectKey === 'eval:friction');
+    assert.ok(item, 'eval:friction must be in workItems');
+
+    const triggerMock = mock.fn();
+    const deliverMock = mock.fn(async () => 'msg_nday_f167');
+    const ctx = {
+      assignedCatId: null,
+      deliver: deliverMock,
+      invokeTrigger: { trigger: triggerMock },
+    };
+
+    await spec.run.execute(item.signal, item.subjectKey, ctx);
+
+    assert.equal(triggerMock.mock.calls.length, 1, 'invokeTrigger.trigger must be called once');
+    const [threadId, catId, userId, message, messageId, contentBlocks, policy] = triggerMock.mock.calls[0].arguments;
+    assert.ok(policy, 'policy must be provided to invokeTrigger.trigger');
+    assert.equal(policy.allowResumeFallback, true, 'N-day evaluator must pass allowResumeFallback=true');
+  });
+
   it('execute does NOT update Redis when invokeTrigger returns full (cloud R3 P1)', async () => {
     // Cloud R3 P1: trigger returning 'full' (queue at capacity, invocation dropped) must NOT
     // trip the N-day gate. The eval cat was never notified — domain must retry on next probe
