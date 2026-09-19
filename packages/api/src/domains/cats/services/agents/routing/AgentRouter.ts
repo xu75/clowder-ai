@@ -1593,6 +1593,12 @@ export class AgentRouter {
       verdictPassWarningEnabled?: boolean;
       /** F254 B3: Freshness re-invoke enqueue for routing layer consumption */
       freshnessReinvokeEnqueue?: RouteOptions['freshnessReinvokeEnqueue'];
+      /**
+       * F167: Allow resume fallback to fresh session when CLI resume fails with
+       * precise capability errors. Only set true for isolated invocations (eval)
+       * where session continuity loss is acceptable.
+       */
+      allowResumeFallback?: boolean;
     },
   ): AsyncIterable<AgentMessage> {
     const cleanMessage = stripIntentTags(message);
@@ -1712,6 +1718,10 @@ export class AgentRouter {
       // #949 P2: connector-sourced verdict-pass warning suppression
       ...(options?.verdictPassWarningEnabled !== undefined
         ? { verdictPassWarningEnabled: options.verdictPassWarningEnabled }
+        : {}),
+      // F167: eval resume fallback authorization
+      ...(options?.allowResumeFallback !== undefined
+        ? { allowResumeFallback: options.allowResumeFallback }
         : {}),
     };
 

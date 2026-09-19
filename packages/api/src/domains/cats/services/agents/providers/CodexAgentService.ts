@@ -117,6 +117,31 @@ function applyAuthMode(env: Record<string, string>, authMode: CodexAuthMode): Re
 const MAX_RECENT_STREAM_ERRORS = 5;
 const MAX_STREAM_ERROR_LENGTH = 240;
 
+/**
+ * F167: Detect precise resume capability errors that warrant fallback to fresh session.
+ * Only matches specific capability missing errors, not generic resume failures.
+ * Matches: "paginated_threads is not supported yet" | "list_turns is not supported yet"
+ */
+function isResumeCapabilityError(
+  event: {
+    message?: string;
+    cliDiagnostics?: { publicSummary?: string; safeExcerpt?: string };
+  },
+  recentErrors: string[],
+): boolean {
+  const diagnosticText = [
+    event.message,
+    event.cliDiagnostics?.publicSummary,
+    event.cliDiagnostics?.safeExcerpt,
+    ...recentErrors,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join('\n');
+
+  // Only match exact capability errors, not generic "thread/resume failed"
+  return /paginated_threads is not supported yet|list_turns is not supported yet/i.test(diagnosticText);
+}
+
 function collectCodexStreamError(event: unknown, recentErrors: string[]): void {
   if (typeof event !== 'object' || event === null) return;
   const record = event as Record<string, unknown>;
@@ -1115,6 +1140,25 @@ export class CodexAgentService implements AgentService {
           continue;
         }
         if (isCliError(event)) {
+          // F167: Resume capability error detection and fallback
+          // When resume fails with "paginated_threads/list_turns is not supported yet"
+          // AND allowResumeFallback is true AND no substantive output yet,
+          // fallback to a fresh session instead of yielding error.
+          if (
+            options?.allowResumeFallback &&
+            options?.sessionId &&
+            !sawSubstantiveOutput &&
+            isResumeCapabilityError(event, recentStreamErrors)
+          ) {
+            log.warn(
+              { sessionId: options.sessionId, catId: this.catId },
+              '[F167] Resume capability error detected, falling back to fresh session',
+            );
+            // Recursively call invoke with sessionId=undefined to create fresh session
+            yield* this.invoke(prompt, { ...options, sessionId: undefined });
+            return;
+          }
+
           // Codex CLI 0.98+ returns exit code 1 after successful completion.
           // Suppress the error ONLY if we saw substantive output (item.completed).
           // thread.started alone is NOT enough — that just means session init.

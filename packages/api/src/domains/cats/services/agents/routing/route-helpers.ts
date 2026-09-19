@@ -191,6 +191,13 @@ export interface RouteOptions {
         };
       }) => void)
     | undefined;
+  /**
+   * F167: Allow resume fallback to fresh session when CLI resume fails with
+   * precise capability errors (paginated_threads/list_turns not supported).
+   * Only set true for isolated invocations (eval) where session continuity
+   * loss is acceptable. Default: false (preserve strict session continuity).
+   */
+  allowResumeFallback?: boolean | undefined;
 }
 
 export interface IncrementalContextResult {
