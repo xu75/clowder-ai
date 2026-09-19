@@ -3436,7 +3436,7 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
   test('F167 P2: recovery audit includes CLI path, version, reason, and old sessionId', async () => {
     let spawnCallCount = 0;
 
-    const spawnFn = mock.fn((_cmd, args, _opts) => {
+    const spawnFn = mock.fn((_cmd, _args, _opts) => {
       spawnCallCount++;
       const proc = createMockProcess();
 
