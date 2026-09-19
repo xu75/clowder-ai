@@ -161,6 +161,31 @@ function hasNonSuppressibleCodexExitOneDiagnostics(
   return /remote compaction failed|compact_error/i.test(diagnosticText);
 }
 
+/**
+ * F167: Detect resume capability errors that warrant fallback to fresh session.
+ * Matches: "paginated_threads is not supported yet" or "list_turns is not supported yet"
+ */
+function isResumeCapabilityError(
+  event: {
+    message?: string;
+    cliDiagnostics?: { publicSummary?: string; safeExcerpt?: string };
+  },
+  recentErrors: string[],
+): boolean {
+  const diagnosticText = [
+    event.message,
+    event.cliDiagnostics?.publicSummary,
+    event.cliDiagnostics?.safeExcerpt,
+    ...recentErrors,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join('\n');
+
+  return /paginated_threads is not supported yet|list_turns is not supported yet|thread\/resume failed/i.test(
+    diagnosticText,
+  );
+}
+
 function toTomlString(value: string): string {
   const escaped = value.replace(/[\u0000-\u001f\u007f"\\]/g, (char) => {
     switch (char) {
@@ -744,10 +769,18 @@ export class CodexAgentService implements AgentService {
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
+    // F167 Phase M: Auto-enable resume fallback for eval threads
+    // All eval threads follow the pattern thread_eval_* and are isolated invocations
+    // where fallback to fresh session is always safe
+    const isEvalThread = options?.auditContext?.threadId?.startsWith('thread_eval_');
+    const effectiveOptions = isEvalThread && options?.sessionId && !options?.allowResumeFallback
+      ? { ...options, allowResumeFallback: true }
+      : options;
+
     // Codex CLI has no system prompt flag; prepend identity to prompt text
-    const effectivePrompt = options?.systemPrompt ? `${options.systemPrompt}\n\n${prompt}` : prompt;
-    const effectiveModel = options?.callbackEnv?.CAT_CAFE_OPENAI_MODEL_OVERRIDE ?? this.model;
-    const imagePaths = extractImagePaths(options?.contentBlocks, options?.uploadDir);
+    const effectivePrompt = effectiveOptions?.systemPrompt ? `${effectiveOptions.systemPrompt}\n\n${prompt}` : prompt;
+    const effectiveModel = effectiveOptions?.callbackEnv?.CAT_CAFE_OPENAI_MODEL_OVERRIDE ?? this.model;
+    const imagePaths = extractImagePaths(effectiveOptions?.contentBlocks, effectiveOptions?.uploadDir);
     const imageArgs = imagePaths.flatMap((path) => ['--image', path]);
 
     const sandboxMode = getCodexSandboxMode();
@@ -767,17 +800,17 @@ export class CodexAgentService implements AgentService {
       : [];
     // #712: Inject ALL enabled MCP servers from capabilities.json at invoke time.
     const { args: catCafeMcpArgs, bearerEnv: mcpBearerEnv } = await buildCatCafeMcpArgs(
-      options?.callbackEnv,
-      options?.workingDirectory,
+      effectiveOptions?.callbackEnv,
+      effectiveOptions?.workingDirectory,
     );
-    const gitRepoArgs = buildGitRepoArgs(options?.workingDirectory);
+    const gitRepoArgs = buildGitRepoArgs(effectiveOptions?.workingDirectory);
     // User-defined CLI args from the member editor (#567) — passed as-is, no implicit wrapping.
     // Each entry is split by whitespace (e.g. "--config model_reasoning_effort=\"low\"").
     // F203 Phase C / 砚砚 P1: strip reserved system config keys (developer_instructions,
     // carries L0) before dedup — otherwise dedup() would skip the system push and the
     // L0 would be silently overridden by any cliConfigArgs entry with the same key.
     const userConfigArgs = stripReservedSystemConfigs(
-      (options?.cliConfigArgs ?? []).flatMap((arg) => arg.trim().split(/\s+/)),
+      (effectiveOptions?.cliConfigArgs ?? []).flatMap((arg) => arg.trim().split(/\s+/)),
       this.catId as string,
     );
     // Collect user --config / -c keys so system-injected duplicates can be
@@ -805,10 +838,10 @@ export class CodexAgentService implements AgentService {
     // Check both callbackEnv and accountEnv — after F171 env separation,
     // user-configured OPENAI_BASE_URL lives in accountEnv, not callbackEnv.
     const customBaseUrl =
-      options?.callbackEnv?.OPENAI_BASE_URL ??
-      options?.callbackEnv?.OPENAI_API_BASE ??
-      options?.accountEnv?.OPENAI_BASE_URL ??
-      options?.accountEnv?.OPENAI_API_BASE;
+      effectiveOptions?.callbackEnv?.OPENAI_BASE_URL ??
+      effectiveOptions?.callbackEnv?.OPENAI_API_BASE ??
+      effectiveOptions?.accountEnv?.OPENAI_BASE_URL ??
+      effectiveOptions?.accountEnv?.OPENAI_API_BASE;
     const customProviderArgs: string[] = customBaseUrl
       ? [
           '--config',
@@ -883,11 +916,11 @@ export class CodexAgentService implements AgentService {
       return out;
     };
 
-    const args: string[] = options?.sessionId
+    const args: string[] = effectiveOptions?.sessionId
       ? [
           'exec',
           'resume',
-          options.sessionId,
+          effectiveOptions.sessionId,
           '--json',
           ...dedup(modelArgs),
           ...dedup(reasoningArgs),
@@ -923,7 +956,7 @@ export class CodexAgentService implements AgentService {
         ];
 
     const metadata: MessageMetadata = { provider: 'openai', model: cliModel };
-    const auditContext = options?.auditContext;
+    const auditContext = effectiveOptions?.auditContext;
     const recentStreamErrors: string[] = [];
 
     try {
@@ -931,8 +964,8 @@ export class CodexAgentService implements AgentService {
       // OAuth mode needs real HOME (~/.codex/auth.json for token refresh).
       // API Key mode must AVOID real HOME — stale OAuth token refresh will fail
       // and abort the CLI before it reaches the custom provider config.
-      const authMode = getCodexAuthMode(options?.callbackEnv);
-      const rawEnv = { ...(options?.callbackEnv ?? {}) };
+      const authMode = getCodexAuthMode(effectiveOptions?.callbackEnv);
+      const rawEnv = { ...(effectiveOptions?.callbackEnv ?? {}) };
       // Strip deprecated OPENAI_BASE_URL — now handled via --config model_providers
       if (customBaseUrl) {
         delete rawEnv.OPENAI_BASE_URL;
@@ -963,9 +996,9 @@ export class CodexAgentService implements AgentService {
           sandboxMode,
           hasOpenaiKey: !!codexEnv.OPENAI_API_KEY,
           hasOpenaiKeyAfterAuth: codexEnv.OPENAI_API_KEY !== null && codexEnv.OPENAI_API_KEY !== undefined,
-          envKeysCallbackEnv: Object.keys(options?.callbackEnv ?? {}),
-          envKeysAccountEnv: Object.keys(options?.accountEnv ?? {}),
-          cwd: options?.workingDirectory ?? null,
+          envKeysCallbackEnv: Object.keys(effectiveOptions?.callbackEnv ?? {}),
+          envKeysAccountEnv: Object.keys(effectiveOptions?.accountEnv ?? {}),
+          cwd: effectiveOptions?.workingDirectory ?? null,
           platform: process.platform,
         },
         '[codex-diag] Auth + env setup',
@@ -974,8 +1007,8 @@ export class CodexAgentService implements AgentService {
       // F171: Account env vars applied LAST — user overrides provider-injected values.
       // Strip OPENAI_BASE_URL/OPENAI_API_BASE if already consumed via --config model_providers
       // to prevent the deprecated env var from conflicting with the CLI config.
-      if (options?.accountEnv) {
-        for (const [k, v] of Object.entries(options.accountEnv)) {
+      if (effectiveOptions?.accountEnv) {
+        for (const [k, v] of Object.entries(effectiveOptions.accountEnv)) {
           if (customBaseUrl && (k === 'OPENAI_BASE_URL' || k === 'OPENAI_API_BASE')) continue;
           codexEnv[k] = v;
         }
@@ -1010,9 +1043,9 @@ export class CodexAgentService implements AgentService {
           model: cliModel,
           originalModel: effectiveModel,
           customBaseUrl: customBaseUrl ? redactUrlForLog(customBaseUrl) : null,
-          sessionId: options?.sessionId ?? null,
-          invocationId: options?.invocationId ?? null,
-          cwd: options?.workingDirectory ?? null,
+          sessionId: effectiveOptions?.sessionId ?? null,
+          invocationId: effectiveOptions?.invocationId ?? null,
+          cwd: effectiveOptions?.workingDirectory ?? null,
           authMode,
           argCount: args.length,
           // Log flag names + --config keys (no values) for debugging
@@ -1028,20 +1061,20 @@ export class CodexAgentService implements AgentService {
         // Incident 2026-05-29 (cross-thread-context-contamination): prompt 正文经 stdin
         // 传入，不进 argv —— 防 `ps -o command=` / /proc/<pid>/cmdline 跨进程泄露。
         stdinInput: effectivePrompt,
-        ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
+        ...(effectiveOptions?.workingDirectory ? { cwd: effectiveOptions.workingDirectory } : {}),
         env: codexEnv,
-        ...(options?.signal ? { signal: options.signal } : {}),
-        ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
-        ...(options?.cliSessionId ? { cliSessionId: options.cliSessionId } : {}),
-        ...(options?.invocationId && this.rawArchive.getPath
-          ? { rawArchivePath: this.rawArchive.getPath(options.invocationId) }
+        ...(effectiveOptions?.signal ? { signal: effectiveOptions.signal } : {}),
+        ...(effectiveOptions?.invocationId ? { invocationId: effectiveOptions.invocationId } : {}),
+        ...(effectiveOptions?.cliSessionId ? { cliSessionId: effectiveOptions.cliSessionId } : {}),
+        ...(effectiveOptions?.invocationId && this.rawArchive.getPath
+          ? { rawArchivePath: this.rawArchive.getPath(effectiveOptions.invocationId) }
           : {}),
-        ...(options?.livenessProbe ? { livenessProbe: options.livenessProbe } : {}),
-        ...(options?.parentSpan ? { parentSpan: options.parentSpan } : {}),
+        ...(effectiveOptions?.livenessProbe ? { livenessProbe: effectiveOptions.livenessProbe } : {}),
+        ...(effectiveOptions?.parentSpan ? { parentSpan: effectiveOptions.parentSpan } : {}),
         semanticCompletionSignal: semanticCompletionController.signal,
       };
-      const events = options?.spawnCliOverride
-        ? options.spawnCliOverride(cliOpts)
+      const events = effectiveOptions?.spawnCliOverride
+        ? effectiveOptions.spawnCliOverride(cliOpts)
         : spawnCli(cliOpts, this.spawnFn ? { spawnFn: this.spawnFn } : undefined);
 
       // Track substantive output (item.completed with text/tool results).
@@ -1100,7 +1133,7 @@ export class CodexAgentService implements AgentService {
           log.warn(
             {
               catId: this.catId,
-              invocationId: options?.invocationId,
+              invocationId: effectiveOptions?.invocationId,
               level: warningEvent.level,
               silenceMs: warningEvent.silenceDurationMs,
             },
@@ -1115,6 +1148,43 @@ export class CodexAgentService implements AgentService {
           continue;
         }
         if (isCliError(event)) {
+          // F167: Detect resume capability errors and fallback to fresh session when safe
+          if (
+            effectiveOptions?.sessionId &&
+            effectiveOptions?.allowResumeFallback &&
+            isResumeCapabilityError(event, recentStreamErrors)
+          ) {
+            log.warn(
+              {
+                catId: this.catId,
+                sessionId: effectiveOptions.sessionId,
+                invocationId: effectiveOptions?.invocationId,
+                message: event.message,
+                recentStreamErrors,
+              },
+              '[F167] Resume capability error detected — falling back to fresh session',
+            );
+            // Yield system_info to notify frontend before retry
+            yield {
+              type: 'system_info' as const,
+              catId: this.catId,
+              content: JSON.stringify({
+                type: 'resume_fallback',
+                reason: 'capability_error',
+                originalSessionId: effectiveOptions.sessionId,
+              }),
+              timestamp: Date.now(),
+            };
+            // Retry with fresh session: strip sessionId and use resumeFallbackSystemPrompt if available
+            const freshOptions: AgentServiceOptions = {
+              ...effectiveOptions,
+              sessionId: undefined,
+              systemPrompt: effectiveOptions.resumeFallbackSystemPrompt ?? effectiveOptions.systemPrompt,
+              allowResumeFallback: false, // Prevent infinite retry loop
+            };
+            yield* this.invoke(prompt, freshOptions);
+            return;
+          }
           // Codex CLI 0.98+ returns exit code 1 after successful completion.
           // Suppress the error ONLY if we saw substantive output (item.completed).
           // thread.started alone is NOT enough — that just means session init.
@@ -1307,7 +1377,7 @@ export class CodexAgentService implements AgentService {
         try {
           const published = await scanAndPublishCodexImages({
             codexSessionId: metadata.sessionId,
-            uploadDir: options?.uploadDir,
+            uploadDir: effectiveOptions?.uploadDir,
             codexHome: rawEnv.HOME ? join(rawEnv.HOME, '.codex') : undefined,
           });
           for (const img of published) {
