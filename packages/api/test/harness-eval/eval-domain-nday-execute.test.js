@@ -117,7 +117,8 @@ describe('createEvalDomainNDaySpec — execute (Redis last-dispatch update)', ()
     await spec.run.execute(item.signal, item.subjectKey, ctx);
 
     assert.equal(triggerMock.mock.calls.length, 1, 'invokeTrigger.trigger must be called once');
-    const [threadId, catId, userId, message, messageId, contentBlocks, policy] = triggerMock.mock.calls[0].arguments;
+    const [_threadId, _catId, _userId, _message, _messageId, _contentBlocks, policy] =
+      triggerMock.mock.calls[0].arguments;
     assert.ok(policy, 'policy must be provided to invokeTrigger.trigger');
     assert.equal(policy.allowResumeFallback, true, 'N-day evaluator must pass allowResumeFallback=true');
   });

@@ -381,7 +381,8 @@ describe('eval-domain-weekly task spec (AC-E19, AC-E20)', () => {
     await spec.run.execute(cwItem.signal, cwItem.subjectKey, ctx);
 
     assert.equal(triggerMock.mock.callCount(), 1);
-    const [threadId, catId, userId, reason, messageId, contentBlocks, policy] = triggerMock.mock.calls[0].arguments;
+    const [threadId, _catId, _userId, _reason, _messageId, _contentBlocks, policy] =
+      triggerMock.mock.calls[0].arguments;
     assert.equal(threadId, 'thread_eval_capability_wakeup');
     assert.equal(policy?.allowResumeFallback, true, 'F167: weekly evaluator must pass allowResumeFallback=true');
   });

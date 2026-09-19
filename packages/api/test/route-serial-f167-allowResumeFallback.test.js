@@ -11,7 +11,7 @@ import { describe, it } from 'node:test';
 
 function createMockServiceForF167(catId, captureOptions) {
   return {
-    async *invoke(prompt, options) {
+    async *invoke(_prompt, options) {
       captureOptions.push({ catId, options });
       yield { type: 'text', catId, content: 'test response', timestamp: Date.now() };
       yield { type: 'done', catId, timestamp: Date.now() };
