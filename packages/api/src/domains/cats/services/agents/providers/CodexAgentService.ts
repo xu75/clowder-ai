@@ -40,6 +40,7 @@ import { formatCliExitError } from '../../../../../utils/cli-format.js';
 import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/cli-resolve.js';
 import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
+import { type CliVersionResolver, defaultCliVersionResolver } from '../../../../../utils/cli-version.js';
 import { findMonorepoRoot } from '../../../../../utils/monorepo-root.js';
 import { sanitizeCliStderr } from '../../../../../utils/sanitize-cli-stderr.js';
 import { AuditEventTypes, getEventAuditLog } from '../../orchestration/EventAuditLog.js';
@@ -89,6 +90,8 @@ interface CodexAgentServiceOptions {
   contextSnapshotResolver?: CodexSessionContextSnapshotResolver;
   /** Override executable name/path for Codex-family CLIs. */
   cliCommand?: string;
+  /** F167 P2: Inject CLI version resolver (for testing) */
+  cliVersionResolver?: CliVersionResolver;
 }
 
 type CodexAuthMode = 'oauth' | 'api_key' | 'auto';
@@ -128,7 +131,7 @@ function isResumeCapabilityError(
     cliDiagnostics?: { publicSummary?: string; safeExcerpt?: string };
   },
   recentErrors: string[],
-): boolean {
+): 'paginated_threads' | 'list_turns' | false {
   const diagnosticText = [
     event.message,
     event.cliDiagnostics?.publicSummary,
@@ -138,8 +141,14 @@ function isResumeCapabilityError(
     .filter((value): value is string => Boolean(value))
     .join('\n');
 
-  // Only match exact capability errors, not generic "thread/resume failed"
-  return /paginated_threads is not supported yet|list_turns is not supported yet/i.test(diagnosticText);
+  // Match exact capability errors and return which one
+  if (/paginated_threads is not supported yet/i.test(diagnosticText)) {
+    return 'paginated_threads';
+  }
+  if (/list_turns is not supported yet/i.test(diagnosticText)) {
+    return 'list_turns';
+  }
+  return false;
 }
 
 function collectCodexStreamError(event: unknown, recentErrors: string[]): void {
@@ -714,6 +723,8 @@ export class CodexAgentService implements AgentService {
   private readonly cliCommand: string;
   /** F203 Phase C: compiles per-cat L0 → OpenAI developer role (-c). */
   private readonly l0CompilerFn: typeof compileL0ViaSubprocess;
+  /** F167 P2: CLI version resolver for recovery audit trails. */
+  private readonly cliVersionResolver: CliVersionResolver;
 
   constructor(options?: CodexAgentServiceOptions) {
     this.catId = options?.catId ?? createCatId('codex');
@@ -724,6 +735,7 @@ export class CodexAgentService implements AgentService {
     this.rawArchive = options?.rawArchive ?? new CliRawArchive();
     this.contextSnapshotResolver = options?.contextSnapshotResolver ?? createCodexSessionContextSnapshotResolver();
     this.cliCommand = options?.cliCommand ?? 'codex';
+    this.cliVersionResolver = options?.cliVersionResolver ?? defaultCliVersionResolver;
   }
 
   /** F203 Phase C — this service injects L0 via `-c developer_instructions=` (Task 4). */
@@ -1158,8 +1170,24 @@ export class CodexAgentService implements AgentService {
               { sessionId: options.sessionId, catId: this.catId },
               '[F167] Resume capability error detected, falling back to fresh session',
             );
-            // Recursively call invoke with sessionId=undefined to create fresh session
-            // F167 P1-fix: Restore resumeFallbackSystemPrompt to systemPrompt for fresh session
+
+            // F167 P2: Build recovery metadata for audit trail
+            // Use safe CLI path from cliDiagnostics (already sanitized by cli-spawn)
+            // Don't use args.join(' ') - it may contain --config values with sensitive data
+            const safeCliPath = event.cliDiagnostics?.debugRef.command ?? codexCommand;
+            const cliVersion = await this.cliVersionResolver.getVersion(safeCliPath);
+            const capabilityError = resumeCapabilityError; // Already validated as 'paginated_threads' | 'list_turns'
+
+            const recoveryMetadata: MessageMetadata['recoveryMetadata'] = {
+              oldSessionId: options.sessionId,
+              cliPath: safeCliPath,
+              cliVersion,
+              capabilityError,
+              retryAttempt: 1,
+            };
+
+            // F167 P2: Recursively invoke with fresh session
+            // Restore resumeFallbackSystemPrompt to systemPrompt for fresh session
             // and disable further fallback (allowResumeFallback=false) to prevent infinite loops
             const freshOptions = {
               ...options,
@@ -1168,7 +1196,24 @@ export class CodexAgentService implements AgentService {
               resumeFallbackSystemPrompt: undefined,
               allowResumeFallback: false,
             };
-            yield* this.invoke(prompt, freshOptions);
+
+            // F167 P2: Yield fresh session events with recovery metadata attached
+            // DO NOT yield error event - successful recovery should not appear as provider failure
+            for await (const freshEvent of this.invoke(prompt, freshOptions)) {
+              // Attach recovery metadata to session_init and done events for audit trail
+              if (freshEvent.type === 'session_init' || freshEvent.type === 'done') {
+                const enrichedMetadata: MessageMetadata = {
+                  ...(freshEvent.metadata ?? metadata),
+                  recoveryMetadata,
+                };
+                yield {
+                  ...freshEvent,
+                  metadata: enrichedMetadata,
+                };
+              } else {
+                yield freshEvent;
+              }
+            }
             return;
           }
 

@@ -106,6 +106,23 @@ export interface MessageMetadata {
    *  Populated by providers when isCliError/isCliTimeout fires, consumed by Phase B folded panel.
    *  Carries `__cliError.cliDiagnostics` / `__cliTimeout.cliDiagnostics` from cli-spawn. */
   cliDiagnostics?: CliDiagnostics;
+  /**
+   * F167 P2: Resume capability error recovery metadata.
+   * Attached to fresh session_init and done events when fallback to fresh session succeeds.
+   * Allows audit trail verification that recovery happened and preserves diagnostic context.
+   */
+  recoveryMetadata?: {
+    /** The old sessionId that failed to resume */
+    oldSessionId: string;
+    /** Resolved CLI command path (safe, from cliDiagnostics or codexCommand) */
+    cliPath: string;
+    /** CLI version string (from version resolver) */
+    cliVersion: string;
+    /** Exact capability error classification */
+    capabilityError: 'paginated_threads' | 'list_turns';
+    /** Always 1 for single-retry strategy */
+    retryAttempt: 1;
+  };
 }
 
 /**

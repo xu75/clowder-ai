@@ -3409,11 +3409,7 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
       allowResumeFallback: true,
     });
 
-    assert.strictEqual(
-      firstResult.entry.allowResumeFallback,
-      true,
-      'first entry should have allowResumeFallback=true',
-    );
+    assert.strictEqual(firstResult.entry.allowResumeFallback, true, 'first entry should have allowResumeFallback=true');
 
     // Second request attempts to revoke (undefined or false should NOT downgrade authorization)
     const secondResult = queue.enqueue({
@@ -3439,7 +3435,6 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
 
   test('F167 P2: recovery audit includes CLI path, version, reason, and old sessionId', async () => {
     let spawnCallCount = 0;
-    let capturedCliDiagnostics = null;
 
     const spawnFn = mock.fn((_cmd, args, _opts) => {
       spawnCallCount++;
@@ -3477,12 +3472,16 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
       throw new Error(`Unexpected spawn call ${spawnCallCount}`);
     });
 
+    // Mock CLI version resolver
+    const mockVersionResolver = {
+      getVersion: mock.fn(async (_cliPath) => '1.2.3-test'),
+    };
+
     const service = new CodexAgentService({
       l0CompilerFn: fakeL0Compiler,
       spawnFn,
       model: 'gpt-5.3-codex',
-      cliPath: '/custom/path/to/codex',
-      cliVersion: '1.2.3-test',
+      cliVersionResolver: mockVersionResolver,
     });
 
     const msgs = await collect(
@@ -3494,33 +3493,29 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
 
     assert.equal(spawnCallCount, 2, 'should spawn twice (fallback happened)');
 
-    // Find the done message with metadata containing recovery audit
+    // Verify NO error events on successful recovery
+    const errorMsgs = msgs.filter((m) => m.type === 'error');
+    assert.equal(errorMsgs.length, 0, 'successful recovery must NOT emit error events');
+
+    // Find session_init with recovery metadata
+    const sessionInit = msgs.find((m) => m.type === 'session_init');
+    assert.ok(sessionInit, 'should have session_init message');
+    assert.ok(sessionInit.metadata, 'session_init should have metadata');
+    assert.ok(sessionInit.metadata.recoveryMetadata, 'session_init should have recoveryMetadata');
+
+    const recovery = sessionInit.metadata.recoveryMetadata;
+    assert.equal(recovery.oldSessionId, 'old-session-recovery-audit', 'should include old sessionId');
+    assert.ok(recovery.cliPath, 'should include CLI path');
+    assert.equal(recovery.cliVersion, '1.2.3-test', 'should include CLI version from resolver');
+    assert.equal(recovery.capabilityError, 'paginated_threads', 'should classify exact capability error');
+    assert.equal(recovery.retryAttempt, 1, 'should record single retry attempt');
+
+    // Verify done message also has recovery metadata
     const doneMsg = msgs.find((m) => m.type === 'done');
     assert.ok(doneMsg, 'should have done message');
     assert.ok(doneMsg.metadata, 'done message should have metadata');
-
-    // Structured recovery audit should be in metadata.cliDiagnostics or similar field
-    // For now, verify the capability error is surfaced in upstreamError
-    if (doneMsg.metadata.upstreamError) {
-      assert.equal(doneMsg.metadata.upstreamError.kind, 'invalid_tool_call', 'should classify as invalid_tool_call');
-      assert.ok(
-        doneMsg.metadata.upstreamError.rawReason.includes('paginated_threads'),
-        'should preserve capability error detail',
-      );
-    }
-
-    // Capture CLI diagnostics if present
-    const errorMsgs = msgs.filter((m) => m.type === 'error');
-    if (errorMsgs.length > 0 && errorMsgs[0].metadata?.cliDiagnostics) {
-      capturedCliDiagnostics = errorMsgs[0].metadata.cliDiagnostics;
-    }
-
-    // If cliDiagnostics are present, verify structured fields
-    if (capturedCliDiagnostics) {
-      assert.ok(capturedCliDiagnostics.cliPath, 'should include CLI path in diagnostics');
-      assert.ok(capturedCliDiagnostics.cliVersion, 'should include CLI version in diagnostics');
-      assert.ok(capturedCliDiagnostics.reasonCode, 'should include reason code in diagnostics');
-    }
+    assert.ok(doneMsg.metadata.recoveryMetadata, 'done should have recoveryMetadata');
+    assert.deepEqual(doneMsg.metadata.recoveryMetadata, recovery, 'done metadata should match session_init');
   });
 
   test('Issue #116: turn.completed unblocks done even when process exit is delayed', async () => {
