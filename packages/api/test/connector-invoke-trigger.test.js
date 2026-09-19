@@ -1564,4 +1564,90 @@ describe('ConnectorInvokeTrigger', () => {
       assert.strictEqual(parsed.reason, 'queue_full', 'system_info reason must be queue_full');
     });
   });
+
+  describe('F167: allowResumeFallback propagation through connector trigger', () => {
+    it('direct execution path: policy.allowResumeFallback propagates to router.routeExecution', async () => {
+      const trigger = createTrigger();
+      // Direct execution (no active invocation)
+      // Signature: trigger(threadId, catId, userId, message, messageId, contentBlocks?, policy?, sender?)
+      await trigger.trigger(
+        'thread-f167',
+        /** @type {any} */ ('opus'),
+        'user-1',
+        'test message',
+        'msg-f167-direct',
+        undefined, // contentBlocks
+        { allowResumeFallback: true }, // policy
+        undefined, // sender
+      );
+      await waitForTrigger();
+
+      assert.strictEqual(routerMock.calls.length, 1, 'router should be called once');
+      const routerCall = routerMock.calls[0];
+      assert.strictEqual(
+        routerCall.options?.allowResumeFallback,
+        true,
+        'allowResumeFallback must propagate to router.routeExecution options',
+      );
+    });
+
+    it('queued path: policy.allowResumeFallback propagates to queue entry', async () => {
+      trackerMock.setActive('thread-f167', 'user-1');
+      const trigger = createTrigger();
+      // Queued execution (active invocation running)
+      const outcome = await trigger.trigger(
+        'thread-f167',
+        /** @type {any} */ ('opus'),
+        'user-1',
+        'test message',
+        'msg-f167-queued',
+        undefined, // contentBlocks
+        { allowResumeFallback: true }, // policy
+        undefined, // sender
+      );
+
+      assert.strictEqual(outcome, 'enqueued', 'message should be enqueued');
+      const entries = queue.list('thread-f167', 'user-1');
+      assert.strictEqual(entries.length, 1, 'should have one queue entry');
+      assert.strictEqual(entries[0].allowResumeFallback, true, 'allowResumeFallback must propagate to queue entry');
+    });
+
+    it('policy.allowResumeFallback=false propagates as false to router', async () => {
+      const trigger = createTrigger();
+      await trigger.trigger(
+        'thread-f167',
+        /** @type {any} */ ('opus'),
+        'user-1',
+        'test message',
+        'msg-f167-false',
+        undefined, // contentBlocks
+        { allowResumeFallback: false }, // policy
+        undefined, // sender
+      );
+      await waitForTrigger();
+
+      assert.strictEqual(routerMock.calls.length, 1, 'router should be called once');
+      const routerCall = routerMock.calls[0];
+      // F167: policy.allowResumeFallback is propagated when !== undefined (true or false)
+      assert.strictEqual(
+        routerCall.options?.allowResumeFallback,
+        false,
+        'allowResumeFallback=false should propagate as false',
+      );
+    });
+
+    it('missing policy results in undefined allowResumeFallback in router call', async () => {
+      const trigger = createTrigger();
+      await trigger.trigger('thread-f167', /** @type {any} */ ('opus'), 'user-1', 'test message', 'msg-f167-nopolicy');
+      await waitForTrigger();
+
+      assert.strictEqual(routerMock.calls.length, 1, 'router should be called once');
+      const routerCall = routerMock.calls[0];
+      assert.strictEqual(
+        routerCall.options?.allowResumeFallback,
+        undefined,
+        'missing policy should result in undefined allowResumeFallback',
+      );
+    });
+  });
 });

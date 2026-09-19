@@ -577,6 +577,8 @@ export async function* routeParallel(
         // helper namespace bridge 失效 → ideate/parallel 场景气泡又裂。
         ...(options.parentInvocationId ? { parentInvocationId: options.parentInvocationId } : {}),
         ...(options.routeSpan ? { routeSpan: options.routeSpan } : {}),
+        // F167: Forward allowResumeFallback from route options
+        ...(options.allowResumeFallback !== undefined ? { allowResumeFallback: options.allowResumeFallback } : {}),
         // F247 AC-B1c-3 PR-C: Plumb raw mention text for cloud bridge dispatch.
         // Parallel routes are user-initiated (no A2A), so mentioningCatId = userId.
         mentionContent: message,
