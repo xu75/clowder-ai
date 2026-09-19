@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildEvalCatInvocation } from '../../dist/infrastructure/harness-eval/eval-cat-invocation.js';
+import {
+  buildEvalCatInvocation,
+  buildEvalCatSourceRefs,
+  buildEvalCatSourceWindow,
+} from '../../dist/infrastructure/harness-eval/eval-cat-invocation.js';
 
 const domain = {
   domainId: 'eval:a2a',
@@ -227,5 +231,53 @@ describe('Eval cat invocation packet', () => {
         signal: 'high-risk external claim without provenance',
       },
     ]);
+  });
+
+  it('builds fresh scheduled sourceRefs from domain cadence instead of static examples', () => {
+    const nowMs = Date.UTC(2026, 6, 25, 3, 0, 5);
+
+    const frictionDomain = {
+      ...domain,
+      domainId: 'eval:friction',
+      displayName: 'Friction Eval',
+      systemThreadId: 'thread_eval_friction',
+      sourceAdapter: 'f245-friction-rollup',
+      sourceRefsKind: 'friction-rollup-snapshot',
+      frequency: 'every-3d',
+      legacyScheduledTaskIds: [],
+      handoffTargetResolver: { featureId: 'F245', ownerCatId: 'opus-47', threadLookup: 'feature-thread' },
+    };
+
+    assert.deepEqual(buildEvalCatSourceWindow(frictionDomain, nowMs), {
+      windowStartMs: nowMs - 3 * 24 * 60 * 60 * 1000,
+      windowEndMs: nowMs,
+      durationHours: 72,
+      basis: 'every-3d',
+    });
+    assert.deepEqual(buildEvalCatSourceRefs(frictionDomain, nowMs), {
+      kind: 'friction-rollup-snapshot',
+      windowStartMs: nowMs - 3 * 24 * 60 * 60 * 1000,
+      windowEndMs: nowMs,
+      topN: 10,
+      tokenCap: 4000,
+    });
+
+    const anchorDomain = {
+      ...domain,
+      domainId: 'eval:anchor-first',
+      displayName: 'Anchor-first Eval',
+      systemThreadId: 'thread_eval_anchor_first',
+      sourceAdapter: 'anchor-first-eval',
+      sourceRefsKind: 'anchor-telemetry-snapshot',
+      frequency: 'weekly',
+      legacyScheduledTaskIds: [],
+      handoffTargetResolver: { featureId: 'F236', ownerCatId: 'codex', threadLookup: 'feature-thread' },
+    };
+
+    assert.deepEqual(buildEvalCatSourceRefs(anchorDomain, nowMs), {
+      kind: 'anchor-telemetry-snapshot',
+      windowStartMs: nowMs - 24 * 60 * 60 * 1000,
+      windowEndMs: nowMs,
+    });
   });
 });
