@@ -242,6 +242,34 @@ describe('eval-domain-daily task spec', () => {
     assert.ok(domainIds.includes('eval:memory'), 'eval:memory (daily) must appear');
     assert.ok(domainIds.includes('eval:task-outcome'), 'eval:task-outcome (daily) must appear');
   });
+
+  it('F167: execute passes allowResumeFallback=true to invokeTrigger for eval domains', async () => {
+    const spec = createEvalDomainDailySpec({
+      harnessFeedbackRoot: repoHarnessFeedbackRoot,
+      defaultUserId: 'default-user',
+    });
+
+    const gateResult = await spec.admission.gate();
+    assert.equal(gateResult.run, true);
+    const a2aItem = gateResult.workItems.find((w) => w.subjectKey === 'eval:a2a');
+    assert.ok(a2aItem);
+
+    const triggerMock = mock.fn();
+    const ctx = {
+      assignedCatId: null,
+      deliver: mock.fn(async () => 'msg_f167'),
+      invokeTrigger: { trigger: triggerMock },
+    };
+
+    await spec.run.execute(a2aItem.signal, a2aItem.subjectKey, ctx);
+
+    assert.equal(triggerMock.mock.callCount(), 1);
+    const triggerArgs = triggerMock.mock.calls[0].arguments;
+    // Args: threadId, catId, userId, reason, messageId, contentBlocks, policy
+    const policy = triggerArgs[6];
+    assert.ok(policy, 'policy parameter must be provided');
+    assert.equal(policy.allowResumeFallback, true, 'allowResumeFallback must be true for isolated eval invocations');
+  });
 });
 
 describe('eval-domain-weekly task spec (AC-E19, AC-E20)', () => {
@@ -333,5 +361,29 @@ describe('eval-domain-weekly task spec (AC-E19, AC-E20)', () => {
     const triggerArgs = triggerMock.mock.calls[0].arguments;
     assert.equal(triggerArgs[0], 'thread_eval_capability_wakeup');
     assert.ok(triggerArgs[3].includes('Weekly eval'), 'trigger reason should say Weekly');
+  });
+
+  it('F167: execute passes allowResumeFallback=true to invokeTrigger for weekly eval domains', async () => {
+    const spec = createEvalDomainWeeklySpec({ harnessFeedbackRoot: repoHarnessFeedbackRoot });
+
+    const gateResult = await spec.admission.gate();
+    assert.equal(gateResult.run, true);
+    const cwItem = gateResult.workItems.find((w) => w.subjectKey === 'eval:capability-wakeup');
+    assert.ok(cwItem, 'eval:capability-wakeup should be present (weekly)');
+
+    const triggerMock = mock.fn();
+    const ctx = {
+      assignedCatId: null,
+      deliver: mock.fn(async () => 'msg_weekly_f167'),
+      invokeTrigger: { trigger: triggerMock },
+    };
+
+    await spec.run.execute(cwItem.signal, cwItem.subjectKey, ctx);
+
+    assert.equal(triggerMock.mock.callCount(), 1);
+    const [threadId, _catId, _userId, _reason, _messageId, _contentBlocks, policy] =
+      triggerMock.mock.calls[0].arguments;
+    assert.equal(threadId, 'thread_eval_capability_wakeup');
+    assert.equal(policy?.allowResumeFallback, true, 'F167: weekly evaluator must pass allowResumeFallback=true');
   });
 });

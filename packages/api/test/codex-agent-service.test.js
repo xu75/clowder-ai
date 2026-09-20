@@ -2896,6 +2896,639 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
     assert.equal(done.metadata.usage.lastTurnInputTokens, 186_749);
   });
 
+  test('F167: resume capability error triggers fresh session fallback when allowResumeFallback=true', async () => {
+    let spawnCallCount = 0;
+    let capturedPrompt = null;
+
+    const spawnFn = mock.fn((_cmd, args, _opts) => {
+      spawnCallCount++;
+      const proc = createMockProcess();
+
+      // First call: resume attempt that fails with capability error
+      if (spawnCallCount === 1) {
+        assert.equal(args[0], 'exec', 'first call should be exec');
+        assert.equal(args[1], 'resume', 'first call should be resume');
+        assert.equal(args[2], 'existing-session-123', 'first call should pass sessionId');
+
+        setImmediate(() => {
+          proc.stdout.push(
+            `${JSON.stringify({
+              type: 'error',
+              message: 'paginated_threads is not supported yet',
+            })}\n`,
+          );
+          finishExit(proc, 1);
+        });
+        return proc;
+      }
+
+      // Second call: fresh session fallback
+      if (spawnCallCount === 2) {
+        assert.equal(args[0], 'exec', 'fallback call should be exec');
+        assert.ok(!args.includes('resume'), 'fallback call should NOT use resume subcommand');
+        assert.ok(!args.includes('existing-session-123'), 'fallback call should NOT include old sessionId');
+
+        // Capture the prompt from stdin for verification
+        const originalWrite = proc.stdin.write.bind(proc.stdin);
+        proc.stdin.write = (data, ...args) => {
+          if (typeof data === 'string') {
+            capturedPrompt = data;
+          }
+          return originalWrite(data, ...args);
+        };
+
+        setImmediate(() => {
+          emitCodexEvents(proc, [
+            { type: 'thread.started', thread_id: 'fresh-thread-789' },
+            {
+              type: 'item.completed',
+              item: { id: 'msg-1', type: 'agent_message', text: 'Fresh session started' },
+            },
+          ]);
+          finishExit(proc, 0);
+        });
+        return proc;
+      }
+
+      throw new Error(`Unexpected spawn call ${spawnCallCount}`);
+    });
+
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    const msgs = await collect(
+      service.invoke('Continue the task', {
+        sessionId: 'existing-session-123',
+        systemPrompt: 'Original system prompt',
+        resumeFallbackSystemPrompt: 'Fallback system prompt for fresh session',
+        allowResumeFallback: true,
+      }),
+    );
+
+    assert.equal(spawnCallCount, 2, 'should spawn twice: resume attempt + fresh fallback');
+
+    // P2: Verify resumeFallbackSystemPrompt propagation
+    assert.ok(capturedPrompt, 'should capture prompt from fresh session');
+    assert.ok(
+      capturedPrompt.startsWith('Fallback system prompt for fresh session'),
+      'fresh session prompt must start with resumeFallbackSystemPrompt',
+    );
+
+    const textMsgs = msgs.filter((m) => m.type === 'text');
+    assert.ok(textMsgs.length > 0, 'should receive text from fresh session');
+    assert.ok(
+      textMsgs.some((m) => m.content.includes('Fresh session started')),
+      'should receive content from fresh session',
+    );
+
+    const sessionInit = msgs.find((m) => m.type === 'session_init');
+    assert.ok(sessionInit, 'should emit session_init from fresh session');
+    assert.equal(sessionInit.sessionId, 'fresh-thread-789', 'session_init should have fresh sessionId');
+  });
+
+  test('F167: resume capability error does NOT fallback when allowResumeFallback=false', async () => {
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    const msgs = [];
+    const promise = (async () => {
+      for await (const msg of service.invoke('Continue', {
+        sessionId: 'existing-session-456',
+        allowResumeFallback: false,
+      })) {
+        msgs.push(msg);
+      }
+    })();
+
+    setImmediate(() => {
+      proc.stdout.push(
+        `${JSON.stringify({
+          type: 'error',
+          message: 'list_turns is not supported yet',
+        })}\n`,
+      );
+      finishExit(proc, 1);
+    });
+
+    await promise;
+
+    const errorMsgs = msgs.filter((m) => m.type === 'error');
+    assert.ok(errorMsgs.length > 0, 'should yield error event');
+    assert.ok(
+      errorMsgs.some((m) => m.error.includes('list_turns is not supported yet')),
+      'should include capability error in error message',
+    );
+
+    assert.equal(spawnFn.mock.callCount(), 1, 'should only spawn once (no fallback)');
+  });
+
+  test('F167: generic resume error does NOT trigger fallback even with allowResumeFallback=true', async () => {
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    const msgs = [];
+    const promise = (async () => {
+      for await (const msg of service.invoke('Continue', {
+        sessionId: 'existing-session-789',
+        allowResumeFallback: true,
+      })) {
+        msgs.push(msg);
+      }
+    })();
+
+    setImmediate(() => {
+      proc.stdout.push(
+        `${JSON.stringify({
+          type: 'error',
+          message: 'Network timeout during thread fetch',
+        })}\n`,
+      );
+      finishExit(proc, 1);
+    });
+
+    await promise;
+
+    const errorMsgs = msgs.filter((m) => m.type === 'error');
+    assert.ok(errorMsgs.length > 0, 'should yield error event');
+    assert.ok(
+      errorMsgs.some((m) => m.error.includes('Network timeout')),
+      'should include generic error in error message',
+    );
+
+    assert.equal(spawnFn.mock.callCount(), 1, 'should only spawn once (no fallback for generic errors)');
+  });
+
+  test('F167: tool execution started prevents fallback replay', async () => {
+    let spawnCallCount = 0;
+    const spawnFn = mock.fn(() => {
+      spawnCallCount++;
+      if (spawnCallCount === 1) {
+        const proc = createMockProcess();
+        setImmediate(() => {
+          // Emit tool started
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'item.started',
+              item: { id: 'tool-1', type: 'command_execution', command: 'git status' },
+            })}\n`,
+          );
+          // Then emit resume capability error
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'error',
+              message: 'paginated_threads is not supported yet',
+            })}\n`,
+          );
+          finishExit(proc, 1);
+        });
+        return proc;
+      }
+      throw new Error(`Unexpected spawn call ${spawnCallCount}`);
+    });
+
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    const msgs = [];
+    const promise = (async () => {
+      for await (const m of service.invoke('Test', {
+        sessionId: 'tool-started-session',
+        allowResumeFallback: true,
+      })) {
+        msgs.push(m);
+      }
+    })();
+
+    await promise;
+
+    // Should NOT fallback because tool already started (retryUnsafe=true)
+    assert.equal(spawnFn.mock.callCount(), 1, 'should not fallback when tool already started');
+    // Error MUST be surfaced (fail-closed) — partial execution with hidden error is unsafe
+    const errorMsgs = msgs.filter((m) => m.type === 'error');
+    assert.equal(errorMsgs.length, 1, 'must surface error after tool started (fail-closed safety)');
+    assert.match(errorMsgs[0].error, /paginated_threads/, 'error should mention the capability failure');
+  });
+
+  test('F167: MCP tool call started prevents fallback replay', async () => {
+    let spawnCallCount = 0;
+    const spawnFn = mock.fn(() => {
+      spawnCallCount++;
+      if (spawnCallCount === 1) {
+        const proc = createMockProcess();
+        setImmediate(() => {
+          // Emit MCP tool call started
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'item.started',
+              item: { id: 'mcp-1', type: 'mcp_tool_call', tool: 'cat_cafe_search_evidence' },
+            })}\n`,
+          );
+          // Then emit resume capability error
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'error',
+              message: 'list_turns is not supported yet',
+            })}\n`,
+          );
+          finishExit(proc, 1);
+        });
+        return proc;
+      }
+      throw new Error(`Unexpected spawn call ${spawnCallCount}`);
+    });
+
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    const msgs = [];
+    const promise = (async () => {
+      for await (const m of service.invoke('Test', {
+        sessionId: 'mcp-started-session',
+        allowResumeFallback: true,
+      })) {
+        msgs.push(m);
+      }
+    })();
+
+    await promise;
+
+    // Should NOT fallback because MCP tool already started (retryUnsafe=true)
+    assert.equal(spawnFn.mock.callCount(), 1, 'should not fallback when MCP tool already started');
+    // Error MUST be surfaced (fail-closed) — MCP tools can have side effects
+    const errorMsgs = msgs.filter((m) => m.type === 'error');
+    assert.equal(errorMsgs.length, 1, 'must surface error after MCP tool started (fail-closed safety)');
+    assert.match(errorMsgs[0].error, /list_turns/, 'error should mention the capability failure');
+  });
+
+  test('F167: completed output prevents fallback replay', async () => {
+    let spawnCallCount = 0;
+    const spawnFn = mock.fn(() => {
+      spawnCallCount++;
+      if (spawnCallCount === 1) {
+        const proc = createMockProcess();
+        setImmediate(() => {
+          // Emit completed output (agent_message)
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'item.completed',
+              item: { id: 'msg-1', type: 'agent_message', content: 'Here is my analysis...' },
+            })}\n`,
+          );
+          // Then emit resume capability error
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'error',
+              message: 'paginated_threads is not supported yet',
+            })}\n`,
+          );
+          finishExit(proc, 1);
+        });
+        return proc;
+      }
+      throw new Error(`Unexpected spawn call ${spawnCallCount}`);
+    });
+
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    const msgs = [];
+    const promise = (async () => {
+      for await (const m of service.invoke('Test', {
+        sessionId: 'completed-output-session',
+        allowResumeFallback: true,
+      })) {
+        msgs.push(m);
+      }
+    })();
+
+    await promise;
+
+    // Should NOT fallback because output already sent to user (sawCompletedOutput=true)
+    assert.equal(spawnFn.mock.callCount(), 1, 'should not fallback when output already produced');
+    // Error MUST be surfaced (fail-closed) — cannot replay after sending output
+    const errorMsgs = msgs.filter((m) => m.type === 'error');
+    assert.equal(errorMsgs.length, 1, 'must surface error after completed output (fail-closed safety)');
+    assert.match(errorMsgs[0].error, /paginated_threads/, 'error should mention the capability failure');
+  });
+
+  test('F167: tool started then completed output - capability error must surface', async () => {
+    let spawnCallCount = 0;
+    const spawnFn = mock.fn(() => {
+      spawnCallCount++;
+      if (spawnCallCount === 1) {
+        const proc = createMockProcess();
+        setImmediate(() => {
+          // Emit tool started
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'item.started',
+              item: { id: 'tool-1', type: 'command_execution', command: 'git status' },
+            })}\n`,
+          );
+          // Then emit completed reasoning output
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'item.completed',
+              item: { id: 'msg-1', type: 'agent_message', content: 'Checking git status...' },
+            })}\n`,
+          );
+          // Then emit resume capability error
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'error',
+              message: 'list_turns is not supported yet',
+            })}\n`,
+          );
+          finishExit(proc, 1);
+        });
+        return proc;
+      }
+      throw new Error(`Unexpected spawn call ${spawnCallCount}`);
+    });
+
+    const service = new CodexAgentService({ l0CompilerFn: fakeL0Compiler, spawnFn, model: 'gpt-5.3-codex' });
+
+    const msgs = [];
+    const promise = (async () => {
+      for await (const m of service.invoke('Test', {
+        sessionId: 'tool-then-output-session',
+        allowResumeFallback: true,
+      })) {
+        msgs.push(m);
+      }
+    })();
+
+    await promise;
+
+    // Should NOT fallback (retryUnsafe=true from tool start)
+    assert.equal(spawnFn.mock.callCount(), 1, 'should not fallback when tool already started');
+    // Capability error MUST NOT be suppressed by exit-code-1 rule despite sawCompletedOutput=true
+    const errorMsgs = msgs.filter((m) => m.type === 'error');
+    assert.equal(errorMsgs.length, 1, 'capability error must surface even after completed output');
+    assert.match(errorMsgs[0].error, /list_turns/, 'error should mention the capability failure');
+  });
+
+  test('F167: fresh session emits new sessionId in session_init event', async () => {
+    let spawnCallCount = 0;
+    const newSessionId = `session-${Date.now()}`;
+
+    const spawnFn = mock.fn(() => {
+      spawnCallCount++;
+      if (spawnCallCount === 1) {
+        // First attempt: resume fails
+        const proc = createMockProcess();
+        setImmediate(() => {
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'error',
+              message: 'list_turns is not supported yet',
+            })}\n`,
+          );
+          finishExit(proc, 1);
+        });
+        return proc;
+      }
+      if (spawnCallCount === 2) {
+        // Second attempt: fresh session succeeds
+        const proc = createMockProcess();
+        setImmediate(() => {
+          // Note: thread.started's thread_id becomes sessionId in session_init event
+          proc.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: newSessionId })}\n`);
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'item.completed',
+              item: { id: 'msg-1', type: 'agent_message', content: 'Fresh session started' },
+            })}\n`,
+          );
+          finishExit(proc, 0);
+        });
+        return proc;
+      }
+      throw new Error(`Unexpected spawn call ${spawnCallCount}`);
+    });
+
+    const service = new CodexAgentService({
+      l0CompilerFn: fakeL0Compiler,
+      spawnFn,
+      model: 'gpt-5.3-codex',
+    });
+
+    const msgs = await collect(
+      service.invoke('Continue the task', {
+        sessionId: 'old-session-persistent',
+        allowResumeFallback: true,
+        userId: 'test-user',
+        threadId: 'test-thread',
+      }),
+    );
+
+    assert.equal(spawnFn.mock.callCount(), 2, 'should spawn twice (fallback happened)');
+
+    // Verify fresh session emitted new sessionId via session_init event
+    // Note: Actual sessionManager.store() persistence happens in invoke-single-cat.ts
+    // when it receives this session_init event. This test only verifies the provider
+    // emits the correct event; integration test coverage for full persistence path
+    // should be added to invoke-single-cat.test.js
+    const sessionInit = msgs.find((m) => m.type === 'session_init');
+    assert.ok(sessionInit, 'should emit session_init event');
+    assert.equal(sessionInit.sessionId, newSessionId, 'should use new sessionId from fresh session');
+  });
+
+  test('F167 P2: allowResumeFallback authorization immutable in queue dedupe', async () => {
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const queue = new InvocationQueue();
+
+    // First request WITHOUT allowResumeFallback
+    const firstResult = queue.enqueue({
+      threadId: 'thread-1',
+      userId: 'user-1',
+      targetCats: ['test-cat'],
+      content: 'test',
+      source: 'user',
+      intent: 'user',
+      idempotencyKey: 'idempotency-1',
+      allowResumeFallback: undefined,
+    });
+
+    assert.strictEqual(
+      firstResult.entry.allowResumeFallback,
+      undefined,
+      'first entry should have allowResumeFallback=undefined',
+    );
+
+    // Second request WITH allowResumeFallback=true (should dedupe but NOT modify authorization)
+    const secondResult = queue.enqueue({
+      threadId: 'thread-1',
+      userId: 'user-1',
+      targetCats: ['test-cat'],
+      content: 'test',
+      source: 'user',
+      intent: 'user',
+      idempotencyKey: 'idempotency-1',
+      allowResumeFallback: true,
+    });
+
+    assert.strictEqual(firstResult.entry.id, secondResult.entry.id, 'should dedupe to same entry');
+    assert.strictEqual(secondResult.deduped, true, 'second request should be marked as deduped');
+
+    assert.strictEqual(
+      secondResult.entry.allowResumeFallback,
+      undefined,
+      'dedupe MUST NOT escalate authorization from undefined to true',
+    );
+
+    // Verify queue still has only one entry
+    const queueKey = queue.scopeKey('thread-1', 'user-1');
+    const queueEntries = queue.queues.get(queueKey);
+    assert.equal(queueEntries.length, 1, 'queue should have exactly one entry after dedupe');
+  });
+
+  test('F167 P2: allowResumeFallback propagates through connector and queue', async () => {
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const queue = new InvocationQueue();
+
+    // Enqueue with allowResumeFallback=true
+    const result = queue.enqueue({
+      threadId: 'thread-1',
+      userId: 'user-1',
+      targetCats: ['test-cat'],
+      content: 'test',
+      source: 'connector',
+      intent: 'connector',
+      idempotencyKey: 'idempotency-2',
+      allowResumeFallback: true,
+    });
+
+    assert.strictEqual(result.entry.allowResumeFallback, true, 'queue entry must preserve allowResumeFallback=true');
+
+    // Dequeue and verify authorization propagates to processor
+    const dequeued = queue.dequeue('thread-1', 'user-1');
+    assert.strictEqual(dequeued.allowResumeFallback, true, 'dequeued entry must preserve allowResumeFallback=true');
+  });
+
+  test('F167 P2: dedupe does NOT allow later request to revoke authorization', async () => {
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const queue = new InvocationQueue();
+
+    // First request WITH allowResumeFallback=true
+    const firstResult = queue.enqueue({
+      threadId: 'thread-revoke',
+      userId: 'user-1',
+      targetCats: ['test-cat'],
+      content: 'test',
+      source: 'connector',
+      intent: 'connector',
+      idempotencyKey: 'idempotency-revoke',
+      allowResumeFallback: true,
+    });
+
+    assert.strictEqual(firstResult.entry.allowResumeFallback, true, 'first entry should have allowResumeFallback=true');
+
+    // Second request attempts to revoke (undefined or false should NOT downgrade authorization)
+    const secondResult = queue.enqueue({
+      threadId: 'thread-revoke',
+      userId: 'user-1',
+      targetCats: ['test-cat'],
+      content: 'test',
+      source: 'connector',
+      intent: 'connector',
+      idempotencyKey: 'idempotency-revoke',
+      allowResumeFallback: false, // Attempting to revoke
+    });
+
+    assert.strictEqual(firstResult.entry.id, secondResult.entry.id, 'should dedupe to same entry');
+    assert.strictEqual(secondResult.deduped, true, 'second request should be marked as deduped');
+
+    assert.strictEqual(
+      secondResult.entry.allowResumeFallback,
+      true,
+      'dedupe MUST NOT allow later request to revoke authorization (still true, not downgraded to false)',
+    );
+  });
+
+  test('F167 P2: recovery audit includes CLI path, version, reason, and old sessionId', async () => {
+    let spawnCallCount = 0;
+
+    const spawnFn = mock.fn((_cmd, _args, _opts) => {
+      spawnCallCount++;
+      const proc = createMockProcess();
+
+      if (spawnCallCount === 1) {
+        // Resume attempt fails with capability error
+        setImmediate(() => {
+          proc.stdout.write(
+            `${JSON.stringify({
+              type: 'error',
+              message: 'paginated_threads is not supported yet',
+            })}\n`,
+          );
+          finishExit(proc, 1);
+        });
+        return proc;
+      }
+
+      if (spawnCallCount === 2) {
+        // Fresh session succeeds
+        setImmediate(() => {
+          emitCodexEvents(proc, [
+            { type: 'thread.started', thread_id: 'fresh-session-audit' },
+            {
+              type: 'item.completed',
+              item: { id: 'msg-1', type: 'agent_message', text: 'Fresh session started' },
+            },
+          ]);
+          finishExit(proc, 0);
+        });
+        return proc;
+      }
+
+      throw new Error(`Unexpected spawn call ${spawnCallCount}`);
+    });
+
+    // Mock CLI version resolver
+    const mockVersionResolver = {
+      getVersion: mock.fn(async (_cliPath) => '1.2.3-test'),
+    };
+
+    const service = new CodexAgentService({
+      l0CompilerFn: fakeL0Compiler,
+      spawnFn,
+      model: 'gpt-5.3-codex',
+      cliVersionResolver: mockVersionResolver,
+    });
+
+    const msgs = await collect(
+      service.invoke('Continue task', {
+        sessionId: 'old-session-recovery-audit',
+        allowResumeFallback: true,
+      }),
+    );
+
+    assert.equal(spawnCallCount, 2, 'should spawn twice (fallback happened)');
+
+    // Verify NO error events on successful recovery
+    const errorMsgs = msgs.filter((m) => m.type === 'error');
+    assert.equal(errorMsgs.length, 0, 'successful recovery must NOT emit error events');
+
+    // Find session_init with recovery metadata
+    const sessionInit = msgs.find((m) => m.type === 'session_init');
+    assert.ok(sessionInit, 'should have session_init message');
+    assert.ok(sessionInit.metadata, 'session_init should have metadata');
+    assert.ok(sessionInit.metadata.recoveryMetadata, 'session_init should have recoveryMetadata');
+
+    const recovery = sessionInit.metadata.recoveryMetadata;
+    assert.equal(recovery.oldSessionId, 'old-session-recovery-audit', 'should include old sessionId');
+    assert.ok(recovery.cliPath, 'should include CLI path');
+    assert.equal(recovery.cliVersion, '1.2.3-test', 'should include CLI version from resolver');
+    assert.equal(recovery.capabilityError, 'paginated_threads', 'should classify exact capability error');
+    assert.equal(recovery.retryAttempt, 1, 'should record single retry attempt');
+
+    // Verify done message also has recovery metadata
+    const doneMsg = msgs.find((m) => m.type === 'done');
+    assert.ok(doneMsg, 'should have done message');
+    assert.ok(doneMsg.metadata, 'done message should have metadata');
+    assert.ok(doneMsg.metadata.recoveryMetadata, 'done should have recoveryMetadata');
+    assert.deepEqual(doneMsg.metadata.recoveryMetadata, recovery, 'done metadata should match session_init');
+  });
+
   test('Issue #116: turn.completed unblocks done even when process exit is delayed', async () => {
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -2922,18 +3555,18 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
     const startMs = Date.now();
     const promise = collect(service.invoke('test'));
 
-    proc.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'thread-116' }) + '\n');
+    proc.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: 'thread-116' })}\n`);
     proc.stdout.write(
-      JSON.stringify({
+      `${JSON.stringify({
         type: 'item.completed',
         item: { id: 'msg-1', type: 'agent_message', text: 'Done!' },
-      }) + '\n',
+      })}\n`,
     );
     proc.stdout.write(
-      JSON.stringify({
+      `${JSON.stringify({
         type: 'turn.completed',
         usage: { input_tokens: 100, output_tokens: 50 },
-      }) + '\n',
+      })}\n`,
     );
     proc.stdout.end();
 

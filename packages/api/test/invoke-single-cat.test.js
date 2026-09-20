@@ -7784,6 +7784,63 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     });
     assert.ok(usageInfo, 'should still emit invocation_usage for telemetry');
   });
+
+  it('F167: session_init event triggers sessionManager.store() write', async () => {
+    const storedSessions = [];
+    const deps = {
+      registry: {
+        create: () => ({ invocationId: 'inv-f167-store', callbackToken: 'tok-f167' }),
+        verify: async () => ({ ok: false, reason: 'unknown_invocation' }),
+      },
+      sessionManager: {
+        get: async () => undefined,
+        getOrCreate: async () => ({}),
+        store: async (userId, catId, threadId, sessionId) => {
+          storedSessions.push({ userId, catId, threadId, sessionId });
+        },
+        delete: async () => {},
+        resolveWorkingDirectory: () => '/tmp/test-f167',
+      },
+      threadStore: null,
+      apiUrl: 'http://127.0.0.1:3004',
+    };
+
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield {
+          type: 'session_init',
+          catId: 'opus',
+          sessionId: 'fresh-session-f167',
+          timestamp: Date.now(),
+        };
+        yield {
+          type: 'done',
+          catId: 'opus',
+          timestamp: Date.now(),
+        };
+      },
+    };
+
+    await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test F167 store',
+        userId: 'user-f167',
+        threadId: 'thread-f167-store',
+        isLastCat: true,
+      }),
+    );
+
+    // Verify sessionManager.store() was called with the correct parameters
+    assert.equal(storedSessions.length, 1, 'sessionManager.store() must be called once');
+    const stored = storedSessions[0];
+    assert.equal(stored.userId, 'user-f167', 'must pass userId to store');
+    assert.equal(stored.catId, 'opus', 'must pass catId to store');
+    assert.equal(stored.threadId, 'thread-f167-store', 'must pass threadId to store');
+    assert.equal(stored.sessionId, 'fresh-session-f167', 'must store the sessionId from session_init event');
+  });
 });
 
 // F155: Old pre-invocation guide routing hook tests removed.

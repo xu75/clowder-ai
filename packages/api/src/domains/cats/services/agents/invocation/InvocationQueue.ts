@@ -49,6 +49,8 @@ export interface QueueEntry {
   callerTraceContext?: CallerTraceContext;
   /** Explicit A2A trigger message for stream reply threading. */
   a2aTriggerMessageId?: string;
+  /** F167: Allow automatic fallback to fresh session when resume fails with capability error */
+  allowResumeFallback?: boolean;
 }
 
 export interface EnqueueResult {
@@ -183,6 +185,8 @@ export class InvocationQueue {
           if (input.sourceCategory && !existing.sourceCategory) {
             existing.sourceCategory = input.sourceCategory;
           }
+          // F167: Keep allowResumeFallback from the first entry, never allow later requests to expand privilege
+          // Dedupe does not modify existing.allowResumeFallback at all
         }
         const position = q.findIndex((entry) => entry.id === existing.id);
         return {
@@ -224,6 +228,7 @@ export class InvocationQueue {
       suggestedSkill: input.suggestedSkill,
       callerTraceContext: input.callerTraceContext,
       a2aTriggerMessageId: input.a2aTriggerMessageId,
+      allowResumeFallback: input.allowResumeFallback,
       position: undefined,
     };
     q.push(entry);

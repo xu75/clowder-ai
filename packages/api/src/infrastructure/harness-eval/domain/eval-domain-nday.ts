@@ -224,6 +224,11 @@ export function createEvalDomainNDaySpec(opts: EvalDomainScheduleOpts): TaskSpec
                 triggerUserId,
                 `N-day eval: ${invocation.domainId}`,
                 messageId,
+                undefined, // contentBlocks
+                {
+                  // F167: Eval invocations are isolated — safe to fallback on resume capability errors
+                  allowResumeFallback: true,
+                },
               );
               // Cloud R3 P1: treat 'full' (queue at capacity, invocation dropped) the same
               // as a throw — Redis NOT written so the domain retries on the next daily probe

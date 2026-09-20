@@ -62,6 +62,12 @@ export interface ConnectorTriggerPolicy {
    * Queue metadata may still upgrade, e.g. normal COMMENTED feedback becoming urgent CHANGES_REQUESTED.
    */
   readonly coalesceKey?: string;
+  /**
+   * F167: Allow resume fallback to fresh session when CLI resume fails with
+   * precise capability errors. Set true for isolated invocations (eval) where
+   * session continuity loss is acceptable.
+   */
+  readonly allowResumeFallback?: boolean;
 }
 
 /**
@@ -127,6 +133,7 @@ export class ConnectorInvokeTrigger {
         policy?.sourceCategory,
         policy?.suggestedSkill,
         policy?.coalesceKey,
+        policy?.allowResumeFallback,
       );
     }
 
@@ -144,6 +151,7 @@ export class ConnectorInvokeTrigger {
         policy?.sourceCategory,
         policy?.suggestedSkill,
         policy?.coalesceKey,
+        policy?.allowResumeFallback,
       );
     }
 
@@ -189,6 +197,7 @@ export class ConnectorInvokeTrigger {
       policy?.suggestedSkill,
       sender,
       controller,
+      policy,
     ).catch((err) => {
       this.opts.log.error(`[ConnectorInvokeTrigger] Unhandled: ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -206,6 +215,7 @@ export class ConnectorInvokeTrigger {
     sourceCategory?: string,
     suggestedSkill?: string,
     coalesceKey?: string,
+    allowResumeFallback?: boolean,
   ): Promise<'full' | 'enqueued'> {
     const { invocationQueue, socketManager, log } = this.opts;
 
@@ -236,6 +246,7 @@ export class ConnectorInvokeTrigger {
         : {}),
       ...(sender ? { senderMeta: sender } : {}),
       ...(suggestedSkill ? { suggestedSkill } : {}),
+      ...(allowResumeFallback !== undefined ? { allowResumeFallback } : {}),
     });
 
     if (result.outcome === 'full') {
@@ -292,6 +303,7 @@ export class ConnectorInvokeTrigger {
     suggestedSkill?: string,
     sender?: { id: string; name?: string },
     preAcquiredController?: AbortController,
+    policy?: ConnectorTriggerPolicy,
   ): Promise<void> {
     const { router, socketManager, invocationRecordStore, invocationTracker, invocationQueue, log } = this.opts;
     const targetCats: CatId[] = [catId];
@@ -405,6 +417,8 @@ export class ConnectorInvokeTrigger {
         frustrationAutoIssueEligible: false,
         // #949 P2: Connector-sourced flows have no ball-pass expectation — suppress verdict warning
         verdictPassWarningEnabled: false,
+        // F167: Forward allowResumeFallback from trigger policy
+        ...(policy?.allowResumeFallback !== undefined ? { allowResumeFallback: policy.allowResumeFallback } : {}),
       })) {
         // #768: Broadcast intent_mode on first CLI event — proves CLI is alive.
         if (!intentModeBroadcast) {

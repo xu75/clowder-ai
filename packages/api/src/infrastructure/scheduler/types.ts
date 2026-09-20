@@ -100,6 +100,13 @@ export interface ScheduleTriggerPolicy {
   readonly reason?: string;
   readonly sourceCategory?: string;
   readonly suggestedSkill?: string;
+  /**
+   * F167: Allow resume fallback to fresh session when CLI resume fails with
+   * precise capability errors (paginated_threads/list_turns not supported).
+   * Only set true for isolated invocations (eval) where session continuity
+   * loss is acceptable. Default: false (preserve strict session continuity).
+   */
+  readonly allowResumeFallback?: boolean;
 }
 
 export interface ScheduleLifecycleNotice {

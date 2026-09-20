@@ -270,6 +270,11 @@ function createEvalDomainSpec(config: EvalDomainSpecConfig): TaskSpec_P1<EvalDom
                   triggerUserId,
                   `${config.triggerReasonPrefix}: ${invocation.domainId}`,
                   messageId,
+                  undefined, // contentBlocks
+                  {
+                    // F167: Eval invocations are isolated — safe to fallback on resume capability errors
+                    allowResumeFallback: true,
+                  },
                 ),
               ).catch(() => {});
             } catch {
