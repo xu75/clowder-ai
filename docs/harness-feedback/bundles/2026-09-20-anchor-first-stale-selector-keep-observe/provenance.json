@@ -1,0 +1,16 @@
+{
+  "verdictId": "2026-09-20-anchor-first-stale-selector-keep-observe",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-09-20-anchor-first-stale-selector-keep-observe/raw/rollup.json",
+      "sha256": "a3f409cf04f26aed36f8687ea3d9d3fae72e7c776dd549b6008e649d607753ba"
+    }
+  ],
+  "generatedAt": "2026-09-20T03:01:38.130Z",
+  "generator": {
+    "name": "eval-anchor-first-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f236-anchor-telemetry-v1",
+  "sourceThreadId": "thread_eval_anchor_first"
+}
