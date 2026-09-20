@@ -1,0 +1,11 @@
+{
+  "verdictId": "2026-09-20-eval-friction-f167-governance-gate-fix",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-09-20",
+  "generatedAt": "2026-09-20T03:02:52.207Z",
+  "findings": [],
+  "noFindingRecord": {
+    "reason": "no friction cluster surfaced in the selected window",
+    "evidence": "friction-rollup/cluster_count"
+  }
+}

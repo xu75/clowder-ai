@@ -1,0 +1,16 @@
+{
+  "verdictId": "2026-09-20-eval-friction-f167-governance-gate-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-09-20-eval-friction-f167-governance-gate-fix/raw/rollup-report.json",
+      "sha256": "8d1c11e93cb688baed2d7ee595ba9ea7003efe83d8cbce3665677e80f7eb81d1"
+    }
+  ],
+  "generatedAt": "2026-09-20T03:02:52.207Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1",
+  "sourceThreadId": "thread_eval_friction"
+}
