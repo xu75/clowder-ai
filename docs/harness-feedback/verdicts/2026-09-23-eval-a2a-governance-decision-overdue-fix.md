@@ -1,0 +1,44 @@
+---
+feature_ids: [F192, F167]
+topics: [harness-eval, eval-a2a, live-verdict]
+doc_kind: harness-feedback
+feedback_type: live-verdict
+domain_id: eval:a2a
+packet_id: 2026-09-23-eval-a2a-governance-decision-overdue-fix
+source_snapshot: "snapshot:bundle/2026-09-23-eval-a2a-governance-decision-overdue-fix/snapshot"
+---
+
+# Live Verdict — 2026-09-23-eval-a2a-governance-decision-overdue-fix
+
+- Verdict: `fix`
+- Phenomenon: The scheduled evaluator reached analysis for an eighth consecutive day without the former Codex resume capability failure, but remediation regressed again: the F023 value gate has waited about 72 hours without operator signoff or a real directory split, while PR #87 remains open, PR #81 remains dirty, and PR #11 remains stale. No F167 raw snapshot/attribution pair exists after 2026-09-06, so the assigned 2026-09-05 source still has no usable core or Grounding Phase O counters.
+- Harness: F167/eval-a2a-scheduled-source-handoff (F167 A2A evidence delivery through scheduled Eval Hub invocations)
+- Owner ask: Keep the already-grounded F023 A/B Decision Packet as the sole blocker and stop lifecycle-only polling. If the co-creator chooses A, obtain an explicit PR #87 comment signoff with current file counts, renewal rationale, debt commitments before the new TTL, and justification for another unblock; if B, implement the smallest real directory split and remove at least one F23-followup exception, then request cross-review. After the gate is satisfied, correct stale reasons and the 41-versus-42 description, merge #87, update #81 onto current origin/main, rerun CI and continuity review, merge/deploy it, close superseded #79/#80, and replace or rebase #11 so each checkpoint gets a source pair no older than 24 hours. Preserve the unowned primary F167 test until ownership is explicitly resolved.
+- Re-eval: The co-creator explicitly chooses F023 option A or B; PR #87 then contains valid signoff or a real split removing at least one exception, has accurate counts/reasons, is independently reviewed, green, and merged. The consolidated F167 repair is updated to current origin/main, cross-reviewed, merged, and deployed; superseded #79/#80 are closed; #11 is replaced or updated; the primary checkout has no unowned F167 artifact; two consecutive eval:a2a checkpoints complete without resume capability errors using source pairs no older than 24 hours; successful fallback records old and replacement session IDs, selected CLI path/version, precise capability reason, and one retry without a provider-error event; provenance contains sourceThreadId; and Grounding Phase O counters are present or a current instrumented no-stateful-call explanation is recorded. at 2026-09-24T03:00:00Z
+
+Evidence:
+- snapshot:bundle/2026-09-23-eval-a2a-governance-decision-overdue-fix/snapshot
+- attribution:bundle/2026-09-23-eval-a2a-governance-decision-overdue-fix/AR-2026-09-05-001
+- metric:github/xu75/clowder-ai/pull/87@4dcef386b8e57f378d97b48815b2162be7ca9eaa#open-clean-zero-comments-zero-reviews
+- metric:github/xu75/clowder-ai/pull/81@ca418798927887462c0fb56aba4037918c6538a4#dirty-two-failed-checks
+- metric:github/xu75/clowder-ai/pull/11@6ae3f310248d374e32a448dd587b804141a7139e#stale-build-failure
+- metric:github/xu75/clowder-ai/pull/93@ba243b11a331193d111574f01bf91fa0bfed9ab3#cross-domain-lifecycle-corroboration
+- metric:github/xu75/clowder-ai/main@ba243b11a331193d111574f01bf91fa0bfed9ab3
+- metric:docs/features/F023-directory-corrosion-defense.md#third-unblock-hard-gate
+- metric:2026-09-05T03-04-16-604Z-F167-eval.yaml#counter_window.duration_hours
+- metric:2026-09-05T03-04-16-604Z-F167-eval.yaml#components.grounding-phase-o.activation_counts.grounding.check_total
+- metric:2026-09-05T03-04-16-604Z-F167-eval.yaml#components.grounding-phase-o.activation_counts.grounding.verdict_total
+- metric:2026-09-05T03-04-16-604Z-F167-eval.yaml#components.grounding-phase-o.friction_counts.grounding.mismatch_sample_count
+- metric:scheduler/eval-a2a/legacy-disabled
+- bundle/2026-09-23-eval-a2a-governance-decision-overdue-fix/provenance.json#sourceThreadId
+- thread_eval_a2a/0001790132400569-000318-8c3d465a
+- thread_eval_a2a/0001790132732960-000322-d47494c8
+- thread_eval_friction/0001790046489563-000314-f8ad27c5
+
+Counterarguments:
+- The unresolved F023 gate is deliberate fail-closed behavior, so the regressed label reflects lifecycle stasis rather than unsafe execution.
+- Runtime reachability improved from seven to eight consecutive analysis runs, so a symptom-only trend would be improved.
+- PR #87 is clean and all five checks are green, but CI does not satisfy the canonical operator-signoff-or-real-split gate.
+- Choosing a directory split expands scope beyond F167 and may delay a compatibility repair that appears operationally recovered.
+- The assigned snapshot has counter_window.duration_hours=1020.900449, above the two-hour confidence downgrade threshold, but all relevant core and Grounding counters are null; no counter-derived effectiveness rate or fail-closed Grounding escalation is valid.
+- legacyScheduledTaskIds is empty and legacy cleanup is disabled; one daily invocation is observed, so duplicate legacy scheduling is not the cause.
