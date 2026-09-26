@@ -1,0 +1,156 @@
+{
+  "verdictId": "2026-09-04-eval-a2a-thirty-third-checkpoint-missed-fix",
+  "featureId": "F167",
+  "evalSnapshotId": "eval-F167-2026-09-04",
+  "generatedAt": "2026-09-04T03:03:34.576Z",
+  "findings": [
+    {
+      "id": "AR-2026-09-04-001",
+      "relatedFeature": "F167",
+      "frictionSignal": {
+        "type": "remediation-thirty-third-checkpoint-missed",
+        "severity": "high",
+        "confidence": 0.99
+      },
+      "attribution": {
+        "primaryLayer": "environment_drift",
+        "pipelineOrHuman": "human-required",
+        "evidence": [
+          {
+            "type": "runtime-process",
+            "anchor": "runtime/pid-4096",
+            "excerpt": "Live API still runs node dist/index.js from the dirty primary checkout with processStartMs 1784902214373. The counter window is now 996.888945 hours."
+          },
+          {
+            "type": "telemetry-health",
+            "anchor": "telemetry/health",
+            "excerpt": "Authenticated telemetry health is readable but reports otelEnabled=false because TELEMETRY_HMAC_SALT is not configured."
+          },
+          {
+            "type": "telemetry-endpoint",
+            "anchor": "telemetry/endpoints",
+            "excerpt": "Only health and process-info are readable; traces stats, metrics, metrics history, and grounding samples return HTTP 503. Accessible endpoint count remains 2 of 6."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "L1/l1.streak_warn_count",
+            "excerpt": "WorklistRegistry activation counter is unavailable; absent counter is not zero activity."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C1/c1.hold_zombie_count",
+            "excerpt": "hold_ball zombie evidence is unavailable because trace and metric stores are disabled."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "C2/c2.verdict_without_pass_count",
+            "excerpt": "Forced-pass count is unavailable. Counter window 996.888945 hours exceeds two hours, but null counters do not support a rate."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "route-serial/inline_action.checked",
+            "excerpt": "Serial-route activation is unavailable; absent counters are not interpreted as zero."
+          },
+          {
+            "type": "telemetry-gap",
+            "anchor": "grounding-phase-o/grounding.check_total",
+            "excerpt": "grounding.check_total, grounding.verdict_total, and grounding.mismatch_sample_count are unavailable; grounding samples return 503, so no distribution supports fail-closed escalation."
+          },
+          {
+            "type": "github-pr",
+            "anchor": "github/xu75/clowder-ai/pull/11@6ae3f310248d374e32a448dd587b804141a7139e",
+            "excerpt": "PR 11 remains open on the same head for 911.808493 hours since 2026-07-28T03:15:04Z. Build is still failed and no replacement repair PR is visible in the repository."
+          },
+          {
+            "type": "owner-handoff",
+            "anchor": "thread_eval_friction/0001788404687616-000382-3f40698b",
+            "excerpt": "The 3 September owner dispatch routed successfully but the Opus invocation immediately failed with provider HTTP 403 because prepaid budget was insufficient; 23.979711 hours later no owner remediation is present in the thread."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/58@0c410034a2d839873618cbf111e1031e41fcab2a",
+            "excerpt": "The 26 August a2a evidence PR remains open and unmerged because provenance.json and the PR body omit sourceThreadId, despite clean docs-only scope and valid raw-input hashes."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/60@5b2237ae5a088d6babddec5897b46754f7e1edc4",
+            "excerpt": "The 27 August a2a evidence PR independently repeated the missing sourceThreadId failure and remains open and unmerged."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/61@d5b1d42155aa70bfe078ca57eabaedb36eaeee02",
+            "excerpt": "The 28 August a2a evidence PR repeated the same traceability failure and remains open and unmerged."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/62@6572d8ee72517f2d2a951b0825929206696083f3",
+            "excerpt": "The 29 August a2a evidence PR repeated the same traceability failure and remains open and unmerged."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/64@b70e41fa625bcd588f54721afaafb6f95201a0cb",
+            "excerpt": "The 30 August a2a evidence PR repeated the missing sourceThreadId failure and remains open and unmerged."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/66@cb9d9e9c4cd8724ac4df2897c29a7016d3eb44ea",
+            "excerpt": "The 31 August a2a evidence PR repeated the missing sourceThreadId failure and remains open and unmerged."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/67@9891d5c5d799526431509de7e3225012582cdc55",
+            "excerpt": "The 1 September a2a evidence PR repeated the missing sourceThreadId failure and remains open and unmerged."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/69@beacf4483113249ad7046217fa0c9222122ab58f",
+            "excerpt": "The 2 September a2a evidence PR repeated the missing sourceThreadId failure and remains open and unmerged."
+          },
+          {
+            "type": "artifact-provenance",
+            "anchor": "github/xu75/clowder-ai/pull/70@3b1a17c52cfcf6eb2aa4f32fc5c570f95592bbd6",
+            "excerpt": "The 3 September a2a evidence PR repeated the missing sourceThreadId failure and remains open and unmerged. The last traceable merged a2a evidence is PR 57 from 25 August, so the daily publication gap is now nine checkpoints."
+          },
+          {
+            "type": "publisher-repair",
+            "anchor": "github/xu75/clowder-ai/pull/9@8733ab630df6bc04b1297cf864562992b203355b",
+            "excerpt": "The central sourceThreadId fix merged on 30 July, but repeated untraceable verdict PRs prove that the active publication path is not consistently running the merged publisher behavior."
+          },
+          {
+            "type": "concurrent-eval",
+            "anchor": "github/xu75/clowder-ai/pull/68",
+            "excerpt": "The 2 September eval:friction evidence PR independently repeated the same missing sourceThreadId failure and was closed fail-closed, corroborating a cross-domain active-publisher defect."
+          },
+          {
+            "type": "repository-truth",
+            "anchor": "github/xu75/clowder-ai/main@a283d8050072543366522840bdf28bc83f31cc47",
+            "excerpt": "GitHub main is unchanged from the prior checkpoint; no current-main F167 runtime repair, replacement for PR 11, or publisher deployment repair is present."
+          },
+          {
+            "type": "primary-checkout",
+            "anchor": "git/primary-checkout/fix-publish-verdict-source-thread-provenance-v2",
+            "excerpt": "The primary checkout is still on a non-main branch with two tracked formatting-only modifications plus unrelated untracked Dare provider, Dare tests, transcript ACL test, web, MCP, skill, and architecture files. Ownership is unresolved, so an automated checkout or cleanup would risk overwriting collaborator work."
+          },
+          {
+            "type": "evaluator-gap",
+            "anchor": "memory/list-session-chain/403",
+            "excerpt": "Session-chain drill-down still returns Access denied for the current eval thread; search_evidence, list_recent, bounded thread reads, files, runtime, and GitHub independently recovered the prior verdict and publication trail, so analysis continued without guessing."
+          },
+          {
+            "type": "legacy-schedule",
+            "anchor": "scheduler/eval-a2a/legacy-disabled",
+            "excerpt": "The scheduled payload declares legacyScheduledTaskIds empty and legacyCleanup disabled, so there is no duplicate legacy trigger to remove."
+          }
+        ]
+      },
+      "proposedAction": [
+        {
+          "action": "runtime-fix",
+          "target": "F167/owner-route-current-main-deployment-and-verdict-provenance",
+          "rationale": "Restore a funded and routable owner execution path; replace or rebase PR 11 on current main and complete cross-review; preserve and assign the dirty primary checkout, then restart API and MCP from clean current main with operator-managed TELEMETRY_HMAC_SALT; ensure the live publisher executes the merged PR 9 provenance behavior; verify non-null core plus Grounding counters before merging new evidence."
+        }
+      ],
+      "status": "open"
+    }
+  ]
+}
