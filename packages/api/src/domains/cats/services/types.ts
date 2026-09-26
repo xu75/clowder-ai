@@ -295,6 +295,13 @@ export interface AgentServiceOptions {
   cliConfigArgs?: readonly string[];
   /** F153 Phase B: Parent OTel span for creating CLI session child span */
   parentSpan?: Span;
+  /**
+   * F167: Mark this invocation as safe to fallback to fresh session on resume errors.
+   * When true + resume fails with capability errors (paginated_threads/list_turns not supported),
+   * the provider creates a fresh session instead of propagating the error.
+   * Only set for idempotent/stateless eval invocations with no user-facing side effects.
+   */
+  allowResumeFallback?: boolean;
 }
 
 /**
