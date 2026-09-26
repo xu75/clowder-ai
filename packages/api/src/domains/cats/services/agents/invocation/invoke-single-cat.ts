@@ -674,6 +674,12 @@ export interface InvocationParams {
   readonly invocationSpanRef?: { current?: import('@opentelemetry/api').Span };
   /** #502 PR2: structured route control state to persist on threshold seal. */
   readonly continuityCapsule?: RouteStateContinuityCapsule;
+  /**
+   * F167: Allow resume fallback to fresh session when CLI resume fails with
+   * precise capability errors (paginated_threads/list_turns not supported).
+   * Only set true for isolated invocations (eval) where session continuity loss is acceptable.
+   */
+  readonly allowResumeFallback?: boolean;
 }
 
 /**
@@ -2035,6 +2041,8 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
       livenessProbe: buildStallAutoKillConfig(cliTimeoutMs),
       ...(catConfig?.cliConfigArgs?.length ? { cliConfigArgs: catConfig.cliConfigArgs } : {}),
       parentSpan: invocationSpan,
+      // F167: Forward allowResumeFallback from params to service options
+      ...(params.allowResumeFallback !== undefined ? { allowResumeFallback: params.allowResumeFallback } : {}),
     };
 
     let lastErrorMessage: string | undefined;
