@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import Fastify from 'fastify';
-import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/InvocationQueue.js';
+import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js';
 import { InvocationTracker } from '../dist/domains/cats/services/agents/invocation/InvocationTracker.js';
 import { messagesRoutes } from '../dist/routes/messages.js';
 import { queueRoutes } from '../dist/routes/queue.js';

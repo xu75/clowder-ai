@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, describe, it } from 'node:test';
-import { getRichBlockBuffer } from '../dist/domains/cats/services/agents/invocation/RichBlockBuffer.js';
+import { getRichBlockBuffer } from '../dist/domains/cats/services/agents/invocation/delivery/RichBlockBuffer.js';
 
 describe('RichBlockBuffer', () => {
   beforeEach(() => {

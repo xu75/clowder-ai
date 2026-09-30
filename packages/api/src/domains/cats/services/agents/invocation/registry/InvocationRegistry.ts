@@ -13,9 +13,9 @@
 
 import { randomUUID } from 'node:crypto';
 import type { CatId } from '@cat-cafe/shared';
-import type { CallerTraceContext } from '../../../../../infrastructure/telemetry/genai-semconv.js';
-import type { IAuthInvocationBackend } from './IAuthInvocationBackend.js';
-import { MemoryAuthInvocationBackend } from './MemoryAuthInvocationBackend.js';
+import type { CallerTraceContext } from '../../../../../../infrastructure/telemetry/genai-semconv.js';
+import type { IAuthInvocationBackend } from '../auth/IAuthInvocationBackend.js';
+import { MemoryAuthInvocationBackend } from '../auth/MemoryAuthInvocationBackend.js';
 
 export interface InvocationRecord {
   invocationId: string;

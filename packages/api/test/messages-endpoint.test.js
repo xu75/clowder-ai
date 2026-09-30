@@ -13,7 +13,7 @@ describe('GET /api/messages', () => {
   beforeEach(async () => {
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { messagesRoutes } = await import('../dist/routes/messages.js');
 
@@ -558,7 +558,7 @@ describe('GET /api/messages — summary NOT in timeline (clowder-ai#343)', () =>
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { SummaryStore } = await import('../dist/domains/cats/services/stores/ports/SummaryStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { messagesRoutes } = await import('../dist/routes/messages.js');
 
@@ -621,7 +621,7 @@ describe('GET /api/messages summary + pagination contract', () => {
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { SummaryStore } = await import('../dist/domains/cats/services/stores/ports/SummaryStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { messagesRoutes } = await import('../dist/routes/messages.js');
 
@@ -677,7 +677,7 @@ describe('POST /api/messages orphan rejection (#21)', () => {
   it('returns 400 when threadId does not exist', async () => {
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');
     const { messagesRoutes } = await import('../dist/routes/messages.js');
@@ -712,7 +712,7 @@ describe('POST /api/messages rejects soft-deleted thread (Phase D P1)', () => {
   it('returns 400 THREAD_NOT_FOUND when threadId is soft-deleted', async () => {
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');
     const { messagesRoutes } = await import('../dist/routes/messages.js');
@@ -751,7 +751,7 @@ describe('POST /api/messages delete-guard protection', () => {
   it('returns 409 and does not persist message when thread is being deleted', async () => {
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { InvocationTracker } = await import('../dist/domains/cats/services/agents/invocation/InvocationTracker.js');
     const { messagesRoutes } = await import('../dist/routes/messages.js');
@@ -825,7 +825,7 @@ describe('GET /api/messages internal message filtering', () => {
   beforeEach(async () => {
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { messagesRoutes } = await import('../dist/routes/messages.js');
 

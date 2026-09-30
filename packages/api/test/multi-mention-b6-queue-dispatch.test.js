@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import './helpers/setup-cat-registry.js';
 import Fastify from 'fastify';
-import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/InvocationQueue.js';
+import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js';
 import { registerCallbackAuthHook } from '../dist/routes/callback-auth-prehandler.js';
 import {
   getMultiMentionOrchestrator,
@@ -424,8 +424,8 @@ describe('B6: multi_mention queue dispatch', () => {
 
 describe('B6: QueueProcessor entryCompleteHook integration', () => {
   test('executeEntry fires registered hook with response text', async () => {
-    const { InvocationQueue: IQ } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-    const { QueueProcessor: QP } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
+    const { InvocationQueue: IQ } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { QueueProcessor: QP } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
 
     const queue = new IQ();
     let hookResult = null;
@@ -491,8 +491,8 @@ describe('B6: QueueProcessor entryCompleteHook integration', () => {
   });
 
   test('hook is auto-removed after firing (one-shot)', async () => {
-    const { InvocationQueue: IQ } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-    const { QueueProcessor: QP } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
+    const { InvocationQueue: IQ } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { QueueProcessor: QP } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
 
     const queue = new IQ();
     let hookCallCount = 0;
@@ -552,8 +552,8 @@ describe('B6: QueueProcessor entryCompleteHook integration', () => {
   });
 
   test('P1: aborted entry fires hook with canceled status, not succeeded', async () => {
-    const { InvocationQueue: IQ } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-    const { QueueProcessor: QP } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
+    const { InvocationQueue: IQ } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { QueueProcessor: QP } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
 
     const queue = new IQ();
     let hookResult = null;
@@ -617,8 +617,8 @@ describe('B6: QueueProcessor entryCompleteHook integration', () => {
   });
 
   test('R4-P1: duplicate invocation fires hook with succeeded, not failed', async () => {
-    const { InvocationQueue: IQ } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-    const { QueueProcessor: QP } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
+    const { InvocationQueue: IQ } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { QueueProcessor: QP } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
 
     const queue = new IQ();
     let hookResult = null;

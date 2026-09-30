@@ -11,8 +11,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { createModuleLogger } from '../../../../../infrastructure/logger.js';
-import type { CallerTraceContext } from '../../../../../infrastructure/telemetry/genai-semconv.js';
+import { createModuleLogger } from '../../../../../../infrastructure/logger.js';
+import type { CallerTraceContext } from '../../../../../../infrastructure/telemetry/genai-semconv.js';
 
 export interface QueueEntry {
   id: string;

@@ -19,7 +19,7 @@ import { createProposalTestContext } from './helpers/proposal-test-harness.js';
 
 describe('F128 Phase AA — seed message source attribution', () => {
   test('AC-AA4: seed message catId = sourceCatId (proposing cat, not approver)', async () => {
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -66,7 +66,7 @@ describe('F128 Phase AA — seed message source attribution', () => {
   });
 
   test('AC-AA5: seed message has extra.crossPost with sourceThreadId + sourceInvocationId', async () => {
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {

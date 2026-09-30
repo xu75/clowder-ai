@@ -13,7 +13,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { SessionMutex } from '../domains/cats/services/agents/invocation/SessionMutex.js';
+import type { SessionMutex } from '../domains/cats/services/agents/invocation/queue/SessionMutex.js';
 import { clearL0Cache as defaultClearL0Cache } from '../domains/cats/services/agents/providers/l0-compiler.js';
 import {
   type ApproveProfileUpdateResult,

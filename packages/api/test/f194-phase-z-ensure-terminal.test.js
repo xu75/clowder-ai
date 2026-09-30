@@ -21,7 +21,7 @@ import { describe, it } from 'node:test';
 import {
   ensureTerminalStatus,
   RouteChainCompletionTracker,
-} from '../dist/domains/cats/services/agents/invocation/ensureTerminalStatus.js';
+} from '../dist/domains/cats/services/agents/invocation/reconciliation/ensureTerminalStatus.js';
 
 function makeRecordStore({ initialStatus = 'running', allowTransition = true } = {}) {
   let current = { id: 'parent-1', status: initialStatus, threadId: 't1', userId: 'u1' };

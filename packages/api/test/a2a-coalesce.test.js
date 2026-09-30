@@ -26,7 +26,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-const QUEUE_PATH = '../dist/domains/cats/services/agents/invocation/InvocationQueue.js';
+const QUEUE_PATH = '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js';
 const TRIGGER_PATH = '../dist/routes/callback-a2a-trigger.js';
 
 function agentEntryInput(overrides = {}) {

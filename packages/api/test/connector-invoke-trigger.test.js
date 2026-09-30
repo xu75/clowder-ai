@@ -2,7 +2,7 @@
 
 import assert from 'node:assert';
 import { beforeEach, describe, it } from 'node:test';
-import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/InvocationQueue.js';
+import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js';
 import { ConnectorInvokeTrigger } from '../dist/infrastructure/email/ConnectorInvokeTrigger.js';
 
 // ─── Mocks ───────────────────────────────────────────────────────

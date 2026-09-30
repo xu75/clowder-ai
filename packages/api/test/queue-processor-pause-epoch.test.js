@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it, mock } from 'node:test';
 
-const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
+const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
 const SLOT_KEY = JSON.stringify(['thread-1', 'opus']);
 
 function depsWithQueuedThread() {

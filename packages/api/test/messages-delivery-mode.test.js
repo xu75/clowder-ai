@@ -7,10 +7,10 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 import Fastify from 'fastify';
 
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/InvocationRegistry.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js');
 const { buildCapsuleFromRouteState, completeCapsuleForSeal } = await import(
-  '../dist/domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js'
+  '../dist/domains/cats/services/agents/invocation/continuation/CollaborationContinuityCapsule.js'
 );
 
 /** Build a complete deps object for messagesRoutes */

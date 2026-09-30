@@ -12,7 +12,7 @@ import { catIdSchema } from '@cat-cafe/shared';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
-import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/TaskProgressStore.js';
+import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/progress/TaskProgressStore.js';
 import {
   aggregateThreadArtifacts,
   collectAllThreadMessages,

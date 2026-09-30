@@ -3,7 +3,7 @@
  * 导出所有 Agent 服务
  */
 
-export { InvocationRegistry } from './agents/invocation/InvocationRegistry.js';
+export { InvocationRegistry } from './agents/invocation/registry/InvocationRegistry.js';
 export { InvocationTracker } from './agents/invocation/InvocationTracker.js';
 export type { InvocationDeps, InvocationParams } from './agents/invocation/invoke-single-cat.js';
 export { invokeSingleCat } from './agents/invocation/invoke-single-cat.js';

@@ -18,7 +18,7 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import type {
   InvocationRecord,
   InvocationRegistry,
-} from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
+} from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import { resolveCatTarget } from '../domains/cats/services/agents/routing/cat-target-resolver.js';
 import type { ITaskStore } from '../domains/cats/services/stores/ports/TaskStore.js';
 import type { DynamicTaskStore } from '../infrastructure/scheduler/DynamicTaskStore.js';

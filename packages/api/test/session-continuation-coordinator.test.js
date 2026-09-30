@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 // 设计图：docs/plans/2026-06-04-session-continuation-coordinator-design.md
 // 接口全 async（砚砚 P1：真实 threadStore 是 Redis async）。
 const { SessionContinuationCoordinator } = await import(
-  '../dist/domains/cats/services/agents/invocation/SessionContinuationCoordinator.js'
+  '../dist/domains/cats/services/agents/invocation/continuation/SessionContinuationCoordinator.js'
 );
 
 /** Minimal fake threadStore — 故意不提供 tracker/cancel/slot API（F220 边界硬隔离，砚砚 P1/Q5）。 */

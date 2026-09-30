@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { getThreadLiveInvocations } from '../dist/domains/cats/services/agents/invocation/getThreadLiveInvocations.js';
+import { getThreadLiveInvocations } from '../dist/domains/cats/services/agents/invocation/registry/getThreadLiveInvocations.js';
 
 const THREAD_ID = 'thread-z';
 const USER_ID = 'user-z';

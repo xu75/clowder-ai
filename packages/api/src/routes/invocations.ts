@@ -14,8 +14,8 @@ import { createModuleLogger } from '../infrastructure/logger.js';
 const log = createModuleLogger('routes/invocations');
 
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
-import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
-import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/visible-turn.js';
+import type { QueueProcessor } from '../domains/cats/services/agents/invocation/queue/QueueProcessor.js';
+import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/delivery/visible-turn.js';
 import type { AgentRouter } from '../domains/cats/services/agents/routing/AgentRouter.js';
 import type { PersistenceContext } from '../domains/cats/services/agents/routing/route-helpers.js';
 import { parseIntent } from '../domains/cats/services/context/IntentParser.js';

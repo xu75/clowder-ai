@@ -22,7 +22,7 @@ describe('approveProfileUpdate service (lock + crash recovery + state machine)',
     mod = await import('../dist/domains/cats/services/profile/approveProfileUpdate.js');
     writeMod = await import('../dist/domains/cats/services/profile/writeProfileUpdate.js');
     StoreMod = await import('../dist/domains/cats/services/stores/ports/ProfileUpdateProposalStore.js');
-    MutexMod = await import('../dist/domains/cats/services/agents/invocation/SessionMutex.js');
+    MutexMod = await import('../dist/domains/cats/services/agents/invocation/queue/SessionMutex.js');
   });
 
   afterEach(() => rmSync(profileDir, { recursive: true, force: true }));

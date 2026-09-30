@@ -262,7 +262,7 @@ describe('contentBlocks in GET /api/messages', () => {
   beforeEach(async () => {
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');
     const { messagesRoutes } = await import('../dist/routes/messages.js');
@@ -333,7 +333,7 @@ describe('multipart image target routing', () => {
 
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { InvocationRecordStore } = await import(
       '../dist/domains/cats/services/stores/ports/InvocationRecordStore.js'

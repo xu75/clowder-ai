@@ -15,8 +15,8 @@
 import type { SealReason, SessionHandoffProposal } from '@cat-cafe/shared';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
-import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
+import type { InvocationQueue } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
+import type { QueueProcessor } from '../domains/cats/services/agents/invocation/queue/QueueProcessor.js';
 import type { SessionSealer } from '../domains/cats/services/session/SessionSealer.js';
 import {
   approveSessionHandoff,

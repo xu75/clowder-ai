@@ -26,7 +26,7 @@ describe('F174 Phase B — Redis latest pointer TTL slide (P1: gpt52 #1363)', ()
   test('verify() extends BOTH record TTL and latest pointer TTL', async () => {
     const { createRedisClient } = await import('@cat-cafe/shared/utils');
     const { RedisAuthInvocationBackend } = await import(
-      '../dist/domains/cats/services/agents/invocation/RedisAuthInvocationBackend.js'
+      '../dist/domains/cats/services/agents/invocation/auth/RedisAuthInvocationBackend.js'
     );
 
     const redis = createRedisClient({ url: REDIS_URL, keyPrefix: 'cat-cafe-ttl-slide-test:' });
@@ -102,7 +102,7 @@ describe('F174 Phase B — Redis latest pointer TTL slide (P1: gpt52 #1363)', ()
   test('verifyLatest() extends msgs key TTL (cloud P2 #1368)', async () => {
     const { createRedisClient } = await import('@cat-cafe/shared/utils');
     const { RedisAuthInvocationBackend } = await import(
-      '../dist/domains/cats/services/agents/invocation/RedisAuthInvocationBackend.js'
+      '../dist/domains/cats/services/agents/invocation/auth/RedisAuthInvocationBackend.js'
     );
 
     const redis = createRedisClient({ url: REDIS_URL, keyPrefix: 'cat-cafe-msgs-ttl-test:' });

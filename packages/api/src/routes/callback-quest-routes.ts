@@ -5,7 +5,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
+import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import { QUEST_PHASES, validateQuestTransition } from '../domains/cats/services/first-run-quest/quest-state.js';
 import type { FirstRunQuestPhase, IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
 import { requireCallbackAuth } from './callback-auth-prehandler.js';

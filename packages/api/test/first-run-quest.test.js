@@ -23,7 +23,7 @@ describe('First-Run Quest Routes', () => {
   beforeEach(async () => {
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     threadStore = new ThreadStore();
     registry = new InvocationRegistry();

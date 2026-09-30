@@ -7,7 +7,7 @@ const {
   completeCapsuleForSeal,
   formatContinuationPrompt,
   isCollaborationContinuityCapsuleV1,
-} = await import('../dist/domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js');
+} = await import('../dist/domains/cats/services/agents/invocation/continuation/CollaborationContinuityCapsule.js');
 
 describe('CollaborationContinuityCapsule', () => {
   it('builds route capsule from structured state without model prose', () => {

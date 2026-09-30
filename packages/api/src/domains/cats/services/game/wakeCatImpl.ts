@@ -8,7 +8,7 @@
 
 import type { CatId } from '@cat-cafe/shared';
 import type { FastifyBaseLogger } from 'fastify';
-import type { InvocationQueue } from '../agents/invocation/InvocationQueue.js';
+import type { InvocationQueue } from '../agents/invocation/queue/InvocationQueue.js';
 import type { IThreadStore } from '../stores/ports/ThreadStore.js';
 import type { WakeCatFn } from './GameNarratorDriver.js';
 

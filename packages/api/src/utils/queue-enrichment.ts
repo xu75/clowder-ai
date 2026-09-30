@@ -9,7 +9,7 @@
  */
 
 import type { MessageContent } from '@cat-cafe/shared';
-import type { QueueEntry } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
+import type { QueueEntry } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
 import type { IMessageStore } from '../domains/cats/services/stores/ports/MessageStore.js';
 import type { SocketManager } from '../infrastructure/websocket/index.js';
 

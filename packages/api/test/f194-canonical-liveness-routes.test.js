@@ -19,7 +19,7 @@ import Fastify from 'fastify';
 
 const { DraftStore } = await import('../dist/domains/cats/services/stores/ports/DraftStore.js');
 const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
 const { messagesRoutes } = await import('../dist/routes/messages.js');
 const { queueRoutes } = await import('../dist/routes/queue.js');
 

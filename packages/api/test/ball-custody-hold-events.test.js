@@ -15,7 +15,7 @@ describe('F233 PR3: hold_ball ball-custody events', () => {
   test('POST /api/callbacks/hold-ball records ball.held only after scheduler commit', async () => {
     const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');
 

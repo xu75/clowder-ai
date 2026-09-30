@@ -9,8 +9,8 @@ import { afterEach, beforeEach, describe, mock, test } from 'node:test';
 import { catRegistry, createCatId } from '@cat-cafe/shared';
 import Fastify from 'fastify';
 
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/InvocationRegistry.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js');
 
 /** Minimal cat config for registry — only fields needed by catIdSchema validation */
 function stubCatConfig(id) {

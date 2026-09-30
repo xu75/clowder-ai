@@ -10,8 +10,8 @@
  * `Promise.resolve` (negligible overhead).
  */
 
-import type { CallerTraceContext } from '../../../../../infrastructure/telemetry/genai-semconv.js';
-import type { InvocationRecord, VerifyResult } from './InvocationRegistry.js';
+import type { CallerTraceContext } from '../../../../../../infrastructure/telemetry/genai-semconv.js';
+import type { InvocationRecord, VerifyResult } from '../registry/InvocationRegistry.js';
 
 /** Subset of InvocationRecord fields the backend stores; expiresAt is computed by ttlMs. */
 export type AuthInvocationInput = Omit<InvocationRecord, 'expiresAt'>;

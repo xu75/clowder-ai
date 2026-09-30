@@ -7,23 +7,23 @@
  * - processNext（用户级）：co-creator手动触发处理自己的下一条
  */
 
-import { resolveCliTimeoutMs } from '../../../../../utils/cli-timeout.js';
-import { emitQueueUpdated, enrichQueueEntries } from '../../../../../utils/queue-enrichment.js';
-import { hydrateReplyPreview, type IMessageStore } from '../../stores/ports/MessageStore.js';
-import { mergeTokenUsage, type TokenUsage } from '../../types.js';
+import { resolveCliTimeoutMs } from '../../../../../../utils/cli-timeout.js';
+import { emitQueueUpdated, enrichQueueEntries } from '../../../../../../utils/queue-enrichment.js';
+import { hydrateReplyPreview, type IMessageStore } from '../../../stores/ports/MessageStore.js';
+import { mergeTokenUsage, type TokenUsage } from '../../../types.js';
 import {
   accumulateTextAggregate,
   accumulateTextParts,
   flattenTextParts,
   flattenTurnTextParts,
-} from '../text-aggregation.js';
+} from '../../text-aggregation.js';
 import {
   type CollaborationContinuityCapsuleV1,
   extractContinuityCapsuleFromAgentMessage,
   formatContinuationPrompt,
   isCollaborationContinuityCapsuleV1,
-} from './CollaborationContinuityCapsule.js';
-import { type EnsureTerminalDeps, ensureTerminalStatus, RouteChainCompletionTracker } from './ensureTerminalStatus.js';
+} from '../continuation/CollaborationContinuityCapsule.js';
+import { type EnsureTerminalDeps, ensureTerminalStatus, RouteChainCompletionTracker } from '../reconciliation/ensureTerminalStatus.js';
 import type { InvocationQueue, QueueEntry } from './InvocationQueue.js';
 import {
   type CommitInvocationInput,
@@ -33,8 +33,8 @@ import {
   type PrepareInvocationResult,
   SessionContinuationCoordinator,
   type SessionStrategy,
-} from './SessionContinuationCoordinator.js';
-import { stampVisibleTurn } from './visible-turn.js';
+} from '../continuation/SessionContinuationCoordinator.js';
+import { stampVisibleTurn } from '../delivery/visible-turn.js';
 
 /** Minimal interfaces for deps — avoid importing full types for testability */
 
@@ -428,7 +428,7 @@ export class QueueProcessor {
    *     (tryExecuteNextAcrossUsers) + auto-execute scan, so BOTH user/connector and
    *     agent entries get dispatched (Sol P1-2: #972's blocked @codex is a user entry)
    */
-  buildQueueConvergence(): import('./reconcileZombies.js').QueueConvergence {
+  buildQueueConvergence(): import('../reconciliation/reconcileZombies.js').QueueConvergence {
     return {
       removeStaleProcessing: (threadId: string, catId: string, userId: string, idempotencyKey?: string) => {
         // Sol R2 P1-1 + R3 P2: precise entry identity from raw idempotencyKey.

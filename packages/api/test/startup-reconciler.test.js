@@ -140,7 +140,7 @@ function makeTaskSnapshot(threadId, catId) {
 
 let StartupReconciler;
 try {
-  const mod = await import('../dist/domains/cats/services/agents/invocation/StartupReconciler.js');
+  const mod = await import('../dist/domains/cats/services/agents/invocation/reconciliation/StartupReconciler.js');
   StartupReconciler = mod.StartupReconciler;
 } catch {
   // RED phase: module doesn't exist yet — tests will fail with clear message

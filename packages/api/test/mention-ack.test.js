@@ -34,7 +34,7 @@ describe('Mention Ack (#77)', () => {
 
   beforeEach(async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { DeliveryCursorStore } = await import('../dist/domains/cats/services/stores/ports/DeliveryCursorStore.js');

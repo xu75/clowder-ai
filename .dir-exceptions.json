@@ -22,13 +22,6 @@
       "ticket": "F23-followup"
     },
     {
-      "path": "packages/api/src/domains/cats/services/agents/invocation",
-      "owner": "opus",
-      "reason": "Invocation 控制面 25 files；按 queue/registry/tracker/progress/reconciliation/delivery/auth 子域拆分。THIRD-ROUND unblock（首轮 4136847b10 砚砚 2026-05-18 续期到 2026-06-01, 二轮到 2026-06-30）。Follow-up split plan 记在 F23 § Phase 2 follow-up。",
-      "expiresAt": "2026-12-17",
-      "ticket": "F23-followup"
-    },
-    {
       "path": "packages/api/src/domains/cats/services/agents/providers",
       "owner": "opus",
       "reason": "Agent providers 32 files；按 agents/event-transforms/carriers/image/configs 子域拆分。THIRD-ROUND unblock（首轮 4136847b10 砚砚 2026-05-18 续期到 2026-06-01, 二轮到 2026-06-30）。Follow-up split plan 记在 F23 § Phase 2 follow-up。",

@@ -8,9 +8,9 @@
 import { type CatId, catRegistry, createCatId, DEFAULT_TIMEOUT_MINUTES } from '@cat-cafe/shared';
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
+import type { InvocationQueue } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
-import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/visible-turn.js';
+import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/delivery/visible-turn.js';
 import { resolveCatTarget } from '../domains/cats/services/agents/routing/cat-target-resolver.js';
 import {
   type MultiMentionCreateParams,

@@ -33,7 +33,7 @@ describe('Callback routes: agent-key auth path', () => {
 
   beforeEach(async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { AgentKeyRegistry } = await import('../dist/domains/cats/services/agents/agent-key/AgentKeyRegistry.js');
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');

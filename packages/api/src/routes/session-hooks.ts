@@ -18,7 +18,7 @@ import { getSessionStrategy } from '../config/session-strategy.js';
 import {
   completeCapsuleForCompact,
   isCollaborationContinuityCapsuleV1,
-} from '../domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js';
+} from '../domains/cats/services/agents/invocation/continuation/CollaborationContinuityCapsule.js';
 import type { ISessionSealer } from '../domains/cats/services/session/SessionSealer.js';
 import type { TranscriptReader } from '../domains/cats/services/session/TranscriptReader.js';
 import type { ISessionChainStore } from '../domains/cats/services/stores/ports/SessionChainStore.js';

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-const { mergeStreams } = await import('../dist/domains/cats/services/agents/invocation/stream-merge.js');
+const { mergeStreams } = await import('../dist/domains/cats/services/agents/invocation/delivery/stream-merge.js');
 
 /** Create an async iterable that yields values with optional delays */
 async function* delayed(values, delayMs = 0) {

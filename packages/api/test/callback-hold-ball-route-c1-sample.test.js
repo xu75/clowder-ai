@@ -101,7 +101,7 @@ describe('F192 D — C1 zombie-hold per-fire sample span event (eval:a2a 2026-06
 
   beforeEach(async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');
     registry = new InvocationRegistry();

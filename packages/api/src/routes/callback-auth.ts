@@ -5,7 +5,7 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
+import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import type { AuthorizationManager } from '../domains/cats/services/auth/AuthorizationManager.js';
 import { registerCallbackAuthHook, requireCallbackAuth } from './callback-auth-prehandler.js';
 

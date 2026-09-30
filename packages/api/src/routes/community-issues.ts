@@ -27,7 +27,7 @@ import {
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { getRoster } from '../config/cat-config-loader.js';
-import type { VerifyResult } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
+import type { VerifyResult } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import type { ICommunityIssueStore } from '../domains/cats/services/stores/ports/CommunityIssueStore.js';
 import type { ICommunityPrStore } from '../domains/cats/services/stores/ports/CommunityPrStore.js';
 import type { ITaskStore } from '../domains/cats/services/stores/ports/TaskStore.js';

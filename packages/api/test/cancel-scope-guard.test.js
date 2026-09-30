@@ -20,7 +20,7 @@ import { describe, it } from 'node:test';
 import Fastify from 'fastify';
 
 const { queueRoutes } = await import('../dist/routes/queue.js');
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
 
 const THREAD_ID = 'thread-scope-guard';
 const USER_A = 'user-a';

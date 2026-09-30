@@ -281,7 +281,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
   it('persists task progress snapshot with completed status on done', async () => {
     const { MemoryTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/MemoryTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/MemoryTaskProgressStore.js'
     );
     const store = new MemoryTaskProgressStore();
     const deps = { ...makeDeps(), taskProgressStore: store };
@@ -366,7 +366,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
   it('persists task progress snapshot with completed status on done even when tasks are not all completed', async () => {
     const { MemoryTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/MemoryTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/MemoryTaskProgressStore.js'
     );
     const store = new MemoryTaskProgressStore();
     const deps = { ...makeDeps(), taskProgressStore: store };
@@ -406,7 +406,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
   it('persists task progress snapshot with interrupted status on error', async () => {
     const { MemoryTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/MemoryTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/MemoryTaskProgressStore.js'
     );
     const store = new MemoryTaskProgressStore();
     const deps = { ...makeDeps(), taskProgressStore: store };
@@ -498,7 +498,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
   it('finalize marks snapshot interrupted when invocation is aborted after progress (early iterator return)', async () => {
     const { MemoryTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/MemoryTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/MemoryTaskProgressStore.js'
     );
     const store = new MemoryTaskProgressStore();
     const deps = { ...makeDeps(), taskProgressStore: store };
@@ -558,7 +558,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
   it('does not downgrade completed snapshot when abort happens after done (consumer closes iterator)', async () => {
     const { MemoryTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/MemoryTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/MemoryTaskProgressStore.js'
     );
     const store = new MemoryTaskProgressStore();
     const deps = { ...makeDeps(), taskProgressStore: store };
@@ -1579,7 +1579,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('stores route-state continuity capsule on SessionRecord during session_init', async () => {
     const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
     const { buildCapsuleFromRouteState } = await import(
-      '../dist/domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js'
+      '../dist/domains/cats/services/agents/invocation/continuation/CollaborationContinuityCapsule.js'
     );
     const sessionChainStore = new SessionChainStore();
     const continuityCapsule = buildCapsuleFromRouteState({
@@ -2951,7 +2951,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
   it('self-heal fresh retry preserves continuity capsule when retry triggers threshold seal', async () => {
     const { buildCapsuleFromRouteState } = await import(
-      '../dist/domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js'
+      '../dist/domains/cats/services/agents/invocation/continuation/CollaborationContinuityCapsule.js'
     );
     const activeRecord = {
       id: 'sess-retry-seal',

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it, mock } from 'node:test';
 
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
 const { completeCapsuleForSeal, buildCapsuleFromRouteState } = await import(
-  '../dist/domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js'
+  '../dist/domains/cats/services/agents/invocation/continuation/CollaborationContinuityCapsule.js'
 );
 
 /** Build a stub deps object for QueueProcessor */

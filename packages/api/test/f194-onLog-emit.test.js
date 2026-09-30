@@ -17,7 +17,7 @@ import { describe, it } from 'node:test';
 import {
   DEFAULT_ZOMBIE_GRACE_MS,
   getThreadLiveInvocations,
-} from '../dist/domains/cats/services/agents/invocation/getThreadLiveInvocations.js';
+} from '../dist/domains/cats/services/agents/invocation/registry/getThreadLiveInvocations.js';
 
 const THREAD_ID = 'thread-test-onlog';
 const USER_ID = 'user-onlog';

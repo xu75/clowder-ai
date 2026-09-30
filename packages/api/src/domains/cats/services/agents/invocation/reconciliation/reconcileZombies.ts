@@ -18,11 +18,11 @@
  */
 
 import type { CatId } from '@cat-cafe/shared';
-import type { IBallCustodyIngest } from '../../../../ball-custody/BallCustodyIngest.js';
-import { buildInvocationDiedEvent } from '../../../../ball-custody/ball-custody-events.js';
-import type { IInvocationRecordStore } from '../../stores/ports/InvocationRecordStore.js';
-import type { ZombieRecord } from './getThreadLiveInvocations.js';
-import type { TaskProgressStore } from './TaskProgressStore.js';
+import type { IBallCustodyIngest } from '../../../../../ball-custody/BallCustodyIngest.js';
+import { buildInvocationDiedEvent } from '../../../../../ball-custody/ball-custody-events.js';
+import type { IInvocationRecordStore } from '../../../stores/ports/InvocationRecordStore.js';
+import type { ZombieRecord } from '../registry/getThreadLiveInvocations.js';
+import type { TaskProgressStore } from '../progress/TaskProgressStore.js';
 
 /**
  * F220 Phase 2a (#972): Queue convergence interface.

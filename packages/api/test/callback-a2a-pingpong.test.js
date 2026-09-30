@@ -125,7 +125,7 @@ describe('F167 L1 AC-A4: callback-a2a-trigger ping-pong circuit breaker', () => 
       const { registerWorklist, unregisterWorklist, pushToWorklist } = await import(
         '../dist/domains/cats/services/agents/routing/WorklistRegistry.js'
       );
-      const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+      const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
 
       const threadId = 'thread-cb-pp-block-modern';
       const entry = registerWorklist(threadId, ['opus'], 20);
@@ -273,7 +273,7 @@ describe('F167 L1 AC-A4: callback-a2a-trigger ping-pong circuit breaker', () => 
       const { registerWorklist, unregisterWorklist, pushToWorklist } = await import(
         '../dist/domains/cats/services/agents/routing/WorklistRegistry.js'
       );
-      const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+      const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
 
       const threadId = 'thread-cb-pp-longcontent-modern';
       const entry = registerWorklist(threadId, ['opus'], 20);
@@ -343,7 +343,7 @@ describe('F167 L1 AC-A4: callback-a2a-trigger ping-pong circuit breaker', () => 
       const { registerWorklist, unregisterWorklist, pushToWorklist, getWorklist } = await import(
         '../dist/domains/cats/services/agents/routing/WorklistRegistry.js'
       );
-      const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+      const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
 
       const threadId = 'thread-cb-pp-codex-p1-modern';
       const entry = registerWorklist(threadId, ['opus'], 20);
