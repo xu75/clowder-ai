@@ -1,0 +1,16 @@
+{
+  "verdictId": "2026-09-26-eval-friction-f167-governance-decision-deadlock-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-09-26-eval-friction-f167-governance-decision-deadlock-fix/raw/rollup-report.json",
+      "sha256": "db6e426910a65ac57c985176a791c1fe5ac550ee090c79f5febb571fa72ff76a"
+    }
+  ],
+  "generatedAt": "2026-09-26T03:03:50.056Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1",
+  "sourceThreadId": "thread_eval_friction"
+}

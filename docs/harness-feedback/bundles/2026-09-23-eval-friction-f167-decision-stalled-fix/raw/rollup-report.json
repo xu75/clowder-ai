@@ -1,0 +1,39 @@
+{
+  "verdictId": "2026-09-23-eval-friction-f167-decision-stalled-fix",
+  "selector": {
+    "kind": "friction-rollup-snapshot",
+    "windowStartMs": 1789873200000,
+    "windowEndMs": 1790132400000,
+    "topN": 10,
+    "tokenCap": 4000
+  },
+  "window": {
+    "sinceMs": 1789873200000,
+    "untilMs": 1790132400000
+  },
+  "signalCount": 0,
+  "clusterCount": 0,
+  "degraded": true,
+  "droppedChannels": [],
+  "report": {
+    "window": {
+      "sinceMs": 1789873200000,
+      "untilMs": 1790132400000
+    },
+    "generatedAt": "2026-09-23T03:04:46.237Z",
+    "topClusters": [],
+    "actionableCandidates": [],
+    "referenceOnly": [],
+    "tailSummary": {
+      "clusterCount": 0,
+      "signalCount": 0,
+      "byChannel": {}
+    },
+    "degraded": true,
+    "droppedChannels": [],
+    "tokenBudget": {
+      "cap": 4000,
+      "estimated": 78
+    }
+  }
+}

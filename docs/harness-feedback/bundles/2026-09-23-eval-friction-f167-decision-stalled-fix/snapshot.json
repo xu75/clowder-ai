@@ -1,0 +1,25 @@
+{
+  "verdictId": "2026-09-23-eval-friction-f167-decision-stalled-fix",
+  "evalSnapshotId": "eval-F245-2026-09-23",
+  "featureId": "F245",
+  "generatedAt": "2026-09-23T03:04:46.237Z",
+  "window": {
+    "startMs": 1789873200000,
+    "endMs": 1790132400000,
+    "durationHours": 72
+  },
+  "components": [
+    {
+      "id": "friction-rollup",
+      "name": "friction rollup (Top-N + sensorForm)",
+      "confidence": "low",
+      "activationCounts": {},
+      "frictionCounts": {
+        "cluster_count": 0,
+        "top_cluster_count": 0,
+        "tail_cluster_count": 0,
+        "tail_signal_count": 0
+      }
+    }
+  ]
+}
