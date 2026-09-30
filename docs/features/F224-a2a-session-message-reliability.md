@@ -6,7 +6,6 @@ doc_kind: spec
 created: 2026-06-04
 community_issue: clowder-ai#834 (含 #813 #814 #815 #836)
 tips_exempt: status-only correction (spec to in-progress for lint dogfood); F224 implementation pending, no user-facing capability
-user_journey_exempt: F224 implementation pending (coordinator skeleton + red tests only, Phase A wire not landed) — no user-perceivable surface yet; add User Journey when Phase A ships user-facing session/message behavior
 ---
 
 # F224: A2A 协作的会话/消息状态可靠性（会话延续协调器 + 消息去重 + 触发合并 + 重生会话）
@@ -27,6 +26,29 @@ operator要"**信得过的猫间协作**"。F220 解决了"看得见猫在跑 + 
 4. **重生会话没策略**（clowder-ai#836）：某些猫该"每次叫醒从头开始"（不延续上下文），系统却没有机制表达这个意图，被迫走延续逻辑。
 
 > 价值锚：让用户**信得过**猫间协作的会话与消息状态——**不丢**（延续不断片）、**不重**（消息不重影）、**不乱**（触发不冗余、会话策略明确）。这是 F220"信得过的猫间协作"愿景在"会话/消息状态"维度的补齐。
+
+## User Journey
+
+> **用户** = 在 Hub 观察猫间协作的 co-creator。F224 的用户可感知结果是"会话/消息状态信得过"。本节是**实现前的 Design Gate**——描述目标用户体验，下列每个 scope unit 对应 Why#1-4，可验证落点是对应 AC。（实现状态：Phase A coordinator skeleton + red tests 已 merged PR #2104，Phase A wire + Phase B/C/D 待续。）
+
+### Scope Unit 1 — 会话延续不断片（Why#1 / Phase A / AC-A1）
+- **场景**：猫 A 在 thread 里 @猫 B 传球（A2A）。
+- **用户看到**：猫 B 被唤醒后带着上一轮会话上下文继续，接得上上游语境。
+- **反例（修复前）**：猫 B 醒来丢失 A 轮上下文，"断片"、答非所问。
+
+### Scope Unit 2 — 消息气泡不重影（Why#2 / Phase B / AC-B1）
+- **场景**：猫主动 `post_message` 发一条气泡，随后同一 invocation 的 stream 继续。
+- **用户看到**：那条主动气泡只显示一次（含 hydration 后场景）。
+- **反例（修复前）**：同一条消息被 stream 匹配替换/重影，用户看到重复气泡。
+
+### Scope Unit 3 — 触发不冗余（Why#3 / Phase C / AC-C1）
+- **场景**：同一次 A2A 传球。
+- **用户看到**：下游猫执行一次；批量失败不丢数据、不产生乱序状态。
+- **反例（修复前）**：同一传球重复入队/执行，浪费算力 + 状态乱。
+
+### Scope Unit 4 — 重生会话策略明确（Why#4 / Phase A / AC-A2）
+- **场景**：按 `memberSessionStrategy`，某些猫应"每次叫醒从头开始"（reborn），不延续上下文。
+- **用户看到**：reborn 猫每次是干净新会话（跳过延续/bootstrap）；resume 猫保持延续——两种意图都能被系统正确表达。
 
 ## Current State / 现状基线（带证据，不美化）
 
