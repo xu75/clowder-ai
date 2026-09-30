@@ -6,6 +6,7 @@ doc_kind: spec
 created: 2026-06-04
 community_issue: clowder-ai#834 (含 #813 #814 #815 #836)
 tips_exempt: status-only correction (spec to in-progress for lint dogfood); F224 implementation pending, no user-facing capability
+user_journey_exempt: F224 implementation pending (coordinator skeleton + red tests only, Phase A wire not landed) — no user-perceivable surface yet; add User Journey when Phase A ships user-facing session/message behavior
 ---
 
 # F224: A2A 协作的会话/消息状态可靠性（会话延续协调器 + 消息去重 + 触发合并 + 重生会话）
