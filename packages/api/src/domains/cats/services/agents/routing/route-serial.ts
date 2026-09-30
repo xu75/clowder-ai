@@ -103,9 +103,9 @@ import { getStreamingTtsRegistry, StreamingTtsChunker } from '../../tts/Streamin
 import { getVoiceBlockSynthesizer } from '../../tts/VoiceBlockSynthesizer.js';
 import type { AgentMessage, AgentMessageType, MessageMetadata } from '../../types.js';
 import { buildCapsuleFromRouteState } from '../invocation/continuation/CollaborationContinuityCapsule.js';
+import { getRichBlockBuffer } from '../invocation/delivery/RichBlockBuffer.js';
 import { invokeSingleCat } from '../invocation/invoke-single-cat.js';
 import { buildMcpCallbackInstructions, needsMcpInjection } from '../invocation/McpPromptInjector.js';
-import { getRichBlockBuffer } from '../invocation/delivery/RichBlockBuffer.js';
 import { resolveDefaultClaudeMcpServerPath } from '../providers/ClaudeAgentService.js';
 import { detectInlineActionMentionsWithShadow, getMaxA2ADepth, parseA2AMentions } from '../routing/a2a-mentions.js';
 import {

@@ -28,7 +28,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-const { reconcileZombies } = await import('../dist/domains/cats/services/agents/invocation/reconciliation/reconcileZombies.js');
+const { reconcileZombies } = await import(
+  '../dist/domains/cats/services/agents/invocation/reconciliation/reconcileZombies.js'
+);
 const { InvocationRecordStore } = await import('../dist/domains/cats/services/stores/ports/InvocationRecordStore.js');
 const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
 const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');

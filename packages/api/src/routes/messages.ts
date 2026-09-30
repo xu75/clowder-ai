@@ -26,22 +26,22 @@ import {
   type CollaborationContinuityCapsuleV1,
   extractContinuityCapsuleFromAgentMessage,
 } from '../domains/cats/services/agents/invocation/continuation/CollaborationContinuityCapsule.js';
-import {
-  ensureTerminalStatus,
-  RouteChainCompletionTracker,
-} from '../domains/cats/services/agents/invocation/reconciliation/ensureTerminalStatus.js';
-import { getThreadLiveInvocations } from '../domains/cats/services/agents/invocation/registry/getThreadLiveInvocations.js';
-import type { InvocationQueue } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
-import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
+import type { ConsumedContinuationToken } from '../domains/cats/services/agents/invocation/continuation/SessionContinuationCoordinator.js';
+import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/delivery/visible-turn.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
+import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/progress/TaskProgressStore.js';
+import type { InvocationQueue } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
 import type {
   QueueProcessor,
   SessionContinuationCoordinatorLike,
 } from '../domains/cats/services/agents/invocation/queue/QueueProcessor.js';
+import {
+  ensureTerminalStatus,
+  RouteChainCompletionTracker,
+} from '../domains/cats/services/agents/invocation/reconciliation/ensureTerminalStatus.js';
 import { reconcileZombies } from '../domains/cats/services/agents/invocation/reconciliation/reconcileZombies.js';
-import type { ConsumedContinuationToken } from '../domains/cats/services/agents/invocation/continuation/SessionContinuationCoordinator.js';
-import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/progress/TaskProgressStore.js';
-import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/delivery/visible-turn.js';
+import { getThreadLiveInvocations } from '../domains/cats/services/agents/invocation/registry/getThreadLiveInvocations.js';
+import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import type { PersistenceContext } from '../domains/cats/services/agents/routing/route-helpers.js';
 import { resetStreak } from '../domains/cats/services/agents/routing/WorklistRegistry.js';
 import {

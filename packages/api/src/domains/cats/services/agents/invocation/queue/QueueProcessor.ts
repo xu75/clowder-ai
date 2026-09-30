@@ -23,8 +23,6 @@ import {
   formatContinuationPrompt,
   isCollaborationContinuityCapsuleV1,
 } from '../continuation/CollaborationContinuityCapsule.js';
-import { type EnsureTerminalDeps, ensureTerminalStatus, RouteChainCompletionTracker } from '../reconciliation/ensureTerminalStatus.js';
-import type { InvocationQueue, QueueEntry } from './InvocationQueue.js';
 import {
   type CommitInvocationInput,
   type ConsumedContinuationToken,
@@ -35,6 +33,12 @@ import {
   type SessionStrategy,
 } from '../continuation/SessionContinuationCoordinator.js';
 import { stampVisibleTurn } from '../delivery/visible-turn.js';
+import {
+  type EnsureTerminalDeps,
+  ensureTerminalStatus,
+  RouteChainCompletionTracker,
+} from '../reconciliation/ensureTerminalStatus.js';
+import type { InvocationQueue, QueueEntry } from './InvocationQueue.js';
 
 /** Minimal interfaces for deps — avoid importing full types for testability */
 

@@ -15,7 +15,9 @@ import Fastify from 'fastify';
 import './helpers/setup-cat-registry.js';
 
 async function buildRealRegistryApp({ ttlMs = 1, notifier }) {
-  const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js');
+  const { InvocationRegistry } = await import(
+    '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+  );
   const { registerCallbackAuthHook } = await import('../dist/routes/callback-auth-prehandler.js');
   const registry = new InvocationRegistry({ ttlMs });
   const app = Fastify({ logger: false });

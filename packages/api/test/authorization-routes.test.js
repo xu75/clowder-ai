@@ -9,7 +9,9 @@ import assert from 'node:assert/strict';
 import { beforeEach, describe, test } from 'node:test';
 import Fastify from 'fastify';
 
-const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js');
+const { InvocationRegistry } = await import(
+  '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+);
 const { AuthorizationRuleStore } = await import('../dist/domains/cats/services/stores/ports/AuthorizationRuleStore.js');
 const { PendingRequestStore } = await import('../dist/domains/cats/services/stores/ports/PendingRequestStore.js');
 const { AuthorizationAuditStore } = await import(

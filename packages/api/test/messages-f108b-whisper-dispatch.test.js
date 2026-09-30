@@ -13,7 +13,9 @@ import Fastify from 'fastify';
 import './helpers/setup-cat-registry.js';
 
 const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
-const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js');
+const { InvocationRegistry } = await import(
+  '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+);
 
 function buildDeps(overrides = {}) {
   const invocationQueue = new InvocationQueue();

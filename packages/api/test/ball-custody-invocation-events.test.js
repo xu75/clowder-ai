@@ -7,7 +7,9 @@ import { describe, test } from 'node:test';
 
 describe('F233 PR3: invocation ball-custody events', () => {
   test('reconcileZombies records invocation.died after running record is marked failed', async () => {
-    const { reconcileZombies } = await import('../dist/domains/cats/services/agents/invocation/reconciliation/reconcileZombies.js');
+    const { reconcileZombies } = await import(
+      '../dist/domains/cats/services/agents/invocation/reconciliation/reconcileZombies.js'
+    );
     const { InvocationRecordStore } = await import(
       '../dist/domains/cats/services/stores/ports/InvocationRecordStore.js'
     );

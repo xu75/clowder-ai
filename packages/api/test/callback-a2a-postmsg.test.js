@@ -208,7 +208,9 @@ describe('post_message A2A mention invocation', () => {
   });
 
   test('post-message duplicate retry recovers a queued A2A callback before returning duplicate', async () => {
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const queueProcessor = {
       async onInvocationComplete() {},
       async tryAutoExecute() {},

@@ -40,20 +40,20 @@ import { F225ApprovalAdapter } from './domains/approval-hub/adapters/F225Approva
 import { F231ApprovalAdapter } from './domains/approval-hub/adapters/F231ApprovalAdapter.js';
 import { createDispatchProposalStore } from './domains/approval-hub/stores/factories/DispatchProposalStoreFactory.js';
 import type { CollaborationContinuityCapsuleV1 } from './domains/cats/services/agents/invocation/continuation/CollaborationContinuityCapsule.js';
+import { SessionContinuationCoordinator } from './domains/cats/services/agents/invocation/continuation/SessionContinuationCoordinator.js';
+import { InvocationTracker } from './domains/cats/services/agents/invocation/InvocationTracker.js';
 import { createTaskProgressStore } from './domains/cats/services/agents/invocation/progress/createTaskProgressStore.js';
 import { InvocationQueue } from './domains/cats/services/agents/invocation/queue/InvocationQueue.js';
-import {
-  InvocationRegistry,
-  selectInvocationBackendKind,
-} from './domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
-import { InvocationTracker } from './domains/cats/services/agents/invocation/InvocationTracker.js';
 import type {
   InvocationRecordStoreLike,
   RouterLike,
 } from './domains/cats/services/agents/invocation/queue/QueueProcessor.js';
 import { QueueProcessor } from './domains/cats/services/agents/invocation/queue/QueueProcessor.js';
-import { SessionContinuationCoordinator } from './domains/cats/services/agents/invocation/continuation/SessionContinuationCoordinator.js';
 import { SessionMutex } from './domains/cats/services/agents/invocation/queue/SessionMutex.js';
+import {
+  InvocationRegistry,
+  selectInvocationBackendKind,
+} from './domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import {
   type AcpPoolRegistry,
   createAcpServiceForConfig,
@@ -3651,7 +3651,9 @@ async function main(): Promise<void> {
   // This prevents a second worktree/runtime instance from sweeping another
   // live process that happens to share the same Redis namespace.
   if (redis) {
-    const { StartupReconciler } = await import('./domains/cats/services/agents/invocation/reconciliation/StartupReconciler.js');
+    const { StartupReconciler } = await import(
+      './domains/cats/services/agents/invocation/reconciliation/StartupReconciler.js'
+    );
     const reconciler = new StartupReconciler({
       invocationRecordStore,
       taskProgressStore,

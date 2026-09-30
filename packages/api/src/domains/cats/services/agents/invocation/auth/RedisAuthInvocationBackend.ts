@@ -22,8 +22,8 @@
 import type { CatId } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import type { CallerTraceContext } from '../../../../../../infrastructure/telemetry/genai-semconv.js';
-import type { AuthInvocationInput, IAuthInvocationBackend } from './IAuthInvocationBackend.js';
 import type { InvocationRecord, VerifyResult } from '../registry/InvocationRegistry.js';
+import type { AuthInvocationInput, IAuthInvocationBackend } from './IAuthInvocationBackend.js';
 
 const KEY_INV = (id: string) => `auth:inv:${id}`;
 const KEY_MSGS = (id: string) => `auth:inv:${id}:msgs`;

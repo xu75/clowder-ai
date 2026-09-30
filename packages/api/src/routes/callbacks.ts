@@ -16,12 +16,12 @@ import {
 import type { FastifyBaseLogger, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { resolveFrontendBaseUrl } from '../config/frontend-origin.js';
-import type { InvocationQueue } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
-import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
-import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
 import { MessageDeliveryService } from '../domains/cats/services/agents/invocation/delivery/MessageDeliveryService.js';
 import { getRichBlockBuffer } from '../domains/cats/services/agents/invocation/delivery/RichBlockBuffer.js';
 import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/delivery/visible-turn.js';
+import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
+import type { InvocationQueue } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
+import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import { extractImagePaths, extractImageUrls } from '../domains/cats/services/agents/providers/image-paths.js';
 import { analyzeA2AMentions } from '../domains/cats/services/agents/routing/a2a-mentions.js';
 import { resolveCatTarget } from '../domains/cats/services/agents/routing/cat-target-resolver.js';

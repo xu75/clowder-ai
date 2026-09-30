@@ -15,14 +15,14 @@ import type { CatId } from '@cat-cafe/shared';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { IBallCustodyIngest } from '../domains/ball-custody/BallCustodyIngest.js';
-import { getThreadLiveInvocations } from '../domains/cats/services/agents/invocation/registry/getThreadLiveInvocations.js';
+import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/progress/TaskProgressStore.js';
 import {
   type InvocationQueue,
   isSystemPinnedQueueEntry,
 } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
 import type { QueueProcessor } from '../domains/cats/services/agents/invocation/queue/QueueProcessor.js';
 import { reconcileZombies } from '../domains/cats/services/agents/invocation/reconciliation/reconcileZombies.js';
-import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/progress/TaskProgressStore.js';
+import { getThreadLiveInvocations } from '../domains/cats/services/agents/invocation/registry/getThreadLiveInvocations.js';
 import type { IDraftStore } from '../domains/cats/services/stores/ports/DraftStore.js';
 import type { IInvocationRecordStore } from '../domains/cats/services/stores/ports/InvocationRecordStore.js';
 import type { IMessageStore } from '../domains/cats/services/stores/ports/MessageStore.js';

@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 import Fastify from 'fastify';
 
 const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
-const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js');
+const { InvocationRegistry } = await import(
+  '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+);
 const { registerWorklist, unregisterWorklist, pushToWorklist, getWorklist } = await import(
   '../dist/domains/cats/services/agents/routing/WorklistRegistry.js'
 );

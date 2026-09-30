@@ -169,7 +169,10 @@ import type { IThreadStore } from '../../stores/ports/ThreadStore.js';
 import type { AgentMessage, AgentService, AgentServiceOptions } from '../../types.js';
 import { hasL0CompilerSeam } from '../../types.js';
 import type { InvocationRegistry } from '../invocation/registry/InvocationRegistry.js';
-import { completeCapsuleForSeal, type RouteStateContinuityCapsule } from './continuation/CollaborationContinuityCapsule.js';
+import {
+  completeCapsuleForSeal,
+  type RouteStateContinuityCapsule,
+} from './continuation/CollaborationContinuityCapsule.js';
 import type { ResumeFailureKind } from './invoke-helpers.js';
 import {
   classifyResumeFailure,
@@ -184,8 +187,8 @@ import {
   isTransientCliExitCode1,
   preflightRace,
 } from './invoke-helpers.js';
-import { SessionMutex } from './queue/SessionMutex.js';
 import type { TaskProgressItem, TaskProgressStatus, TaskProgressStore } from './progress/TaskProgressStore.js';
+import { SessionMutex } from './queue/SessionMutex.js';
 
 /** F118: Module-level singleton — guards per-cliSessionId serialization */
 const sessionMutex = new SessionMutex();

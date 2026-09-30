@@ -38,7 +38,9 @@ describe('F128 explicit intent override (round-5)', () => {
     // them to behave serially. Direct contradiction → unnecessary handoffs
     // + duplicate report-back. Fix: detect explicit `#ideate` from raw
     // initialMessage in enrich, omit chain protocol in parallel mode.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -135,7 +137,9 @@ describe('F128 explicit intent override (round-5)', () => {
     // empty preferredCats and multiple resolved targets preserves all of
     // them as serial multi-cat execution (the F088 router contract for
     // `#execute` outside F128-specific override).
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {

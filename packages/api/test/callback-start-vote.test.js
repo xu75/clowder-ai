@@ -297,7 +297,9 @@ describe('POST /api/callbacks/start-vote', () => {
 
   test('dispatches voter cats via A2A when router + invocationRecordStore are provided', async () => {
     const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
 
     const dispatchedCats = [];
     const invocationQueue = new InvocationQueue();
@@ -361,7 +363,9 @@ describe('POST /api/callbacks/start-vote', () => {
 
   test('voters > MAX_QUEUE_DEPTH: all enqueued (F175: agent source bypasses depth limit)', async () => {
     const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
 
     const fallbackTargets = [];
     const invocationQueue = new InvocationQueue();
@@ -430,7 +434,9 @@ describe('POST /api/callbacks/start-vote', () => {
   // F216 AC-D5: coalesced voters must NOT be counted as missed → no direct dispatch fallback.
   test('coalesced voter does NOT trigger direct dispatch fallback (F216 AC-D5)', async () => {
     const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
 
     const fallbackTargets = [];
     const invocationQueue = new InvocationQueue();

@@ -3,11 +3,11 @@
  * 导出所有 Agent 服务
  */
 
-export { InvocationRegistry } from './agents/invocation/registry/InvocationRegistry.js';
 export { InvocationTracker } from './agents/invocation/InvocationTracker.js';
 export type { InvocationDeps, InvocationParams } from './agents/invocation/invoke-single-cat.js';
 export { invokeSingleCat } from './agents/invocation/invoke-single-cat.js';
 export { buildMcpCallbackInstructions, needsMcpInjection } from './agents/invocation/McpPromptInjector.js';
+export { InvocationRegistry } from './agents/invocation/registry/InvocationRegistry.js';
 export { ClaudeAgentService } from './agents/providers/ClaudeAgentService.js';
 export { CodexAgentService } from './agents/providers/CodexAgentService.js';
 export { GeminiAgentService } from './agents/providers/GeminiAgentService.js';
