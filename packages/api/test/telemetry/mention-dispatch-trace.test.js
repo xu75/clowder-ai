@@ -340,7 +340,7 @@ test('F153 P1: HubTraceTree buildForest supports multiple children per parent (f
 
 test('F153: InvocationRecord declares traceContext field with CallerTraceContext', () => {
   const src = readFileSync(
-    resolve(__dirname, '../../src/domains/cats/services/agents/invocation/InvocationRegistry.ts'),
+    resolve(__dirname, '../../src/domains/cats/services/agents/invocation/registry/InvocationRegistry.ts'),
     'utf8',
   );
   assert.ok(
@@ -399,7 +399,7 @@ test('F153: callback-a2a-trigger propagates callerTraceContext to both queue and
 
 test('F153: InvocationQueue entry includes callerTraceContext field', () => {
   const src = readFileSync(
-    resolve(__dirname, '../../src/domains/cats/services/agents/invocation/InvocationQueue.ts'),
+    resolve(__dirname, '../../src/domains/cats/services/agents/invocation/queue/InvocationQueue.ts'),
     'utf8',
   );
   assert.ok(
@@ -410,7 +410,7 @@ test('F153: InvocationQueue entry includes callerTraceContext field', () => {
 
 test('F153: InvocationQueue entry construction includes callerTraceContext from input', () => {
   const src = readFileSync(
-    resolve(__dirname, '../../src/domains/cats/services/agents/invocation/InvocationQueue.ts'),
+    resolve(__dirname, '../../src/domains/cats/services/agents/invocation/queue/InvocationQueue.ts'),
     'utf8',
   );
   assert.ok(
@@ -439,7 +439,7 @@ test('F153: invoke-single-cat stores traceFlags in traceContext', () => {
 
 test('F153: QueueProcessor passes callerTraceContext from entry to routeExecution', () => {
   const src = readFileSync(
-    resolve(__dirname, '../../src/domains/cats/services/agents/invocation/QueueProcessor.ts'),
+    resolve(__dirname, '../../src/domains/cats/services/agents/invocation/queue/QueueProcessor.ts'),
     'utf8',
   );
   assert.ok(
