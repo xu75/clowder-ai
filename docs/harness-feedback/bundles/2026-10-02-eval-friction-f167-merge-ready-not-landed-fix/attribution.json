@@ -1,0 +1,11 @@
+{
+  "verdictId": "2026-10-02-eval-friction-f167-merge-ready-not-landed-fix",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-10-02",
+  "generatedAt": "2026-10-02T03:04:01.032Z",
+  "findings": [],
+  "noFindingRecord": {
+    "reason": "no friction cluster surfaced in the selected window",
+    "evidence": "friction-rollup/cluster_count"
+  }
+}
