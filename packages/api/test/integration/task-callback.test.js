@@ -10,7 +10,9 @@ import { before, beforeEach, describe, test } from 'node:test';
 import '../helpers/setup-cat-registry.js';
 import Fastify from 'fastify';
 
-const { InvocationRegistry } = await import('../../dist/domains/cats/services/agents/invocation/InvocationRegistry.js');
+const { InvocationRegistry } = await import(
+  '../../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+);
 const { TaskStore } = await import('../../dist/domains/cats/services/stores/ports/TaskStore.js');
 const { MessageStore } = await import('../../dist/domains/cats/services/stores/ports/MessageStore.js');
 const { callbacksRoutes } = await import('../../dist/routes/callbacks.js');

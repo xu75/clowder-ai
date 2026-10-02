@@ -71,7 +71,7 @@ class MockRedisHash {
 describe('RedisTaskProgressStore', () => {
   test('setSnapshot/getSnapshot/getThreadSnapshots/deleteSnapshot', async () => {
     const { RedisTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/RedisTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/RedisTaskProgressStore.js'
     );
 
     const redis = new MockRedisHash();
@@ -105,7 +105,7 @@ describe('RedisTaskProgressStore', () => {
 
   test('setSnapshot uses default ttl unless overridden', async () => {
     const { RedisTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/RedisTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/RedisTaskProgressStore.js'
     );
 
     const redis = new MockRedisHash();
@@ -135,7 +135,7 @@ describe('RedisTaskProgressStore', () => {
 
   test('deleteThread clears the whole hash key', async () => {
     const { RedisTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/RedisTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/RedisTaskProgressStore.js'
     );
 
     const redis = new MockRedisHash();
@@ -163,7 +163,7 @@ describe('RedisTaskProgressStore', () => {
 
   test('deleteSnapshotIfOwner atomically preserves a replacement invocation snapshot', async () => {
     const { RedisTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/RedisTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/RedisTaskProgressStore.js'
     );
 
     const redis = new MockRedisHash();
@@ -188,7 +188,7 @@ describe('RedisTaskProgressStore', () => {
 describe('MemoryTaskProgressStore', () => {
   test('deleteSnapshotIfOwner preserves a replacement invocation snapshot', async () => {
     const { MemoryTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/MemoryTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/MemoryTaskProgressStore.js'
     );
     const store = new MemoryTaskProgressStore();
     const replacement = {

@@ -51,9 +51,9 @@
  */
 
 import type { CatId } from '@cat-cafe/shared';
-import type { DraftRecord } from '../../stores/ports/DraftStore.js';
-import type { InvocationRecord } from '../../stores/ports/InvocationRecordStore.js';
-import type { ActiveSlotInfo } from './InvocationTracker.js';
+import type { DraftRecord } from '../../../stores/ports/DraftStore.js';
+import type { InvocationRecord } from '../../../stores/ports/InvocationRecordStore.js';
+import type { ActiveSlotInfo } from '../InvocationTracker.js';
 
 export const DEFAULT_FRESH_DRAFT_WINDOW_MS = 300_000;
 export const DEFAULT_ZOMBIE_GRACE_MS = 600_000;

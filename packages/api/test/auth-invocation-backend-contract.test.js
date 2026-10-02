@@ -13,7 +13,7 @@ const backends = [
     'memory',
     async () => {
       const { MemoryAuthInvocationBackend } = await import(
-        '../dist/domains/cats/services/agents/invocation/MemoryAuthInvocationBackend.js'
+        '../dist/domains/cats/services/agents/invocation/auth/MemoryAuthInvocationBackend.js'
       );
       return { backend: new MemoryAuthInvocationBackend({ maxRecords: 500 }), cleanup: async () => {} };
     },
@@ -31,7 +31,7 @@ if (_redisUrl && !_redisUrl.includes(':6399')) {
     async () => {
       const { createRedisClient } = await import('@cat-cafe/shared/utils');
       const { RedisAuthInvocationBackend } = await import(
-        '../dist/domains/cats/services/agents/invocation/RedisAuthInvocationBackend.js'
+        '../dist/domains/cats/services/agents/invocation/auth/RedisAuthInvocationBackend.js'
       );
       const redis = createRedisClient({ url: process.env.REDIS_URL, keyPrefix: 'cat-cafe-test:' });
       // Wipe test keyspace before each test (keyPrefix isolates from shared 6398 data)
@@ -227,7 +227,7 @@ for (const [name, factory] of backends) {
       // let those victims bypass the 5min limit early.
       test('AC-C5 cooldown bound: re-claim of active cooldown does NOT evict others', async () => {
         const { MemoryAuthInvocationBackend } = await import(
-          '../dist/domains/cats/services/agents/invocation/MemoryAuthInvocationBackend.js'
+          '../dist/domains/cats/services/agents/invocation/auth/MemoryAuthInvocationBackend.js'
         );
         const small = new MemoryAuthInvocationBackend({ maxRecords: 5 });
         // Fill cap with 5 active cooldowns.
@@ -247,7 +247,7 @@ for (const [name, factory] of backends) {
       // Custom maxRecords now governs cooldown size too — they're in lockstep.
       test('AC-C5 cooldown bound: custom maxRecords governs cooldown cap', async () => {
         const { MemoryAuthInvocationBackend } = await import(
-          '../dist/domains/cats/services/agents/invocation/MemoryAuthInvocationBackend.js'
+          '../dist/domains/cats/services/agents/invocation/auth/MemoryAuthInvocationBackend.js'
         );
         const small = new MemoryAuthInvocationBackend({ maxRecords: 50 });
         // Claim 100 active cooldowns — should evict early ones around the 50 mark.

@@ -10,7 +10,9 @@ import assert from 'node:assert/strict';
 import { beforeEach, describe, test } from 'node:test';
 import Fastify from 'fastify';
 
-const { InvocationRegistry } = await import('../../dist/domains/cats/services/agents/invocation/InvocationRegistry.js');
+const { InvocationRegistry } = await import(
+  '../../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+);
 const { MessageStore } = await import('../../dist/domains/cats/services/stores/ports/MessageStore.js');
 const { TaskStore } = await import('../../dist/domains/cats/services/stores/ports/TaskStore.js');
 const { buildMcpCallbackInstructions, needsMcpInjection } = await import(

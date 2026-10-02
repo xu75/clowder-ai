@@ -12,8 +12,10 @@ import Fastify from 'fastify';
 import { MessageStore } from '../dist/domains/cats/services/stores/ports/MessageStore.js';
 import { safeParseExtra } from '../dist/domains/cats/services/stores/redis/redis-message-parsers.js';
 
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-const { InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/InvocationRegistry.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+const { InvocationRegistry } = await import(
+  '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+);
 
 async function waitFor(predicate, timeoutMs = 1000, intervalMs = 10) {
   const deadline = Date.now() + timeoutMs;

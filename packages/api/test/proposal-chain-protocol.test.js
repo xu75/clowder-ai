@@ -17,7 +17,9 @@ import { createProposalTestContext } from './helpers/proposal-test-harness.js';
 
 describe('F128 chain protocol injection', () => {
   test('approve injects chain protocol with order + handoff instructions when preferredCats has multiple cats', async () => {
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -91,7 +93,9 @@ describe('F128 chain protocol injection', () => {
     // #ideate thread") would force every spawned proposal into parallel mode
     // regardless of what the user typed in initialMessage. Pin the contract:
     // user intent comes from the raw user-typed initialMessage only.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -167,7 +171,9 @@ describe('F128 chain protocol injection', () => {
     // A separate downstream test would need to stub ThreadStore directly
     // to assert addParticipants was never invoked with `opus`; we rely on
     // the input-boundary assertion as the necessary and sufficient cut.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     let routerReceivedMessage = null;
     const router = {
@@ -252,7 +258,9 @@ describe('F128 chain protocol injection', () => {
   });
 
   test('approve omits chain protocol when preferredCats is empty (no chain to orchestrate)', async () => {
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {

@@ -17,7 +17,7 @@ describe('GET /api/threads/:threadId/task-progress', () => {
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');
     const { threadsRoutes } = await import('../dist/routes/threads.js');
     const { MemoryTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/MemoryTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/MemoryTaskProgressStore.js'
     );
 
     threadStore = new ThreadStore();

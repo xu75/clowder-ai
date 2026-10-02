@@ -16,7 +16,9 @@ describe('propose-session-handoff route (F225 ②a)', () => {
   let callbacksRoutes;
 
   beforeEach(async () => {
-    ({ InvocationRegistry } = await import('../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'));
+    ({ InvocationRegistry } = await import(
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+    ));
     ({ MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js'));
     ({ InMemorySessionHandoffProposalStore } = await import(
       '../dist/domains/cats/services/stores/ports/SessionHandoffProposalStore.js'

@@ -91,7 +91,7 @@ describe('post_message A2A mention invocation', () => {
 
   beforeEach(async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
 
@@ -208,7 +208,9 @@ describe('post_message A2A mention invocation', () => {
   });
 
   test('post-message duplicate retry recovers a queued A2A callback before returning duplicate', async () => {
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const queueProcessor = {
       async onInvocationComplete() {},
       async tryAutoExecute() {},
@@ -559,7 +561,7 @@ describe('F052: cross-thread A2A mention routing', () => {
 
   beforeEach(async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');

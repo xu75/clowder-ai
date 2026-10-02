@@ -16,7 +16,7 @@ describe('RedisTaskProgressStore owner-aware cleanup', { skip: redisIsolationSki
   before(async () => {
     assertRedisIsolationOrThrow(REDIS_URL, 'RedisTaskProgressStore owner-aware cleanup');
     const { RedisTaskProgressStore } = await import(
-      '../dist/domains/cats/services/agents/invocation/RedisTaskProgressStore.js'
+      '../dist/domains/cats/services/agents/invocation/progress/RedisTaskProgressStore.js'
     );
     const { createRedisClient } = await import('@cat-cafe/shared/utils');
     redis = createRedisClient({ url: REDIS_URL });

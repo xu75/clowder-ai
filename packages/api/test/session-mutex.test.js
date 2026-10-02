@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-const { SessionMutex } = await import('../dist/domains/cats/services/agents/invocation/SessionMutex.js');
+const { SessionMutex } = await import('../dist/domains/cats/services/agents/invocation/queue/SessionMutex.js');
 
 test('acquire returns release function when no contention', async () => {
   const mutex = new SessionMutex();

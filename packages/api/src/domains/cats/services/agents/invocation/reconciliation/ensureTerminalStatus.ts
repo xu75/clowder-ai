@@ -20,7 +20,7 @@
  *   - already_terminal: record already non-running OR missing → no write
  */
 
-import type { IInvocationRecordStore } from '../../stores/ports/InvocationRecordStore.js';
+import type { IInvocationRecordStore } from '../../../stores/ports/InvocationRecordStore.js';
 
 export type ChainCompletionState = 'pending' | 'succeeded' | 'failed';
 

@@ -37,7 +37,9 @@ describe('F128 parallel reporter handle resolution', () => {
   test('preferredCats=[] + raw ASCII `@cats`: reporter resolves to canonical handle of first router-resolved catId', async () => {
     // Originally砚砚 round-7 P1 (raw fallback). Round-9 plan-based:
     // reporter = primaryMentionHandleForCatId(resolved.targetCats[0]).
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -92,7 +94,9 @@ describe('F128 parallel reporter handle resolution', () => {
     // bot round-8 P2 (ASCII-only regex). Round-9 plan-based: reporter
     // is the canonical configured handle of resolved.targetCats[0] —
     // regardless of which alias the user typed in raw.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -142,7 +146,9 @@ describe('F128 parallel reporter handle resolution', () => {
     // bot round-9 P2 (regex missed `.`). Round-9 plan-based: dispatch
     // reads router-resolved catId `gpt-5.2`, so the dot is naturally
     // preserved — there's no raw regex to misconfigure.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {

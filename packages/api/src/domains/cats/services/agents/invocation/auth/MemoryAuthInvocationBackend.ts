@@ -13,9 +13,9 @@
  * - claimClientMessageId enforces MAX_CLIENT_MESSAGE_IDS bound per record
  */
 
-import type { CallerTraceContext } from '../../../../../infrastructure/telemetry/genai-semconv.js';
+import type { CallerTraceContext } from '../../../../../../infrastructure/telemetry/genai-semconv.js';
+import type { InvocationRecord, VerifyResult } from '../registry/InvocationRegistry.js';
 import type { AuthInvocationInput, IAuthInvocationBackend } from './IAuthInvocationBackend.js';
-import type { InvocationRecord, VerifyResult } from './InvocationRegistry.js';
 
 const DEFAULT_MAX_RECORDS = 500;
 const MAX_CLIENT_MESSAGE_IDS = 1000;

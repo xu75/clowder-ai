@@ -18,7 +18,7 @@ describe('Session bind history import', () => {
     const { ThreadStore } = await import('../dist/domains/cats/services/stores/ports/ThreadStore.js');
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
     const { TranscriptReader } = await import('../dist/domains/cats/services/session/TranscriptReader.js');
     const { TranscriptWriter } = await import('../dist/domains/cats/services/session/TranscriptWriter.js');

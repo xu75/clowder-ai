@@ -14,11 +14,11 @@
 
 import { randomUUID } from 'node:crypto';
 import type { CatId, ConnectorSource } from '@cat-cafe/shared';
-import type { IBallCustodyIngest } from '../../../../ball-custody/BallCustodyIngest.js';
-import { buildInvocationDiedEvent } from '../../../../ball-custody/ball-custody-events.js';
-import type { IInvocationRecordStore, InvocationRecord } from '../../stores/ports/InvocationRecordStore.js';
-import type { AppendMessageInput } from '../../stores/ports/MessageStore.js';
-import type { TaskProgressStore } from './TaskProgressStore.js';
+import type { IBallCustodyIngest } from '../../../../../ball-custody/BallCustodyIngest.js';
+import { buildInvocationDiedEvent } from '../../../../../ball-custody/ball-custody-events.js';
+import type { IInvocationRecordStore, InvocationRecord } from '../../../stores/ports/InvocationRecordStore.js';
+import type { AppendMessageInput } from '../../../stores/ports/MessageStore.js';
+import type { TaskProgressStore } from '../progress/TaskProgressStore.js';
 
 export interface StartupSweepResult {
   swept: number;

@@ -39,7 +39,7 @@ describe('callback propose-profile-update route', () => {
     profileDir = mkdtempSync(join(tmpdir(), 'f231-propose-'));
     mkdirSync(join(profileDir, 'relationship'), { recursive: true });
     const routeMod = await import('../dist/routes/callback-propose-profile-update-routes.js');
-    const RegMod = await import('../dist/domains/cats/services/agents/invocation/InvocationRegistry.js');
+    const RegMod = await import('../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js');
     const StoreMod = await import('../dist/domains/cats/services/stores/ports/ProfileUpdateProposalStore.js');
     const MsgMod = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const authMod = await import('../dist/routes/callback-auth-prehandler.js');
@@ -252,7 +252,7 @@ describe('F246 v2: proposal_created socket event for F231', () => {
     profileDir = mkdtempSync(join(tmpdir(), 'f231-socket-'));
     mkdirSync(join(profileDir, 'relationship'), { recursive: true });
     const routeMod = await import('../dist/routes/callback-propose-profile-update-routes.js');
-    const RegMod = await import('../dist/domains/cats/services/agents/invocation/InvocationRegistry.js');
+    const RegMod = await import('../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js');
     const StoreMod = await import('../dist/domains/cats/services/stores/ports/ProfileUpdateProposalStore.js');
     const MsgMod = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
     const authMod = await import('../dist/routes/callback-auth-prehandler.js');

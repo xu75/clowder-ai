@@ -7,7 +7,10 @@
 
 import type { AgentKeyVerifyResult, CallbackPrincipal } from '@cat-cafe/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { InvocationRecord, VerifyResult } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
+import type {
+  InvocationRecord,
+  VerifyResult,
+} from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import type { CallbackAuthSystemMessageNotifier } from './callback-auth-system-message.js';
 import { recordCallbackAuthFailure, recordLegacyFallbackHit } from './callback-auth-telemetry.js';
 import { makeCallbackAuthError } from './callback-errors.js';

@@ -28,7 +28,7 @@ describe('F174 Phase B — restart resilience (AC-B3, AC-B5)', () => {
 
     const { createRedisClient } = await import('@cat-cafe/shared/utils');
     const { RedisAuthInvocationBackend } = await import(
-      '../dist/domains/cats/services/agents/invocation/RedisAuthInvocationBackend.js'
+      '../dist/domains/cats/services/agents/invocation/auth/RedisAuthInvocationBackend.js'
     );
 
     // === Process 1 ===

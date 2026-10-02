@@ -2,8 +2,8 @@
 
 import assert from 'node:assert';
 import { beforeEach, describe, it } from 'node:test';
-import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/InvocationQueue.js';
-import { QueueProcessor } from '../dist/domains/cats/services/agents/invocation/QueueProcessor.js';
+import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js';
+import { QueueProcessor } from '../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js';
 import { ConnectorInvokeTrigger } from '../dist/infrastructure/email/ConnectorInvokeTrigger.js';
 
 // ─── Shared Mocks ───────────────────────────────────────────────

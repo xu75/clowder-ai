@@ -30,7 +30,9 @@ const { ClaudeAgentService } = await import('../../dist/domains/cats/services/ag
 const { CodexAgentService } = await import('../../dist/domains/cats/services/agents/providers/CodexAgentService.js');
 const { GeminiAgentService } = await import('../../dist/domains/cats/services/agents/providers/GeminiAgentService.js');
 const { AgentRouter } = await import('../../dist/domains/cats/services/agents/routing/AgentRouter.js');
-const { InvocationRegistry } = await import('../../dist/domains/cats/services/agents/invocation/InvocationRegistry.js');
+const { InvocationRegistry } = await import(
+  '../../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
+);
 const { MessageStore } = await import('../../dist/domains/cats/services/stores/ports/MessageStore.js');
 const { ThreadStore } = await import('../../dist/domains/cats/services/stores/ports/ThreadStore.js');
 const { callbacksRoutes } = await import('../../dist/routes/callbacks.js');

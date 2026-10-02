@@ -26,7 +26,7 @@
  */
 
 import type { ProfileUpdateProposal } from '@cat-cafe/shared';
-import type { SessionMutex } from '../agents/invocation/SessionMutex.js';
+import type { SessionMutex } from '../agents/invocation/queue/SessionMutex.js';
 import type { IProfileUpdateProposalStore } from '../stores/ports/ProfileUpdateProposalStore.js';
 import {
   writeProfilePrimer as defaultWritePrimer,

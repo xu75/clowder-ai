@@ -16,12 +16,12 @@ import {
 import type { FastifyBaseLogger, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { resolveFrontendBaseUrl } from '../config/frontend-origin.js';
-import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
-import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
+import { MessageDeliveryService } from '../domains/cats/services/agents/invocation/delivery/MessageDeliveryService.js';
+import { getRichBlockBuffer } from '../domains/cats/services/agents/invocation/delivery/RichBlockBuffer.js';
+import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/delivery/visible-turn.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
-import { MessageDeliveryService } from '../domains/cats/services/agents/invocation/MessageDeliveryService.js';
-import { getRichBlockBuffer } from '../domains/cats/services/agents/invocation/RichBlockBuffer.js';
-import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/visible-turn.js';
+import type { InvocationQueue } from '../domains/cats/services/agents/invocation/queue/InvocationQueue.js';
+import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import { extractImagePaths, extractImageUrls } from '../domains/cats/services/agents/providers/image-paths.js';
 import { analyzeA2AMentions } from '../domains/cats/services/agents/routing/a2a-mentions.js';
 import { resolveCatTarget } from '../domains/cats/services/agents/routing/cat-target-resolver.js';
@@ -549,7 +549,7 @@ export interface CallbackRoutesOptions {
     unregisterEntryCompleteHook(entryId: string): void;
   };
   /** F122B: InvocationQueue for agent-sourced A2A entries */
-  invocationQueue?: import('../domains/cats/services/agents/invocation/InvocationQueue.js').InvocationQueue;
+  invocationQueue?: import('../domains/cats/services/agents/invocation/queue/InvocationQueue.js').InvocationQueue;
   /** F126: Limb node registry for device/hardware capability management */
   limbRegistry?: import('../domains/limb/LimbRegistry.js').LimbRegistry;
   /** F126 Phase C: Limb pairing store for remote device approval */

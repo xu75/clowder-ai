@@ -23,7 +23,9 @@ import { createProposalTestContext } from './helpers/proposal-test-harness.js';
 
 describe('F128 approve dispatch — initialMessage routing', () => {
   test('approve dispatches initialMessage through the queue processor', async () => {
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const resolveCalls = [];
     const processCalls = [];
@@ -99,7 +101,9 @@ describe('F128 approve dispatch — initialMessage routing', () => {
     // 0 targets, dispatch silently skips, and only the thread owner ever gets woken up via the
     // user's next manual message. With fallback, the proposal's chosen members get woken up
     // immediately as the user intended when picking them on the card.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -156,7 +160,9 @@ describe('F128 approve dispatch — initialMessage routing', () => {
     // Defensive: if the user genuinely wants parallel ideation, they tag #ideate
     // explicitly in initialMessage. Fallback must NOT clobber that intent down
     // to execute — explicit user tags always win.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -199,7 +205,9 @@ describe('F128 approve dispatch — initialMessage routing', () => {
     // to find the parent thread so they can report back when work is done.
     // Server defensively injects the header so cats who forget to write it in
     // initialMessage still preserve the fork-and-return loop.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {
@@ -278,7 +286,9 @@ describe('F128 approve dispatch — initialMessage routing', () => {
     // initialMessage body are narrative / rule-stating prose (e.g.
     // "@opus46 把球传过去" inside instructions). They must NOT override the
     // card's first-picked member.
-    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { InvocationQueue } = await import(
+      '../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js'
+    );
     const invocationQueue = new InvocationQueue();
     const router = {
       async resolveTargetsAndIntent() {

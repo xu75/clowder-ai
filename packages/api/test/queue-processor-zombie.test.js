@@ -8,8 +8,8 @@
 import assert from 'node:assert/strict';
 import { describe, it, mock } from 'node:test';
 
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
 
 const SHORT_TTL = 1000; // 1s for testing
 const T0 = 100_000;

@@ -387,7 +387,7 @@ describe('Schedule Routes', () => {
       const { templateRegistry } = await import('../dist/infrastructure/scheduler/templates/registry.js');
       const { scheduleRoutes: sr } = await import('../dist/routes/schedule.js');
       const { InvocationRegistry } = await import(
-        '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+        '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
       );
       const store = new DynamicTaskStore(db);
       registry = new InvocationRegistry();
@@ -667,7 +667,7 @@ describe('Schedule Routes', () => {
       const { templateRegistry } = await import('../dist/infrastructure/scheduler/templates/registry.js');
       const { scheduleRoutes: sr } = await import('../dist/routes/schedule.js');
       const { InvocationRegistry } = await import(
-        '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+        '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
       );
       store = new DynamicTaskStore(db);
       registry = new InvocationRegistry();

@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { COLLECTION_SIGNAL_KINDS, generateProposalId, type ProfileUpdateProposal } from '@cat-cafe/shared';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
+import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import {
   hashContent,
   InvalidPrimerPathError,

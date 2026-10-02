@@ -11,7 +11,7 @@ import { describe, test } from 'node:test';
 describe('InvocationRegistry', () => {
   test('create() returns invocationId and callbackToken', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -25,7 +25,7 @@ describe('InvocationRegistry', () => {
 
   test('verify() returns ok:true with record for valid credentials', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -42,7 +42,7 @@ describe('InvocationRegistry', () => {
   // F174 Phase A — Structured failure reasons (KD-4)
   test('verify() returns reason:invalid_token when token mismatches', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -55,7 +55,7 @@ describe('InvocationRegistry', () => {
 
   test('verify() returns reason:unknown_invocation for unknown invocationId', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -68,7 +68,7 @@ describe('InvocationRegistry', () => {
 
   test('verify() returns reason:expired for expired invocation', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     // Use very short TTL
@@ -85,7 +85,7 @@ describe('InvocationRegistry', () => {
 
   test('LRU eviction removes oldest unused when at capacity', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry({ maxRecords: 3 });
@@ -101,7 +101,7 @@ describe('InvocationRegistry', () => {
 
   test('verify() refreshes recency (true LRU)', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry({ maxRecords: 3 });
@@ -127,7 +127,7 @@ describe('InvocationRegistry', () => {
 
   test('multiple creates produce unique IDs', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -140,7 +140,7 @@ describe('InvocationRegistry', () => {
 
   test('claimClientMessageId() deduplicates per invocation', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -153,7 +153,7 @@ describe('InvocationRegistry', () => {
 
   test('claimClientMessageId() scopes ids to each invocation', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -168,7 +168,7 @@ describe('InvocationRegistry', () => {
 
   test('isLatest() returns true for the most recent invocation per thread+cat', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -178,7 +178,7 @@ describe('InvocationRegistry', () => {
 
   test('isLatest() returns false for a superseded invocation (same thread+cat)', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -191,7 +191,7 @@ describe('InvocationRegistry', () => {
 
   test('isLatest() tracks different cats independently on same thread', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -210,7 +210,7 @@ describe('InvocationRegistry', () => {
 
   test('isLatest() tracks different threads independently for same cat', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -223,7 +223,7 @@ describe('InvocationRegistry', () => {
 
   test('isLatest() returns false for unknown invocationId', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -234,7 +234,7 @@ describe('InvocationRegistry', () => {
 
   test('latestByThreadCat cleans up on TTL expiry', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry({ ttlMs: 1 });
@@ -255,7 +255,7 @@ describe('InvocationRegistry', () => {
 
   test('latestByThreadCat cleans up on LRU eviction', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry({ maxRecords: 2 });
@@ -273,7 +273,7 @@ describe('InvocationRegistry', () => {
 
   test('latestByThreadCat cleanup does not remove superseded pointer', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry({ maxRecords: 3 });
@@ -301,7 +301,7 @@ describe('InvocationRegistry', () => {
 
   test('verify() extends expiresAt (sliding window)', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const originalDateNow = Date.now;
@@ -328,7 +328,7 @@ describe('InvocationRegistry', () => {
 
   test('first callback after long delay succeeds with 2h TTL', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     // Simulate: cat runs for 30 min before first callback
@@ -348,7 +348,7 @@ describe('InvocationRegistry', () => {
 
   test('create() stores parentInvocationId in record when provided', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -361,7 +361,7 @@ describe('InvocationRegistry', () => {
 
   test('create() omits parentInvocationId from record when not provided', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();
@@ -374,7 +374,7 @@ describe('InvocationRegistry', () => {
 
   test('stale invocation still rejected despite sliding window', async () => {
     const { InvocationRegistry } = await import(
-      '../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
+      '../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js'
     );
 
     const registry = new InvocationRegistry();

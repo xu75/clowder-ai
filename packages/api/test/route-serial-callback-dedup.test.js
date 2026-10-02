@@ -208,7 +208,9 @@ describe('#573: stream store dedup when cat_cafe_post_message used', () => {
 
   it('extracts messageId from Codex-style prefixed MCP tool results before metadata augment', async () => {
     const { routeSerial } = await import('../dist/domains/cats/services/agents/routing/route-serial.js');
-    const { getRichBlockBuffer } = await import('../dist/domains/cats/services/agents/invocation/RichBlockBuffer.js');
+    const { getRichBlockBuffer } = await import(
+      '../dist/domains/cats/services/agents/invocation/delivery/RichBlockBuffer.js'
+    );
     const appendCalls = [];
     const augmentCalls = [];
     const bufferedBlock = {

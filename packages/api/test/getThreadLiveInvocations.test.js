@@ -21,7 +21,7 @@ import {
   DEFAULT_FRESH_DRAFT_WINDOW_MS,
   DEFAULT_ZOMBIE_GRACE_MS,
   getThreadLiveInvocations,
-} from '../dist/domains/cats/services/agents/invocation/getThreadLiveInvocations.js';
+} from '../dist/domains/cats/services/agents/invocation/registry/getThreadLiveInvocations.js';
 
 const THREAD_ID = 'thread-test-1';
 const USER_ID = 'user-1';

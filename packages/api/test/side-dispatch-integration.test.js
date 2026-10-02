@@ -14,8 +14,8 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it, mock } from 'node:test';
 
 const { InvocationTracker } = await import('../dist/domains/cats/services/agents/invocation/InvocationTracker.js');
-const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
 const { registerWorklist, unregisterWorklist, pushToWorklist, getWorklist } = await import(
   '../dist/domains/cats/services/agents/routing/WorklistRegistry.js'
 );

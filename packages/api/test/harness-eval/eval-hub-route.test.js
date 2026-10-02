@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
-import { InvocationRegistry } from '../../dist/domains/cats/services/agents/invocation/InvocationRegistry.js';
+import { InvocationRegistry } from '../../dist/domains/cats/services/agents/invocation/registry/InvocationRegistry.js';
 import { evalHubRoutes } from '../../dist/routes/eval-hub.js';
 
 /**

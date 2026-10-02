@@ -28,10 +28,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-const { reconcileZombies } = await import('../dist/domains/cats/services/agents/invocation/reconcileZombies.js');
+const { reconcileZombies } = await import(
+  '../dist/domains/cats/services/agents/invocation/reconciliation/reconcileZombies.js'
+);
 const { InvocationRecordStore } = await import('../dist/domains/cats/services/stores/ports/InvocationRecordStore.js');
-const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
-const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/QueueProcessor.js');
+const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/queue/InvocationQueue.js');
+const { QueueProcessor } = await import('../dist/domains/cats/services/agents/invocation/queue/QueueProcessor.js');
 const { emitQueueUpdated } = await import('../dist/utils/queue-enrichment.js');
 
 function makeZombie({ invocationId, catId = 'opus', recordUpdatedAt = Date.now() - 700_000 }) {
