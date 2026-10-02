@@ -1,0 +1,39 @@
+{
+  "verdictId": "2026-10-02-eval-friction-f167-merge-ready-not-landed-fix",
+  "selector": {
+    "kind": "friction-rollup-snapshot",
+    "windowStartMs": 1790650800000,
+    "windowEndMs": 1790910000000,
+    "topN": 10,
+    "tokenCap": 4000
+  },
+  "window": {
+    "sinceMs": 1790650800000,
+    "untilMs": 1790910000000
+  },
+  "signalCount": 0,
+  "clusterCount": 0,
+  "degraded": true,
+  "droppedChannels": [],
+  "report": {
+    "window": {
+      "sinceMs": 1790650800000,
+      "untilMs": 1790910000000
+    },
+    "generatedAt": "2026-10-02T03:04:01.032Z",
+    "topClusters": [],
+    "actionableCandidates": [],
+    "referenceOnly": [],
+    "tailSummary": {
+      "clusterCount": 0,
+      "signalCount": 0,
+      "byChannel": {}
+    },
+    "degraded": true,
+    "droppedChannels": [],
+    "tokenBudget": {
+      "cap": 4000,
+      "estimated": 78
+    }
+  }
+}

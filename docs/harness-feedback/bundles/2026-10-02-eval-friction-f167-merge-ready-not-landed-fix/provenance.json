@@ -1,0 +1,16 @@
+{
+  "verdictId": "2026-10-02-eval-friction-f167-merge-ready-not-landed-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-10-02-eval-friction-f167-merge-ready-not-landed-fix/raw/rollup-report.json",
+      "sha256": "03358cce476ae6cc217ce5ae557cd4968ab79223fdc8e7bab7ccf26e4f7deffa"
+    }
+  ],
+  "generatedAt": "2026-10-02T03:04:01.032Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1",
+  "sourceThreadId": "thread_eval_friction"
+}
