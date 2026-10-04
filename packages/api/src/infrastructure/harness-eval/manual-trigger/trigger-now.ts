@@ -1,6 +1,6 @@
 import { getEvalCatOverride } from '../domain/eval-domain-override.js';
 import type { EvalDomainId } from '../domain/eval-domain-registry.js';
-import { buildEvalCatInvocation } from '../eval-cat-invocation.js';
+import { buildEvalCatInvocation, buildEvalCatSourceRefs, buildEvalCatSourceWindow } from '../eval-cat-invocation.js';
 import { loadDomains } from '../hub/eval-hub-read-model.js';
 import { ensureEvalDomainThreads } from '../hub/eval-hub-thread-ensure.js';
 import type { HandlerError, ManualTriggerDeps } from './types.js';
@@ -93,12 +93,15 @@ export async function handleTriggerNow(
     }
   }
 
+  const invocationNowMs = Date.now();
   const invocation = buildEvalCatInvocation(
     {
       domain: effectiveDomain,
       trendRefs: [],
       verdictRefs: [],
       legacyCleanup: { status: 'not_checked' },
+      sourceRefs: buildEvalCatSourceRefs(effectiveDomain, invocationNowMs),
+      sourceWindow: buildEvalCatSourceWindow(effectiveDomain, invocationNowMs),
     },
     // cloud R5 P2 (PR-2): gate publish instructions on actual runtime support so
     // cats don't waste a run producing a packet they can't publish (501 from
