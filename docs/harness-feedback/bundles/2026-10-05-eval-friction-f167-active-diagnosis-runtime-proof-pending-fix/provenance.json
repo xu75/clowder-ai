@@ -1,0 +1,16 @@
+{
+  "verdictId": "2026-10-05-eval-friction-f167-active-diagnosis-runtime-proof-pending-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-10-05-eval-friction-f167-active-diagnosis-runtime-proof-pending-fix/raw/rollup-report.json",
+      "sha256": "69916b229655c5eca6846f7d5bc12d4bcfbe921681e3d7fe8301d26271629422"
+    }
+  ],
+  "generatedAt": "2026-10-05T03:02:17.912Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1",
+  "sourceThreadId": "thread_eval_friction"
+}
