@@ -1,0 +1,16 @@
+{
+  "verdictId": "2026-10-08-eval-friction-f167-owner-route-quota-block-regressed-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/bundles/2026-10-08-eval-friction-f167-owner-route-quota-block-regressed-fix/raw/rollup-report.json",
+      "sha256": "ee2d849a3ac0bb256b9628d5331b3196f11cc46a50d3e57dbfdabeca615ee990"
+    }
+  ],
+  "generatedAt": "2026-10-08T03:02:16.719Z",
+  "generator": {
+    "name": "eval-friction-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f245-friction-rollup-v1",
+  "sourceThreadId": "thread_eval_friction"
+}
