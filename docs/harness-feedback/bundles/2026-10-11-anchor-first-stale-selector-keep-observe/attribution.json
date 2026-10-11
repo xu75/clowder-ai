@@ -1,0 +1,18 @@
+{
+  "verdictId": "2026-10-11-anchor-first-stale-selector-keep-observe",
+  "featureId": "F236",
+  "evalSnapshotId": "eval-F236-2026-10-11",
+  "generatedAt": "2026-10-11T03:01:37.619Z",
+  "findings": [],
+  "sunsetAssessment": {
+    "toolCount": 0,
+    "toolsWithAnchorTax": 0,
+    "toolsNetNegative": 0,
+    "toolsHighOpenRate": 0,
+    "lowSampleToolCount": 0
+  },
+  "noFindingRecord": {
+    "reason": "no_preview_events",
+    "evidence": "No anchor-first preview events in the rollup window."
+  }
+}
