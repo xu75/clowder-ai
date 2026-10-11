@@ -1,0 +1,11 @@
+{
+  "verdictId": "2026-10-11-eval-friction-f167-owner-route-quota-block-eighth-day-regressed-fix",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-10-11",
+  "generatedAt": "2026-10-11T03:02:08.566Z",
+  "findings": [],
+  "noFindingRecord": {
+    "reason": "no friction cluster surfaced in the selected window",
+    "evidence": "friction-rollup/cluster_count"
+  }
+}
