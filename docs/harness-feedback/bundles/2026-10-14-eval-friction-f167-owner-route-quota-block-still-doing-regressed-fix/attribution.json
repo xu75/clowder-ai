@@ -1,0 +1,11 @@
+{
+  "verdictId": "2026-10-14-eval-friction-f167-owner-route-quota-block-still-doing-regressed-fix",
+  "featureId": "F245",
+  "evalSnapshotId": "eval-F245-2026-10-14",
+  "generatedAt": "2026-10-14T03:02:11.208Z",
+  "findings": [],
+  "noFindingRecord": {
+    "reason": "no friction cluster surfaced in the selected window",
+    "evidence": "friction-rollup/cluster_count"
+  }
+}
