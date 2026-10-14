@@ -1,0 +1,25 @@
+{
+  "verdictId": "2026-10-14-eval-friction-f167-owner-route-quota-block-still-doing-regressed-fix",
+  "evalSnapshotId": "eval-F245-2026-10-14",
+  "featureId": "F245",
+  "generatedAt": "2026-10-14T03:02:11.208Z",
+  "window": {
+    "startMs": 1791687600000,
+    "endMs": 1791946800000,
+    "durationHours": 72
+  },
+  "components": [
+    {
+      "id": "friction-rollup",
+      "name": "friction rollup (Top-N + sensorForm)",
+      "confidence": "low",
+      "activationCounts": {},
+      "frictionCounts": {
+        "cluster_count": 0,
+        "top_cluster_count": 0,
+        "tail_cluster_count": 0,
+        "tail_signal_count": 0
+      }
+    }
+  ]
+}
