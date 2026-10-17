@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { IThreadStore } from '../../../domains/cats/services/stores/ports/ThreadStore.js';
 import type { TaskSpec_P1 } from '../../scheduler/types.js';
-import { buildEvalCatInvocation } from '../eval-cat-invocation.js';
+import { buildEvalCatInvocation, buildEvalCatSourceRefs, buildEvalCatSourceWindow } from '../eval-cat-invocation.js';
 import { ensureEvalDomainThreads } from '../hub/eval-hub-thread-ensure.js';
 import { inventoryLegacyTasks, type LegacyScheduledTaskLike } from '../legacy-task-cleanup.js';
 import { getEvalCatOverride } from './eval-domain-override.js';
@@ -233,12 +233,15 @@ function createEvalDomainSpec(config: EvalDomainSpecConfig): TaskSpec_P1<EvalDom
           }
         }
 
+        const invocationNowMs = Date.now();
         const invocation = buildEvalCatInvocation(
           {
             domain: effectiveDomain,
             trendRefs: [],
             verdictRefs: [],
             legacyCleanup: { status: legacyStatus },
+            sourceRefs: buildEvalCatSourceRefs(effectiveDomain, invocationNowMs),
+            sourceWindow: buildEvalCatSourceWindow(effectiveDomain, invocationNowMs),
           },
           // cloud R6 P2 (PR-2): gate scheduled invocation's publish instructions on
           // actual runtime support so weekly cw scheduled eval doesn't tell cat to

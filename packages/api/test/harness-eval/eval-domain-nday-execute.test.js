@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import { describe, it, mock } from 'node:test';
 import { createEvalDomainNDaySpec } from '../../dist/infrastructure/harness-eval/domain/eval-domain-nday.js';
-import { FIXTURE_FRICTION_3D_YAML, makeRedis, makeTempRoot } from './eval-domain-nday-fixtures.js';
+import { DAY_MS, FIXTURE_FRICTION_3D_YAML, makeRedis, makeTempRoot } from './eval-domain-nday-fixtures.js';
 
 // ---- Execute tests ----
 
@@ -51,6 +51,54 @@ describe('createEvalDomainNDaySpec — execute (Redis last-dispatch update)', ()
       storedMs >= beforeMs && storedMs <= afterMs,
       `stored timestamp ${storedMs} must be within [${beforeMs}, ${afterMs}]`,
     );
+  });
+
+  it('execute includes current friction sourceRefs in the delivered invocation context', async () => {
+    const nowMs = Date.UTC(2026, 6, 25, 3, 0, 5);
+    const dateNow = mock.method(Date, 'now', () => nowMs);
+    try {
+      const root = makeTempRoot(FIXTURE_FRICTION_3D_YAML);
+      const redis = makeRedis();
+      const spec = createEvalDomainNDaySpec({ harnessFeedbackRoot: root, redis });
+
+      const gateResult = await spec.admission.gate();
+      assert.equal(gateResult.run, true, 'gate must run to get domain signal');
+      const item = gateResult.workItems.find((w) => w.subjectKey === 'eval:friction');
+      assert.ok(item, 'eval:friction must be in workItems');
+
+      let deliveredContent = '';
+      const deliverMock = mock.fn(async ({ content }) => {
+        deliveredContent = content;
+        return 'msg_nday_source_refs';
+      });
+      const ctx = {
+        assignedCatId: null,
+        deliver: deliverMock,
+        invokeTrigger: { trigger: mock.fn() },
+      };
+
+      await spec.run.execute(item.signal, item.subjectKey, ctx);
+
+      const contextBlocks = [...deliveredContent.matchAll(/```json\n([\s\S]+?)\n```/g)];
+      assert.ok(contextBlocks.length > 0, 'delivered invocation must include a JSON context block');
+      const context = JSON.parse(contextBlocks.at(-1)[1]);
+
+      assert.deepEqual(context.sourceRefs, {
+        kind: 'friction-rollup-snapshot',
+        windowStartMs: nowMs - 3 * DAY_MS,
+        windowEndMs: nowMs,
+        topN: 10,
+        tokenCap: 4000,
+      });
+      assert.equal(context.sourceRefs.windowStartMs === 1759276800000, false, 'must not reuse the 2025 example');
+      assert.match(
+        deliveredContent,
+        /context\.sourceRefs/,
+        'instructions must tell the eval cat to use the generated context selector',
+      );
+    } finally {
+      dateNow.mock.restore();
+    }
   });
 
   it('execute does NOT update Redis when deliver is not called (no ctx.deliver)', async () => {
