@@ -1,4 +1,5 @@
 import { type EvalDomainRegistryEntry, parseEvalDomainRegistryEntry } from './domain/eval-domain-registry.js';
+import type { VerdictSourceRefs } from './publish-verdict/types.js';
 
 export interface LegacyCleanupStatus {
   status: 'not_checked' | 'dry_run_ready' | 'redirected' | 'disabled';
@@ -10,6 +11,15 @@ export interface EvalCatInvocationInput {
   trendRefs: string[];
   verdictRefs: string[];
   legacyCleanup: LegacyCleanupStatus;
+  sourceRefs?: VerdictSourceRefs;
+  sourceWindow?: EvalCatInvocationSourceWindow;
+}
+
+export interface EvalCatInvocationSourceWindow {
+  windowStartMs: number;
+  windowEndMs: number;
+  durationHours: number;
+  basis: string;
 }
 
 export interface EvalCatInvocationPacket {
@@ -21,6 +31,9 @@ export interface EvalCatInvocationPacket {
     trendRefs: string[];
     verdictRefs: string[];
     sourceAdapter: EvalDomainRegistryEntry['sourceAdapter'];
+    sourceRefsKind: EvalDomainRegistryEntry['sourceRefsKind'];
+    sourceRefs?: VerdictSourceRefs;
+    sourceWindow?: EvalCatInvocationSourceWindow;
     legacyScheduledTaskIds: string[];
     fixtures: EvalDomainRegistryEntry['fixtures'];
     legacyCleanup: LegacyCleanupStatus;
@@ -94,6 +107,9 @@ The MCP tool returns a PR URL. Your job is NOT done at publish — follow throug
 
 ### Thread traceability
 Include your domain thread ID in the verdict PR body (the MCP tool does this automatically via provenance.json). If someone asks "which thread produced this PR", the answer is in \`provenance.json → sourceThreadId\`.
+
+### Scheduled sourceRefs freshness
+If the JSON context block after these instructions includes \`sourceRefs\`, pass that exact object to \`cat_cafe_publish_verdict\`. Treat the selector JSON below as a schema example only; do not copy its example timestamps over \`context.sourceRefs\`. If the context includes \`sourceWindow\` but not \`sourceRefs\`, use \`context.sourceWindow.windowStartMs\` and \`context.sourceWindow.windowEndMs\` when constructing your selector.
 `;
 
 /** a2a-specific sourceRefs section (snapshot/attribution YAML basenames). */
@@ -340,6 +356,80 @@ export interface BuildEvalCatInvocationOpts {
   wiredPublishDomains?: ReadonlySet<EvalDomainRegistryEntry['domainId']>;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+
+function parseNDayFrequencyValue(frequency: string): number | null {
+  const m = /^every-(\d+)d$/.exec(frequency);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function windowMsForDomain(domain: EvalDomainRegistryEntry): { windowMs: number; basis: string } | null {
+  if (domain.domainId === 'eval:anchor-first') {
+    return { windowMs: DAY_MS, basis: 'eval:anchor-first uses the latest 24h telemetry snapshot' };
+  }
+  if (domain.frequency === 'daily') return { windowMs: DAY_MS, basis: 'daily eval frequency' };
+  if (domain.frequency === 'weekly') return { windowMs: 7 * DAY_MS, basis: 'weekly eval frequency' };
+  const nDays = parseNDayFrequencyValue(domain.frequency);
+  if (nDays !== null) return { windowMs: nDays * DAY_MS, basis: domain.frequency };
+  return null;
+}
+
+export function buildEvalCatSourceWindow(
+  domainInput: EvalDomainRegistryEntry,
+  nowMs = Date.now(),
+): EvalCatInvocationSourceWindow | undefined {
+  const domain = parseEvalDomainRegistryEntry(domainInput);
+  const windowSpec = windowMsForDomain(domain);
+  if (!windowSpec) return undefined;
+  return {
+    windowStartMs: nowMs - windowSpec.windowMs,
+    windowEndMs: nowMs,
+    durationHours: Math.round((windowSpec.windowMs / HOUR_MS) * 1000) / 1000,
+    basis: windowSpec.basis,
+  };
+}
+
+export function buildEvalCatSourceRefs(
+  domainInput: EvalDomainRegistryEntry,
+  nowMs = Date.now(),
+): VerdictSourceRefs | undefined {
+  const domain = parseEvalDomainRegistryEntry(domainInput);
+  const sourceWindow = buildEvalCatSourceWindow(domain, nowMs);
+  if (!sourceWindow) return undefined;
+
+  switch (domain.sourceRefsKind) {
+    case 'friction-rollup-snapshot':
+      return {
+        kind: 'friction-rollup-snapshot',
+        windowStartMs: sourceWindow.windowStartMs,
+        windowEndMs: sourceWindow.windowEndMs,
+        topN: 10,
+        tokenCap: 4000,
+      };
+    case 'anchor-telemetry-snapshot':
+      return {
+        kind: 'anchor-telemetry-snapshot',
+        windowStartMs: sourceWindow.windowStartMs,
+        windowEndMs: sourceWindow.windowEndMs,
+      };
+    case 'qc-metrics-rollup':
+      return {
+        kind: 'qc-metrics-rollup',
+        windowStartMs: sourceWindow.windowStartMs,
+        windowEndMs: sourceWindow.windowEndMs,
+      };
+    case 'task-outcome-snapshot':
+      return {
+        kind: 'task-outcome-snapshot',
+        windowStartMs: sourceWindow.windowStartMs,
+        windowEndMs: sourceWindow.windowEndMs,
+      };
+    default:
+      return undefined;
+  }
+}
+
 export function buildEvalCatInvocation(
   input: EvalCatInvocationInput,
   opts: BuildEvalCatInvocationOpts = {},
@@ -354,6 +444,9 @@ export function buildEvalCatInvocation(
       trendRefs: input.trendRefs,
       verdictRefs: input.verdictRefs,
       sourceAdapter: domain.sourceAdapter,
+      sourceRefsKind: domain.sourceRefsKind,
+      ...(input.sourceRefs ? { sourceRefs: input.sourceRefs } : {}),
+      ...(input.sourceWindow ? { sourceWindow: input.sourceWindow } : {}),
       legacyScheduledTaskIds: domain.legacyScheduledTaskIds,
       fixtures: domain.fixtures,
       legacyCleanup: input.legacyCleanup,

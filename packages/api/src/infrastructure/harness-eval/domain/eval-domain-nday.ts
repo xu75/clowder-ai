@@ -12,7 +12,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { TaskSpec_P1 } from '../../scheduler/types.js';
-import { buildEvalCatInvocation } from '../eval-cat-invocation.js';
+import { buildEvalCatInvocation, buildEvalCatSourceRefs, buildEvalCatSourceWindow } from '../eval-cat-invocation.js';
 import { ensureEvalDomainThreads } from '../hub/eval-hub-thread-ensure.js';
 import { inventoryLegacyTasks } from '../legacy-task-cleanup.js';
 import {
@@ -186,8 +186,16 @@ export function createEvalDomainNDaySpec(opts: EvalDomainScheduleOpts): TaskSpec
         const enabledLegacy = inventoryLegacyTasks(domain, activeTasks).filter((t) => t.enabled);
         const legacyStatus = enabledLegacy.length > 0 ? 'dry_run_ready' : 'disabled';
 
+        const invocationNowMs = Date.now();
         const invocation = buildEvalCatInvocation(
-          { domain: effectiveDomain, trendRefs: [], verdictRefs: [], legacyCleanup: { status: legacyStatus } },
+          {
+            domain: effectiveDomain,
+            trendRefs: [],
+            verdictRefs: [],
+            legacyCleanup: { status: legacyStatus },
+            sourceRefs: buildEvalCatSourceRefs(effectiveDomain, invocationNowMs),
+            sourceWindow: buildEvalCatSourceWindow(effectiveDomain, invocationNowMs),
+          },
           { wiredPublishDomains: opts.wiredPublishDomains },
         );
 
