@@ -1,0 +1,19 @@
+{
+  "verdictId": "2026-09-06-eval-a2a-thirty-fifth-checkpoint-missed-fix",
+  "rawInputs": [
+    {
+      "path": "docs/harness-feedback/snapshots/2026-09-06T03-01-04-233Z-F167-eval.yaml",
+      "sha256": "73fcad5699d83b788b68da94441497f83ef5dc3bcb88acd32daa54c999ece031"
+    },
+    {
+      "path": "docs/harness-feedback/attributions/2026-09-06T03-01-04-233Z-F167-attribution.yaml",
+      "sha256": "bac0e938d115ae499d0f0a0270fbd5d2efd47ae9568e90c769a9022e00593fe9"
+    }
+  ],
+  "generatedAt": "2026-09-06T03:01:04.233Z",
+  "generator": {
+    "name": "eval-a2a-live-verdict",
+    "version": "1"
+  },
+  "sanitizeRulesVersion": "f192-e-pilot-v1"
+}
